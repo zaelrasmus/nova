@@ -15,7 +15,7 @@
 
 <main class="container">
     <Button class="text-blue-500">Hello World</Button>
-    <skeleton>aaa</skeleton>
+    <skeleton>saasssa</skeleton>
 </main>
 
 <style>
