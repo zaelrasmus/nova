@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use sqlx::{sqlite::SqliteConnectOptions, ConnectOptions, SqlitePool};
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
@@ -29,13 +30,32 @@ pub async fn create_library<R: Runtime>(
         .await
         .map_err(|e| format!("create assets dir failed: {e}"))?;
 
-    app.fs_scope()
-        .allow_directory(&root, true)
-        .map_err(|e| format!("scope allow failed: {e}"))?;
-
     let db_path = root.join("library.db");
 
     // TODO: Connect to the database and create
+    let db_url = format!("sqlite:{}", db_path.to_string_lossy());
+    println!("db_url: {}", db_url);
+    println!("db_path: {:?}", &db_path);
+
+    let options = SqliteConnectOptions::new()
+        .filename(&db_path)
+        .create_if_missing(true)
+        .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+        .synchronous(sqlx::sqlite::SqliteSynchronous::Normal);
+
+    let pool = SqlitePool::connect_with(options)
+        .await
+        .map_err(|e| format!("cannot open pool DB: {e}"))?;
+    sqlx::migrate!()
+        .run(&pool)
+        .await
+        .map_err(|e| format!("migration failed: {e}"))?;
+
+    pool.close().await;
+
+    app.fs_scope()
+        .allow_directory(&root, true)
+        .map_err(|e| format!("scope allow failed: {e}"))?;
 
     Ok(LibraryInfo {
         db_path,
