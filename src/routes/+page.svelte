@@ -5,6 +5,11 @@
     let name = $state("");
     let greetMsg = $state("");
 
+    interface LibraryInfo {
+        db_path: string;
+        root_path: string;
+    }
+
     async function greet(event: Event) {
         event.preventDefault();
         // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
@@ -18,15 +23,13 @@
         const name = prompt("Library name:");
         if (!name) return;
 
-        const dir = await open({ directory: true, multiple: false });
-        if (!dir) return;
+        const location = await open({ directory: true, multiple: false });
+        if (!location) return;
 
-        const path = `${dir}\\${name}.library`;
-
-        console.log("path:", path);
+        console.log("path:", location);
 
         try {
-            const dbPath = await invoke<string>("create_library", { libraryPath: path });
+            const dbPath = await invoke<LibraryInfo>("create_library", { location, name });
 
             // Todo: initialize database for the library here
         } catch (e) {
