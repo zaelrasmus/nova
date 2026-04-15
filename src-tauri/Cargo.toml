@@ -27,3 +27,8 @@ tauri-plugin-fs = "2"
 tauri-plugin-dialog = "2"
 sqlx = { version = "0.8.6", features = ["runtime-tokio", "sqlite", "migrate"] }
 anyhow = "1.0.102"
+walkdir = "2.5.0"
+uuid = { version = "1.23.0", features = ["v4"] }
+rayon = "1.11.0"
+chrono = "0.4.44"
+image = "0.25.10"
