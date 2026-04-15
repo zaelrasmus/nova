@@ -11,7 +11,9 @@ use tauri_plugin_fs::FsExt;
 use chrono::{DateTime, Utc};
 use rayon::prelude::*;
 
+use sqlx::{decode::Decode, encode::Encode, sqlite::Sqlite, FromRow, Type};
 use std::sync::Arc;
+use tokio::sync::Mutex;
 use tokio::sync::Semaphore;
 use uuid::Uuid;
 use walkdir::WalkDir;
@@ -22,7 +24,12 @@ pub struct LibraryInfo {
     root_path: PathBuf,
 }
 
-#[derive(serde::Serialize, Deserialize, Clone, Copy, Debug)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Type)]
+#[sqlx(transparent)] // Esto permite que se trate como el tipo subyacente (Texto)
+pub struct AssetTypeWrapper(pub AssetType);
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Type)]
+#[sqlx(rename_all = "lowercase")]
 pub enum AssetType {
     Image,
     Audio,
@@ -30,17 +37,19 @@ pub enum AssetType {
     Unknown,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, FromRow)]
 pub struct AssetMetadata {
     pub id: String,
     pub asset_type: AssetType,
     pub filename: String,
-    pub dest_path: String,  
-    pub source_path: String, 
-    pub width: Option<u32>,
-    pub height: Option<u32>,
-    pub duration: Option<f64>,
+
+    pub dest_path: String,
+    pub source_path: String,
+
+    // Si tu tabla tiene 'created_at', cámbialo aquí para que coincida con el SELECT
+    #[sqlx(rename = "creation_date")]
     pub creation_date: String,
+    #[sqlx(rename = "modified_date")]
     pub modified_date: String,
 }
 
@@ -51,14 +60,125 @@ pub struct Folder {
     pub parent_id: Option<String>,
     pub order_by: String,
     pub is_ascending: String,
-    pub original_path: String, 
+    pub original_path: String,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct ImportResult {
     pub folders: Vec<Folder>,
     pub assets: Vec<AssetMetadata>,
-    pub path_links: HashMap<String, String>, 
+    pub path_links: HashMap<String, String>,
+}
+
+pub struct DbState {
+    pub pool: Arc<Mutex<Option<SqlitePool>>>,
+}
+
+impl DbState {
+    pub fn new() -> Self {
+        Self {
+            pool: Arc::new(Mutex::new(None)),
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn connect_library(
+    library_path: String,
+    state: tauri::State<'_, DbState>,
+) -> Result<String, String> {
+    let base_path = std::path::PathBuf::from(&library_path);
+
+    let path = std::path::PathBuf::from(&library_path).join("library.db");
+
+    // let db_path = if base_path.is_file() {
+    //     base_path // Si el usuario eligió el archivo .db directamente
+    // } else {
+    //     base_path.join("library.db") // Si eligió la carpeta
+    // };
+
+    println!("Intentando abrir base de datos en: {:?}", path);
+
+    if !path.exists() {
+        return Err(format!("El archivo no existe en la ruta: {:?}", path));
+    }
+
+    let options = SqliteConnectOptions::new()
+        .filename(&path)
+        .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+        .synchronous(sqlx::sqlite::SqliteSynchronous::Normal);
+
+    let pool = SqlitePool::connect_with(options)
+        .await
+        .map_err(|e| format!("Error real de SQLite: {}", e))?;
+
+    let mut current_pool = state.pool.lock().await;
+
+    // If a pool is already connected, disconnect it first
+    if let Some(old_pool) = current_pool.take() {
+        old_pool.close().await;
+    }
+
+    *current_pool = Some(pool);
+
+    Ok("Connection established successfully".to_string())
+}
+
+#[tauri::command]
+pub async fn inject_test_asset(
+    name: String,
+    state: tauri::State<'_, DbState>,
+) -> Result<String, String> {
+    let pool_lock = state.pool.lock().await;
+    let pool = pool_lock.as_ref().ok_or("No hay librería conectada")?;
+
+    let id = Uuid::new_v4().to_string();
+    let now = Utc::now().to_rfc3339();
+
+    sqlx::query(
+        "INSERT INTO assets (id, asset_type, filename, extension, path, imported_date, creation_date, modified_date)
+         VALUES (?, ?, ?, ?, ?, ?,?,? )",
+    )
+    .bind(&id)
+    .bind("image")
+    .bind(&name)
+    .bind(format!("assets/{}", name))
+    .bind("png")
+    .bind(&now)
+    .bind(&now)
+    .bind(&now)
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(format!("Inyectado con éxito: {}", name))
+}
+
+#[tauri::command]
+pub async fn fetch_assets(state: tauri::State<'_, DbState>) -> Result<Vec<AssetMetadata>, String> {
+    let pool_lock = state.pool.lock().await;
+    let pool = pool_lock.as_ref().ok_or("No hay librería conectada")?;
+
+    // Asegúrate de que los alias coincidan EXACTAMENTE con los nombres de los campos o los #[sqlx(rename)]
+    let assets = sqlx::query_as::<_, AssetMetadata>(
+        r#"
+        SELECT
+            id,
+            asset_type,
+            filename,
+            path AS dest_path,
+            path AS source_path,
+            extension AS ext,
+            creation_date AS creation_date,
+            modified_date AS modified_date
+        FROM assets
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|e| format!("Error en Fetch: {}", e))?;
+
+    Ok(assets)
 }
 
 const IMG_EXTS: &[&str] = &["bmp", "gif", "jfif", "jpeg", "jpg", "png", "webp"];
@@ -241,9 +361,6 @@ async fn perform_import_assets(source_dir: PathBuf, library_root: PathBuf) -> Re
                 filename: src.file_name()?.to_string_lossy().into_owned(),
                 dest_path: dest_path.to_string_lossy().into_owned(),
                 source_path: src.to_string_lossy().into_owned(),
-                width,
-                height,
-                duration: None,
                 creation_date: created.to_rfc3339(),
                 modified_date: modified.to_rfc3339(),
             })

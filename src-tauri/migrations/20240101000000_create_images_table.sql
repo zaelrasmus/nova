@@ -3,7 +3,7 @@ CREATE TABLE IF NOT EXISTS folders (
    name TEXT NOT NULL,
    folder_parent_id TEXT,
    description TEXT,
-   order_by TEXT DEFAULT 'imported_date', -- 'name', 'date', 'size'
+   order_by TEXT DEFAULT 'imported_date',
    is_ascending INTEGER DEFAULT 1, -- 0 = false, 1 = true
 
 
@@ -21,15 +21,16 @@ CREATE TABLE IF NOT EXISTS assets (
     imported_date TEXT NOT NULL,
     modified_date TEXT NOT NULL,
     creation_date TEXT NOT NULL
-)
+);
 
-CREATE TABLE IF NOT EXISTS folder_assets (
+CREATE TABLE IF NOT EXISTS assets_folders (
     folder_id TEXT NOT NULL,
     asset_id TEXT NOT NULL,
+    added_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
 
     PRIMARY KEY (folder_id, asset_id),
     FOREIGN KEY (folder_id) REFERENCES folders(id) ON DELETE CASCADE,
     FOREIGN KEY (asset_id) REFERENCES assets(id) ON DELETE CASCADE
 );
 
-CREATE INDEX idx_folder_contents ON asset_folders(folder_id, added_at);
+CREATE INDEX IF NOT EXISTS idx_folder_contents ON assets_folders(folder_id, added_at);

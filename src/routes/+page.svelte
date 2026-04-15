@@ -93,6 +93,61 @@
             console.error("Error importing:", error);
         }
     }
+
+    async function handleConnect() {
+        try {
+            const selected = await open({
+                directory: true,
+                multiple: false,
+                title: "Select library folder",
+            });
+
+            if (!selected) return;
+
+            console.log("selected:", selected);
+
+            const response = await invoke<string>("connect_library", {
+                libraryPath: selected,
+            });
+
+            console.log(
+                "[Se supone que ha sido conectado exitosamente a esta base de datos] response:",
+                response,
+            );
+        } catch (e) {
+            console.error(e);
+        }
+    }
+
+    let testName = $state("Mi imagen de Prueba");
+    let logOutput = $state("");
+
+    async function runInjection() {
+        // Usamos el prompt nativo del navegador
+        const assetName = window.prompt("Introduce el nombre del asset para inyectar:");
+
+        if (!assetName) return; // Si cancela o está vacío
+
+        try {
+            const response = await invoke<string>("inject_test_asset", { name: assetName });
+            alert(response);
+        } catch (error) {
+            alert(`Error de inyección: ${error}`);
+            console.log(error);
+        }
+    }
+
+    async function runFetch() {
+        try {
+            const assets = await invoke<any[]>("fetch_assets");
+            console.log("--- CONTENIDO DE LA LIBRERÍA ACTUAL ---");
+            console.table(assets);
+            alert(`Se encontraron ${assets.length} assets. Revisa la consola (F12).`);
+        } catch (error) {
+            alert(`Error al obtener assets: ${error}`);
+            console.log(error);
+        }
+    }
 </script>
 
 <main class="container">
@@ -102,6 +157,11 @@
     <Button onclick={createLibrary}>Create a new library</Button>
 
     <Button onclick={handleImport}>Add Assets</Button>
+
+    <Button onclick={handleConnect}>Connect to library</Button>
+
+    <Button onclick={runInjection}>Inject test Asset in current library</Button>
+    <Button onclick={runFetch}>Run fetch for library</Button>
 </main>
 
 <style>
