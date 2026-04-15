@@ -379,7 +379,6 @@ async fn perform_import_assets(source_dir: PathBuf, library_root: PathBuf) -> Re
 
         let src = PathBuf::from(&task.source_path);
         let dst = PathBuf::from(&task.dest_path);
-
         handles.push(tokio::spawn(async move {
             let _permit = permit;
             tokio::fs::copy(&src, &dst).await
