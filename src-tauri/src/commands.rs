@@ -369,15 +369,15 @@ async fn perform_import_assets(source_dir: PathBuf, pool: SqlitePool) -> Result<
             let ext = src.extension()?.to_str()?;
             let id = Uuid::new_v4().to_string();
 
-            let dest_path = format!("assets/{}.{}", id, ext);
             let full_dest_path = assets_dir.join(format!("{}.{}", id, ext));
+            let dest_path_string = full_dest_path.to_string_lossy().into_owned();
 
             Some(AssetMetadata {
                 id,
                 asset_type,
                 filename: src.file_name()?.to_string_lossy().into_owned(),
                 extension: ext.to_string(),
-                dest_path,
+                dest_path: dest_path_string,
                 source_path: src.to_string_lossy().into_owned(),
                 imported_date: created.to_rfc3339(),
                 creation_date: created.to_rfc3339(),
@@ -397,7 +397,7 @@ async fn perform_import_assets(source_dir: PathBuf, pool: SqlitePool) -> Result<
             .context("Error adquiring semaphore")?;
 
         let src = PathBuf::from(&task.source_path);
-        let dst = library_root.join(&task.dest_path);
+        let dst = PathBuf::from(&task.dest_path);
         handles.push(tokio::spawn(async move {
             let _permit = permit;
             tokio::fs::copy(&src, &dst).await
