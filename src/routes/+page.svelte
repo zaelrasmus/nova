@@ -79,7 +79,18 @@
 
         if (!selectedSource) return;
 
+        // Reset de estados
+        current = 0;
+        total = 0;
+        smoothPercentage.set(0);
         isImporting = true;
+
+        const unlisten = await listen("import-progress", (event: any) => {
+            const payload = event.payload;
+            current = payload.current;
+            total = payload.total;
+            smoothPercentage.set(payload.percentage);
+        });
 
         try {
             console.log("Init import...");
@@ -97,6 +108,7 @@
             alert("Error crítico: " + error);
         } finally {
             isImporting = false;
+            unlisten();
         }
     }
 
@@ -165,6 +177,23 @@
             },
         },
     });
+
+    import { listen } from "@tauri-apps/api/event";
+    import { cubicOut } from "svelte/easing";
+    import { tweened } from "svelte/motion";
+
+    // Estado reactivo con Runes
+    let current = $state(0);
+    let total = $state(0);
+
+    // Para que el slider/barra se mueva suavemente
+    const smoothPercentage = tweened(0, {
+        duration: 400,
+        easing: cubicOut,
+    });
+
+    // Derivamos el texto del porcentaje
+    let displayPercent = $derived(Math.round($smoothPercentage));
 </script>
 
 <QueryClientProvider client={queryClient}>
@@ -231,6 +260,30 @@
                 </button>
             </div>
         </div>
+        {#if isImporting}
+            <div class="space-y-2">
+                <div class="flex justify-between text-sm">
+                    <span>Procesando: {current} / {total}</span>
+                    <span>{displayPercent}%</span>
+                </div>
+
+                <div class="w-full h-4 bg-gray-700 rounded-full overflow-hidden">
+                    <div
+                        class="h-full bg-blue-500 transition-none"
+                        style="width: {$smoothPercentage}%"
+                    ></div>
+                </div>
+
+                <input
+                    type="range"
+                    min="0"
+                    max="100"
+                    value={$smoothPercentage}
+                    class="w-full accent-blue-500"
+                    disabled
+                />
+            </div>
+        {/if}
         <div class="mt-8">
             <AssetGrid />
         </div>

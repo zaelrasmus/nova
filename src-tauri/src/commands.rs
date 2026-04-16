@@ -1,10 +1,13 @@
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use sqlx::{sqlite::SqliteConnectOptions, ConnectOptions, SqlitePool};
+
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
 };
+use tauri::Emitter;
 use tauri::{AppHandle, Runtime};
 use tauri_plugin_fs::FsExt;
 
@@ -22,6 +25,13 @@ use walkdir::WalkDir;
 pub struct LibraryInfo {
     db_path: PathBuf,
     root_path: PathBuf,
+}
+
+#[derive(Clone, Serialize)]
+struct ImportProgress {
+    current: usize,
+    total: usize,
+    percentage: f64,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Type)]
@@ -277,6 +287,7 @@ async fn perform_create_library(location: &str, name: &str) -> Result<PathBuf> {
 
 #[tauri::command]
 pub async fn import_assets(
+    window: tauri::Window,
     source_path: String,
     state: tauri::State<'_, DbState>,
 ) -> Result<ImportResult, String> {
@@ -286,12 +297,16 @@ pub async fn import_assets(
     let pool_lock = state.pool.lock().await;
     let pool = pool_lock.as_ref().ok_or("Not active library connected")?;
 
-    perform_import_assets(src, pool.clone())
+    perform_import_assets(window, src, pool.clone())
         .await
         .map_err(|e| format!("{:?}", e))
 }
 
-async fn perform_import_assets(source_dir: PathBuf, pool: SqlitePool) -> Result<ImportResult> {
+async fn perform_import_assets(
+    window: tauri::Window,
+    source_dir: PathBuf,
+    pool: SqlitePool,
+) -> Result<ImportResult> {
     // Database
     let db_info: (i32, String, String) = sqlx::query_as("PRAGMA database_list")
         .fetch_one(&pool)
@@ -390,6 +405,12 @@ async fn perform_import_assets(source_dir: PathBuf, pool: SqlitePool) -> Result<
     let semaphore = Arc::new(Semaphore::new(10));
     let mut handles = Vec::with_capacity(asset_tasks.len());
 
+    let total_assets = asset_tasks.len();
+    let completed_count = Arc::new(AtomicUsize::new(0));
+
+    let last_emit = Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
+    let emit_interval = std::time::Duration::from_millis(100);
+
     for task in &asset_tasks {
         let permit = Arc::clone(&semaphore)
             .acquire_owned()
@@ -398,15 +419,50 @@ async fn perform_import_assets(source_dir: PathBuf, pool: SqlitePool) -> Result<
 
         let src = PathBuf::from(&task.source_path);
         let dst = PathBuf::from(&task.dest_path);
+
+        let window_clone = window.clone();
+        let counter = Arc::clone(&completed_count);
+        let last_emit_clone = Arc::clone(&last_emit);
+
         handles.push(tokio::spawn(async move {
             let _permit = permit;
-            tokio::fs::copy(&src, &dst).await
+            let _ = tokio::fs::copy(&src, &dst).await;
+
+            let current = counter.fetch_add(1, Ordering::SeqCst) + 1;
+
+            if let Ok(mut last_time) = last_emit_clone.lock() {
+                if last_time.elapsed() >= emit_interval || current == total_assets {
+                    let percentage = (current as f64 / total_assets as f64) * 100.0;
+
+                    let _ = window_clone.emit(
+                        "import-progress",
+                        ImportProgress {
+                            current,
+                            total: total_assets,
+                            percentage,
+                        },
+                    );
+                    *last_time = std::time::Instant::now();
+                }
+            }
+
+            // let current = counter.fetch_add(1, Ordering::SeqCst) + 1;
+            // let percentage = (current as f64 / total_assets as f64) * 100.0;
+
+            // let _ = window_clone.emit(
+            //     "import-progress",
+            //     ImportProgress {
+            //         current,
+            //         total: total_assets,
+            //         percentage,
+            //     },
+            // );
         }));
     }
 
     // Wait for all copies to finish
     for handle in handles {
-        handle.await.context("error copying file")??;
+        handle.await.context("error copying file")?;
     }
 
     // 5. Insert into database
