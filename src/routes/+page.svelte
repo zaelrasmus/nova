@@ -87,6 +87,7 @@
                 sourcePath: selectedSource,
             });
 
+            await queryClient.invalidateQueries({ queryKey: ["assets"] });
             console.log("Importation successful:", result);
             alert(
                 `impoted ${result.assets.length} assets y ${result.folders.length} folders.`,
@@ -153,72 +154,88 @@
             console.log(error);
         }
     }
+
+    import { QueryClient, QueryClientProvider } from "@tanstack/svelte-query";
+    import AssetGrid from "$components/AssetGrid.svelte";
+
+    const queryClient = new QueryClient({
+        defaultOptions: {
+            queries: {
+                refetchOnWindowFocus: false,
+            },
+        },
+    });
 </script>
 
-<main class="container">
-    <Button class="text-blue-500">Hello World</Button>
-    <skeleton>saasssa</skeleton>
+<QueryClientProvider client={queryClient}>
+    <main class="container">
+        <Button class="text-blue-500">Hello World</Button>
+        <skeleton>saasssa</skeleton>
 
-    <Button onclick={createLibrary}>Create a new library</Button>
+        <Button onclick={createLibrary}>Create a new library</Button>
 
-    <Button onclick={handleImport} disabled={isImporting}>
-        {isImporting ? "🚀 Importing..." : "📥 Import Assets"}
-    </Button>
+        <Button onclick={handleImport} disabled={isImporting}>
+            {isImporting ? "🚀 Importing..." : "📥 Import Assets"}
+        </Button>
 
-    <Button onclick={handleConnect}>Connect to library</Button>
+        <Button onclick={handleConnect}>Connect to library</Button>
 
-    <Button onclick={runInjection}>Inject test Asset in current library</Button>
-    <Button onclick={runFetch}>Run fetch for library</Button>
+        <Button onclick={runInjection}>Inject test Asset in current library</Button>
+        <Button onclick={runFetch}>Run fetch for library</Button>
 
-    <div class="library-panel p-6 bg-gray-900 text-white rounded-xl shadow-2xl w-96">
-        <h2 class="text-xl font-bold mb-4">Librerías</h2>
+        <div class="library-panel p-6 bg-gray-900 text-white rounded-xl shadow-2xl w-96">
+            <h2 class="text-xl font-bold mb-4">Librerías</h2>
 
-        <div class="mb-6 p-3 bg-gray-800 rounded-lg border border-blue-500">
-            <p class="text-xs text-blue-400 font-bold uppercase">Activa</p>
-            <p class="truncate text-sm">
-                {libraryManager.state.activeLibrary ?? "Ninguna seleccionada"}
-            </p>
-        </div>
+            <div class="mb-6 p-3 bg-gray-800 rounded-lg border border-blue-500">
+                <p class="text-xs text-blue-400 font-bold uppercase">Activa</p>
+                <p class="truncate text-sm">
+                    {libraryManager.state.activeLibrary ?? "Ninguna seleccionada"}
+                </p>
+            </div>
 
-        <div class="space-y-2 mb-6">
-            <p class="text-xs text-gray-500 font-bold uppercase">Recientes</p>
-            {#each libraryManager.state.history as path}
-                <div
-                    class="group flex items-center justify-between bg-gray-800 p-2 rounded hover:bg-gray-700 transition-colors"
+            <div class="space-y-2 mb-6">
+                <p class="text-xs text-gray-500 font-bold uppercase">Recientes</p>
+                {#each libraryManager.state.history as path}
+                    <div
+                        class="group flex items-center justify-between bg-gray-800 p-2 rounded hover:bg-gray-700 transition-colors"
+                    >
+                        <button
+                            onclick={() => libraryManager.switchLibrary(path)}
+                            class="flex-1 text-left text-sm truncate mr-2"
+                        >
+                            {path.split("/").pop() || path}
+                        </button>
+
+                        <button
+                            onclick={() => libraryManager.removeFromHistory(path)}
+                            class="opacity-0 group-hover:opacity-100 text-red-400 hover:text-red-300 text-xs px-2"
+                        >
+                            Remover
+                        </button>
+                    </div>
+                {/each}
+            </div>
+
+            <div class="flex flex-col gap-2">
+                <button
+                    onclick={createLibrary}
+                    class="w-full py-2 bg-blue-600 hover:bg-blue-500 rounded font-bold transition-all"
                 >
-                    <button
-                        onclick={() => libraryManager.switchLibrary(path)}
-                        class="flex-1 text-left text-sm truncate mr-2"
-                    >
-                        {path.split("/").pop() || path}
-                    </button>
-
-                    <button
-                        onclick={() => libraryManager.removeFromHistory(path)}
-                        class="opacity-0 group-hover:opacity-100 text-red-400 hover:text-red-300 text-xs px-2"
-                    >
-                        Remover
-                    </button>
-                </div>
-            {/each}
+                    ✨ Crear Nueva Librería
+                </button>
+                <button
+                    onclick={addExistingLibrary}
+                    class="w-full py-2 bg-gray-700 hover:bg-gray-600 rounded font-bold transition-all"
+                >
+                    📂 Abrir Existente
+                </button>
+            </div>
         </div>
-
-        <div class="flex flex-col gap-2">
-            <button
-                onclick={createLibrary}
-                class="w-full py-2 bg-blue-600 hover:bg-blue-500 rounded font-bold transition-all"
-            >
-                ✨ Crear Nueva Librería
-            </button>
-            <button
-                onclick={addExistingLibrary}
-                class="w-full py-2 bg-gray-700 hover:bg-gray-600 rounded font-bold transition-all"
-            >
-                📂 Abrir Existente
-            </button>
+        <div class="mt-8">
+            <AssetGrid />
         </div>
-    </div>
-</main>
+    </main>
+</QueryClientProvider>
 
 <style>
 </style>
