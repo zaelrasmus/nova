@@ -44,9 +44,6 @@ class LibraryManager {
 
       await this.save();
     } catch (e: unknown) {
-      // 'e' es unknown explícitamente
-      // Estrechamos el tipo
-
       const errorMessage = e instanceof Error ? e.message : String(e);
 
       if (errorMessage.toString().includes("no such file")) {
@@ -58,17 +55,13 @@ class LibraryManager {
     }
   }
   async removeFromHistory(path: string) {
-    // 1. Generar el nuevo historial filtrado
     const updatedHistory = this.state.history.filter((p) => p !== path);
     const wasActive = this.state.activeLibrary === path;
 
-    // 2. Actualizar el historial en el estado
     this.state.history = updatedHistory;
 
-    // 3. Lógica de fallback si eliminamos la activa
     if (wasActive) {
       if (updatedHistory.length > 0) {
-        // Intentar conectar a la más reciente que queda
         const nextLibrary = updatedHistory[0];
         try {
           await this.switchLibrary(nextLibrary);
@@ -78,14 +71,11 @@ class LibraryManager {
           this.state.activeLibrary = null;
         }
       } else {
-        // No quedan librerías en el historial
         this.state.activeLibrary = null;
-        // Opcional: Podrías emitir un comando a Rust para cerrar el pool actual
         // await invoke("close_current_connection");
       }
     }
 
-    // 4. Persistir cambios
     await this.save();
   }
 }

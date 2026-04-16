@@ -43,10 +43,16 @@ pub struct AssetMetadata {
     pub asset_type: AssetType,
     pub filename: String,
 
+    pub extension: String,
+
+    #[sqlx(rename = "path")]
     pub dest_path: String,
+
+    #[serde(skip)]
+    #[sqlx(skip)]
     pub source_path: String,
 
-    // Si tu tabla tiene 'created_at', cámbialo aquí para que coincida con el SELECT
+    pub imported_date: String,
     #[sqlx(rename = "creation_date")]
     pub creation_date: String,
     #[sqlx(rename = "modified_date")]
@@ -157,20 +163,19 @@ pub async fn inject_test_asset(
 #[tauri::command]
 pub async fn fetch_assets(state: tauri::State<'_, DbState>) -> Result<Vec<AssetMetadata>, String> {
     let pool_lock = state.pool.lock().await;
-    let pool = pool_lock.as_ref().ok_or("No hay librería conectada")?;
+    let pool = pool_lock.as_ref().ok_or("Not library connected")?;
 
-    // Asegúrate de que los alias coincidan EXACTAMENTE con los nombres de los campos o los #[sqlx(rename)]
     let assets = sqlx::query_as::<_, AssetMetadata>(
         r#"
         SELECT
             id,
             asset_type,
             filename,
-            path AS dest_path,
-            path AS source_path,
-            extension AS ext,
-            creation_date AS creation_date,
-            modified_date AS modified_date
+            extension,
+            path,
+            imported_date,
+            creation_date,
+            modified_date
         FROM assets
         "#,
     )
@@ -273,17 +278,27 @@ async fn perform_create_library(location: &str, name: &str) -> Result<PathBuf> {
 #[tauri::command]
 pub async fn import_assets(
     source_path: String,
-    library_path: String,
+    state: tauri::State<'_, DbState>,
 ) -> Result<ImportResult, String> {
     let src = PathBuf::from(source_path);
-    let lib = PathBuf::from(library_path);
+    // let lib = PathBuf::from(library_path);
 
-    perform_import_assets(src, lib)
+    let pool_lock = state.pool.lock().await;
+    let pool = pool_lock.as_ref().ok_or("Not active library connected")?;
+
+    perform_import_assets(src, pool.clone())
         .await
         .map_err(|e| format!("{:?}", e))
 }
 
-async fn perform_import_assets(source_dir: PathBuf, library_root: PathBuf) -> Result<ImportResult> {
+async fn perform_import_assets(source_dir: PathBuf, pool: SqlitePool) -> Result<ImportResult> {
+    // Database
+    let db_info: (i32, String, String) = sqlx::query_as("PRAGMA database_list")
+        .fetch_one(&pool)
+        .await
+        .context("Failed to get database path")?;
+    let library_root = PathBuf::from(db_info.2).parent().unwrap().to_path_buf();
+
     let assets_dir = library_root.join("assets");
 
     // Guarantee that the assets folder exists before proceeding
@@ -353,14 +368,18 @@ async fn perform_import_assets(source_dir: PathBuf, library_root: PathBuf) -> Re
 
             let ext = src.extension()?.to_str()?;
             let id = Uuid::new_v4().to_string();
-            let dest_path = assets_dir.join(format!("{}.{}", id, ext));
+
+            let dest_path = format!("assets/{}.{}", id, ext);
+            let full_dest_path = assets_dir.join(format!("{}.{}", id, ext));
 
             Some(AssetMetadata {
                 id,
                 asset_type,
                 filename: src.file_name()?.to_string_lossy().into_owned(),
-                dest_path: dest_path.to_string_lossy().into_owned(),
+                extension: ext.to_string(),
+                dest_path,
                 source_path: src.to_string_lossy().into_owned(),
+                imported_date: created.to_rfc3339(),
                 creation_date: created.to_rfc3339(),
                 modified_date: modified.to_rfc3339(),
             })
@@ -378,7 +397,7 @@ async fn perform_import_assets(source_dir: PathBuf, library_root: PathBuf) -> Re
             .context("Error adquiring semaphore")?;
 
         let src = PathBuf::from(&task.source_path);
-        let dst = PathBuf::from(&task.dest_path);
+        let dst = library_root.join(&task.dest_path);
         handles.push(tokio::spawn(async move {
             let _permit = permit;
             tokio::fs::copy(&src, &dst).await
@@ -387,8 +406,26 @@ async fn perform_import_assets(source_dir: PathBuf, library_root: PathBuf) -> Re
 
     // Wait for all copies to finish
     for handle in handles {
-        handle.await.context("panic in copy thread")??;
+        handle.await.context("error copying file")??;
     }
+
+    // 5. Insert into database
+    let mut tx = pool.begin().await.context("Error starting transaction")?;
+
+    for asset in &asset_tasks {
+        sqlx::query("INSERT INTO assets (id, asset_type, filename, extension, path, imported_date, creation_date, modified_date) VALUES (?, ?, ?, ?, ?, ? , ? , ?)")
+            .bind(&asset.id)
+            .bind("image")
+            .bind(&asset.filename)
+            .bind(&asset.extension)
+            .bind(&asset.dest_path)
+            .bind(&asset.imported_date)
+            .bind(&asset.creation_date)
+            .bind(&asset.modified_date)
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await.context("Error committing transaction")?;
 
     Ok(ImportResult {
         folders,

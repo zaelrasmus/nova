@@ -67,6 +67,8 @@
         if (selected) await libraryManager.switchLibrary(selected);
     }
 
+    let isImporting = $state(false);
+
     async function handleImport() {
         // 1. Select folder where images are located
         const selectedSource = await open({
@@ -77,21 +79,12 @@
 
         if (!selectedSource) return;
 
-        // 2. Select folder where the library is located
-        // TODO: "libraryPath" should come from the global state
-        const selectedLibrary = await open({
-            directory: true,
-            multiple: false,
-            title: "Select folder where the library is located)",
-        });
-
-        if (!selectedLibrary) return;
+        isImporting = true;
 
         try {
             console.log("Init import...");
             const result = await invoke<ImportResult>("import_assets", {
                 sourcePath: selectedSource,
-                libraryPath: selectedLibrary,
             });
 
             console.log("Importation successful:", result);
@@ -100,6 +93,9 @@
             );
         } catch (error) {
             console.error("Error importing:", error);
+            alert("Error crítico: " + error);
+        } finally {
+            isImporting = false;
         }
     }
 
@@ -165,7 +161,9 @@
 
     <Button onclick={createLibrary}>Create a new library</Button>
 
-    <Button onclick={handleImport}>Add Assets</Button>
+    <Button onclick={handleImport} disabled={isImporting}>
+        {isImporting ? "🚀 Importing..." : "📥 Import Assets"}
+    </Button>
 
     <Button onclick={handleConnect}>Connect to library</Button>
 
