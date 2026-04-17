@@ -17,7 +17,7 @@ use uuid::Uuid;
 use walkdir::WalkDir;
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Type)]
-#[sqlx(transparent)] // Esto permite que se trate como el tipo subyacente (Texto)
+#[sqlx(transparent)]
 pub struct AssetTypeWrapper(pub AssetType);
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Type)]
@@ -99,6 +99,41 @@ fn get_asset_type(path: &Path) -> AssetType {
     AssetType::Unknown
 }
 
+pub async fn list_assets(pool: &SqlitePool) -> anyhow::Result<Vec<AssetMetadata>> {
+    let assets = sqlx::query_as::<_, AssetMetadata>(
+        r#"
+        SELECT id, asset_type, filename, extension, path,
+               imported_date, creation_date, modified_date
+        FROM assets
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(assets)
+}
+
+pub async fn add_test_asset(pool: &SqlitePool, name: &str) -> anyhow::Result<String> {
+    let id = uuid::Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+
+    sqlx::query(
+        "INSERT INTO assets (id, asset_type, filename, extension, path, imported_date, creation_date, modified_date)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+    )
+    .bind(&id)
+    .bind("image")
+    .bind(name)
+    .bind("png")
+    .bind(format!("assets/{}", name))
+    .bind(&now)
+    .bind(&now)
+    .bind(&now)
+    .execute(pool)
+    .await?;
+
+    Ok(id)
+}
 pub async fn perform_import_assets(
     window: tauri::Window,
     source_dir: PathBuf,
