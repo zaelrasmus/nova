@@ -1,25 +1,13 @@
 use anyhow::{bail, Context, Result};
-use serde::{Deserialize, Serialize};
-use sqlx::{sqlite::SqliteConnectOptions, ConnectOptions, SqlitePool};
-
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::{
-    collections::HashMap,
-    path::{Path, PathBuf},
-};
-use tauri::Emitter;
+use chrono::Utc;
+use serde::Serialize;
+use sqlx::{sqlite::SqliteConnectOptions, SqlitePool};
+use std::path::PathBuf;
+use std::sync::Arc;
 use tauri::{AppHandle, Runtime};
 use tauri_plugin_fs::FsExt;
-
-use chrono::{DateTime, Utc};
-use rayon::prelude::*;
-
-use sqlx::{decode::Decode, encode::Encode, sqlite::Sqlite, FromRow, Type};
-use std::sync::Arc;
 use tokio::sync::Mutex;
-use tokio::sync::Semaphore;
 use uuid::Uuid;
-use walkdir::WalkDir;
 
 use crate::assets::{perform_import_assets, AssetMetadata, ImportResult};
 
@@ -28,65 +16,6 @@ pub struct LibraryInfo {
     db_path: PathBuf,
     root_path: PathBuf,
 }
-
-// #[derive(Clone, Serialize)]
-// struct ImportProgress {
-//     current: usize,
-//     total: usize,
-//     percentage: f64,
-// }
-
-// #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Type)]
-// #[sqlx(transparent)] // Esto permite que se trate como el tipo subyacente (Texto)
-// pub struct AssetTypeWrapper(pub AssetType);
-
-// #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Type)]
-// #[sqlx(rename_all = "lowercase")]
-// pub enum AssetType {
-//     Image,
-//     Audio,
-//     Video,
-//     Unknown,
-// }
-
-// #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, FromRow)]
-// pub struct AssetMetadata {
-//     pub id: String,
-//     pub asset_type: AssetType,
-//     pub filename: String,
-
-//     pub extension: String,
-
-//     #[sqlx(rename = "path")]
-//     pub dest_path: String,
-
-//     #[serde(skip)]
-//     #[sqlx(skip)]
-//     pub source_path: String,
-
-//     pub imported_date: String,
-//     #[sqlx(rename = "creation_date")]
-//     pub creation_date: String,
-//     #[sqlx(rename = "modified_date")]
-//     pub modified_date: String,
-// }
-
-// #[derive(Serialize, Deserialize, Debug)]
-// pub struct Folder {
-//     pub id: String,
-//     pub name: String,
-//     pub parent_id: Option<String>,
-//     pub order_by: String,
-//     pub is_ascending: String,
-//     pub original_path: String,
-// }
-
-// #[derive(Serialize, Deserialize, Debug)]
-// pub struct ImportResult {
-//     pub folders: Vec<Folder>,
-//     pub assets: Vec<AssetMetadata>,
-//     pub path_links: HashMap<String, String>,
-// }
 
 pub struct DbState {
     pub pool: Arc<Mutex<Option<SqlitePool>>>,
