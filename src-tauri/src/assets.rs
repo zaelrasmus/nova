@@ -100,6 +100,47 @@ fn get_asset_type(path: &Path) -> AssetType {
     AssetType::Unknown
 }
 
+async fn get_library_root(pool: &SqlitePool) -> Result<PathBuf> {
+    let db_info: (i32, String, String) = sqlx::query_as("PRAGMA database_list")
+        .fetch_one(pool)
+        .await
+        .context("Failed to get database path from PRAGMA")?;
+
+    PathBuf::from(db_info.2)
+        .parent()
+        .map(|p| p.to_path_buf())
+        .context("Invalid library path structure")
+}
+
+async fn save_assets_to_db(pool: &SqlitePool, assets: &[AssetMetadata]) -> Result<()> {
+    let mut tx = pool
+        .begin()
+        .await
+        .context("No se pudo iniciar la transacción")?;
+
+    for asset in assets {
+        sqlx::query(
+            "INSERT INTO assets (id, asset_type, filename, extension, path, imported_date, creation_date, modified_date)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+        )
+        .bind(&asset.id)
+        .bind("image") // Opcional: usar asset.asset_type si derivaste Type
+        .bind(&asset.filename)
+        .bind(&asset.extension)
+        .bind(&asset.dest_path)
+        .bind(&asset.imported_date)
+        .bind(&asset.creation_date)
+        .bind(&asset.modified_date)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    tx.commit()
+        .await
+        .context("Error al hacer commit de los assets")?;
+    Ok(())
+}
+
 pub async fn list_assets(pool: &SqlitePool) -> anyhow::Result<Vec<AssetMetadata>> {
     let assets = sqlx::query_as::<_, AssetMetadata>(
         r#"
@@ -140,12 +181,7 @@ pub async fn perform_import_assets(
     source_dir: PathBuf,
     pool: SqlitePool,
 ) -> Result<ImportResult> {
-    // Database
-    let db_info: (i32, String, String) = sqlx::query_as("PRAGMA database_list")
-        .fetch_one(&pool)
-        .await
-        .context("Failed to get database path")?;
-    let library_root = PathBuf::from(db_info.2).parent().unwrap().to_path_buf();
+    let library_root = get_library_root(&pool).await?;
 
     let assets_dir = library_root.join("assets");
 
@@ -161,123 +197,15 @@ pub async fn perform_import_assets(
     // 3. Proccess assets metadata parallel
     let asset_tasks: Vec<AssetMetadata> = all_files
         .into_par_iter()
-        .filter_map(|src| {
-            let asset_type = get_asset_type(&src);
-            let meta = std::fs::metadata(&src).ok()?;
-            let created: DateTime<Utc> = meta.created().ok()?.into();
-            let modified: DateTime<Utc> = meta.modified().ok()?.into();
-
-            let mut width = None;
-            let mut height = None;
-
-            if let AssetType::Image = asset_type {
-                if let Ok(dim) = image::image_dimensions(&src) {
-                    width = Some(dim.0);
-                    height = Some(dim.1);
-                }
-            }
-
-            let ext = src.extension()?.to_str()?;
-            let id = Uuid::new_v4().to_string();
-
-            let full_dest_path = assets_dir.join(format!("{}.{}", id, ext));
-            let dest_path_string = full_dest_path.to_string_lossy().into_owned();
-
-            Some(AssetMetadata {
-                id,
-                asset_type,
-                filename: src.file_name()?.to_string_lossy().into_owned(),
-                extension: ext.to_string(),
-                dest_path: dest_path_string,
-                source_path: src.to_string_lossy().into_owned(),
-                imported_date: created.to_rfc3339(),
-                creation_date: created.to_rfc3339(),
-                modified_date: modified.to_rfc3339(),
-            })
-        })
+        .filter(|p| matches!(get_asset_type(p), AssetType::Image))
+        .filter_map(|src| process_asset_metadata(src, &assets_dir))
         .collect();
 
     // 4. Copy files
-    let semaphore = Arc::new(Semaphore::new(10));
-    let mut handles = Vec::with_capacity(asset_tasks.len());
-
-    let total_assets = asset_tasks.len();
-    let completed_count = Arc::new(AtomicUsize::new(0));
-
-    let last_emit = Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
-    let emit_interval = std::time::Duration::from_millis(100);
-
-    for task in &asset_tasks {
-        let permit = Arc::clone(&semaphore)
-            .acquire_owned()
-            .await
-            .context("Error adquiring semaphore")?;
-
-        let src = PathBuf::from(&task.source_path);
-        let dst = PathBuf::from(&task.dest_path);
-
-        let window_clone = window.clone();
-        let counter = Arc::clone(&completed_count);
-        let last_emit_clone = Arc::clone(&last_emit);
-
-        handles.push(tokio::spawn(async move {
-            let _permit = permit;
-            let _ = tokio::fs::copy(&src, &dst).await;
-
-            let current = counter.fetch_add(1, Ordering::SeqCst) + 1;
-
-            if let Ok(mut last_time) = last_emit_clone.lock() {
-                if last_time.elapsed() >= emit_interval || current == total_assets {
-                    let percentage = (current as f64 / total_assets as f64) * 100.0;
-
-                    let _ = window_clone.emit(
-                        "import-progress",
-                        ImportProgress {
-                            current,
-                            total: total_assets,
-                            percentage,
-                        },
-                    );
-                    *last_time = std::time::Instant::now();
-                }
-            }
-
-            // let current = counter.fetch_add(1, Ordering::SeqCst) + 1;
-            // let percentage = (current as f64 / total_assets as f64) * 100.0;
-
-            // let _ = window_clone.emit(
-            //     "import-progress",
-            //     ImportProgress {
-            //         current,
-            //         total: total_assets,
-            //         percentage,
-            //     },
-            // );
-        }));
-    }
-
-    // Wait for all copies to finish
-    for handle in handles {
-        handle.await.context("error copying file")?;
-    }
+    copy_files_with_progress(window.clone(), &asset_tasks).await?;
 
     // 5. Insert into database
-    let mut tx = pool.begin().await.context("Error starting transaction")?;
-
-    for asset in &asset_tasks {
-        sqlx::query("INSERT INTO assets (id, asset_type, filename, extension, path, imported_date, creation_date, modified_date) VALUES (?, ?, ?, ?, ?, ? , ? , ?)")
-            .bind(&asset.id)
-            .bind("image")
-            .bind(&asset.filename)
-            .bind(&asset.extension)
-            .bind(&asset.dest_path)
-            .bind(&asset.imported_date)
-            .bind(&asset.creation_date)
-            .bind(&asset.modified_date)
-            .execute(&mut *tx)
-            .await?;
-    }
-    tx.commit().await.context("Error committing transaction")?;
+    save_assets_to_db(&pool, &asset_tasks).await?;
 
     Ok(ImportResult {
         folders,
@@ -287,4 +215,63 @@ pub async fn perform_import_assets(
             .map(|(k, v)| (k.to_string_lossy().into_owned(), v))
             .collect(),
     })
+}
+
+fn process_asset_metadata(src: PathBuf, dest_dir: &Path) -> Option<AssetMetadata> {
+    let asset_type = get_asset_type(&src);
+    let meta = std::fs::metadata(&src).ok()?;
+    let created: DateTime<Utc> = meta.created().ok()?.into();
+    let modified: DateTime<Utc> = meta.modified().ok()?.into();
+
+    let ext = src.extension()?.to_str()?;
+    let id = uuid::Uuid::new_v4().to_string();
+    let dest_path = dest_dir.join(format!("{}.{}", id, ext));
+
+    Some(AssetMetadata {
+        id,
+        asset_type,
+        filename: src.file_name()?.to_string_lossy().into_owned(),
+        extension: ext.to_string(),
+        dest_path: dest_path.to_string_lossy().into_owned(),
+        source_path: src.to_string_lossy().into_owned(),
+        imported_date: Utc::now().to_rfc3339(),
+        creation_date: created.to_rfc3339(),
+        modified_date: modified.to_rfc3339(),
+    })
+}
+
+async fn copy_files_with_progress(window: tauri::Window, assets: &[AssetMetadata]) -> Result<()> {
+    let semaphore = Arc::new(Semaphore::new(10));
+    let completed_count = Arc::new(AtomicUsize::new(0));
+    let total = assets.len();
+    let mut handles = Vec::with_capacity(total);
+
+    for asset in assets {
+        let permit = Arc::clone(&semaphore).acquire_owned().await?;
+        let src = PathBuf::from(&asset.source_path);
+        let dst = PathBuf::from(&asset.dest_path);
+
+        let w = window.clone();
+        let counter = Arc::clone(&completed_count);
+
+        handles.push(tokio::spawn(async move {
+            let _permit = permit;
+            if tokio::fs::copy(&src, &dst).await.is_ok() {
+                let current = counter.fetch_add(1, Ordering::SeqCst) + 1;
+                let _ = w.emit(
+                    "import-progress",
+                    ImportProgress {
+                        current,
+                        total,
+                        percentage: (current as f64 / total as f64) * 100.0,
+                    },
+                );
+            }
+        }));
+    }
+
+    for h in handles {
+        h.await?;
+    }
+    Ok(())
 }
