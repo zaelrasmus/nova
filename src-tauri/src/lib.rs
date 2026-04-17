@@ -1,5 +1,6 @@
 use crate::commands::DbState;
 
+mod assets;
 mod commands;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
