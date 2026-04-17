@@ -24,7 +24,7 @@ impl DbState {
         })
     }
 
-    // establishing a connection to the SQlite database library
+    // Establishing a connection to the SQlite database library
     pub async fn connect<P: AsRef<Path>>(&self, path: P) -> Result<(), String> {
         let db_path = path.as_ref().join("library.db");
 

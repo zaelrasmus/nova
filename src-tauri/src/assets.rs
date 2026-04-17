@@ -1,3 +1,4 @@
+use crate::fs;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use rayon::prelude::{IntoParallelIterator, ParallelIterator};
@@ -149,53 +150,16 @@ pub async fn perform_import_assets(
     let assets_dir = library_root.join("assets");
 
     // Guarantee that the assets folder exists before proceeding
-    if !assets_dir.exists() {
-        tokio::fs::create_dir_all(&assets_dir)
-            .await
-            .context("Assets folder could not be created")?;
-    }
+    fs::ensure_dir(&assets_dir).await?;
 
-    let mut folders = Vec::new();
-    let mut folder_map = HashMap::new();
-
-    // 1. Scan folder structure
-    for entry in WalkDir::new(&source_dir)
-        .min_depth(1)
-        .into_iter()
-        .filter_map(|e| e.ok())
-    {
-        if entry.file_type().is_dir() {
-            let path = entry.path().to_path_buf();
-            let id = Uuid::new_v4().to_string();
-
-            // Search for the parent ID in our map
-            let parent_id = path.parent().and_then(|p| folder_map.get(p).cloned());
-
-            let folder_obj = Folder {
-                id: id.clone(),
-                name: entry.file_name().to_string_lossy().into_owned(),
-                parent_id,
-                order_by: "name".to_string(),
-                is_ascending: "1".to_string(),
-                original_path: path.to_string_lossy().into_owned(),
-            };
-
-            folder_map.insert(path, id);
-            folders.push(folder_obj);
-        }
-    }
+    // 1. Scan Folder Structure
+    let (folders, folder_map) = fs::scan_folder_structure(&source_dir);
 
     // 2. Collect file paths
-    let file_paths: Vec<PathBuf> = WalkDir::new(&source_dir)
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().is_file())
-        .map(|e| e.into_path())
-        .filter(|p| matches!(get_asset_type(p), AssetType::Image)) // Only images right now
-        .collect();
+    let all_files = fs::collect_file_paths(&source_dir);
 
     // 3. Proccess assets metadata parallel
-    let asset_tasks: Vec<AssetMetadata> = file_paths
+    let asset_tasks: Vec<AssetMetadata> = all_files
         .into_par_iter()
         .filter_map(|src| {
             let asset_type = get_asset_type(&src);

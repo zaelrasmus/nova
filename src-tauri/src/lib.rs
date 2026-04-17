@@ -1,6 +1,7 @@
 mod assets;
 mod commands;
 mod db;
+mod fs;
 mod library;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
