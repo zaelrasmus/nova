@@ -2,6 +2,7 @@ use crate::commands::DbState;
 
 mod assets;
 mod commands;
+mod library;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
