@@ -33,3 +33,4 @@ uuid = { version = "1.23.0", features = ["v4"] }
 rayon = "1.11.0"
 chrono = "0.4.44"
 image = "0.25.10"
+thiserror = "2.0.18"
