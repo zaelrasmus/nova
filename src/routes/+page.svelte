@@ -37,6 +37,20 @@
         path_links: { [key: string]: string };
     }
 
+    type ImportStage = "Scanning" | "ProcessingMetadata" | "CopyingFiles" | "Finalizing";
+
+    interface ImportProgress {
+        stage: ImportStage;
+        current: number;
+        total: number;
+        message: string;
+    }
+
+    interface ImportAssetsResult {
+        assets: any[]; // Sustituir por interfaz de AssetMetadata
+        folders: any[];
+    }
+
     import { Button } from "$components/ui/button";
     import { Skeleton } from "$components/ui/skeleton";
 
@@ -82,14 +96,26 @@
         // Reset de estados
         current = 0;
         total = 0;
+        currentStage = null;
+        statusMessage = "Preparing...";
         smoothPercentage.set(0);
         isImporting = true;
 
-        const unlisten = await listen("import-progress", (event: any) => {
+        const unlisten = await listen<ImportProgress>("import-progress", (event) => {
             const payload = event.payload;
+
             current = payload.current;
             total = payload.total;
-            smoothPercentage.set(payload.percentage);
+            statusMessage = payload.message;
+            currentStage = payload.stage;
+
+            // Calculamos el porcentaje localmente para asegurar suavidad.
+            if (payload.total > 0) {
+                const p = (payload.current / payload.total) * 100;
+                smoothPercentage.set(p);
+            } else {
+                smoothPercentage.set(0);
+            }
         });
 
         try {
@@ -182,17 +208,18 @@
     import { cubicOut } from "svelte/easing";
     import { tweened } from "svelte/motion";
 
-    // Estado reactivo con Runes
     let current = $state(0);
     let total = $state(0);
+    let statusMessage = $state("Preparing...");
+    let currentStage = $state<ImportStage | null>(null);
 
-    // Para que el slider/barra se mueva suavemente
+    // Barra de progreso suave
     const smoothPercentage = tweened(0, {
         duration: 400,
         easing: cubicOut,
     });
 
-    // Derivamos el texto del porcentaje
+    // Derivamos el porcentaje para mostrarlo en texto
     let displayPercent = $derived(Math.round($smoothPercentage));
 </script>
 
@@ -261,27 +288,39 @@
             </div>
         </div>
         {#if isImporting}
-            <div class="space-y-2">
-                <div class="flex justify-between text-sm">
-                    <span>Procesando: {current} / {total}</span>
-                    <span>{displayPercent}%</span>
+            <div class="p-4 bg-gray-800 rounded-lg border border-gray-700 space-y-4">
+                <div class="flex justify-between items-center">
+                    <div class="flex flex-col">
+                        <span class="text-xs font-bold uppercase tracking-wider text-blue-400">
+                            {currentStage ?? "Iniciando"}
+                        </span>
+                        <span class="text-sm text-gray-200">{statusMessage}</span>
+                    </div>
+
+                    <div class="text-right">
+                        <span class="text-lg font-mono font-bold">{displayPercent}%</span>
+                        <p class="text-[10px] text-gray-400">
+                            {current} of {total} objects
+                        </p>
+                    </div>
                 </div>
 
-                <div class="w-full h-4 bg-gray-700 rounded-full overflow-hidden">
+                <div class="relative w-full h-3 bg-gray-900 rounded-full overflow-hidden">
                     <div
-                        class="h-full bg-blue-500 transition-none"
+                        class="h-full bg-blue-500 shadow-[0_0_10px_rgba(59,130,246,0.5)] transition-none"
                         style="width: {$smoothPercentage}%"
                     ></div>
+
+                    {#if currentStage === "Scanning"}
+                        <div
+                            class="absolute inset-0 bg-linear-to-r from-transparent via-white/10 to-transparent animate-shimmer"
+                        ></div>
+                    {/if}
                 </div>
 
-                <input
-                    type="range"
-                    min="0"
-                    max="100"
-                    value={$smoothPercentage}
-                    class="w-full accent-blue-500"
-                    disabled
-                />
+                <p class="text-[11px] text-gray-500 italic">
+                    Dont Close the App while importing
+                </p>
             </div>
         {/if}
         <div class="mt-8">

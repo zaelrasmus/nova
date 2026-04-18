@@ -12,14 +12,7 @@ use std::{
         Arc,
     },
 };
-use tauri::Emitter;
 use tokio::sync::Semaphore;
-use uuid::Uuid;
-use walkdir::WalkDir;
-
-#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Type)]
-#[sqlx(transparent)]
-pub struct AssetTypeWrapper(pub AssetType);
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Type)]
 #[sqlx(rename_all = "lowercase")]
@@ -69,11 +62,25 @@ pub struct ImportResult {
     pub path_links: HashMap<String, String>,
 }
 
-#[derive(Clone, Serialize)]
-struct ImportProgress {
-    current: usize,
-    total: usize,
-    percentage: f64,
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub enum ImportStage {
+    Scanning,
+    ProcessingMetadata,
+    CopyingFiles,
+    Finalizing,
+}
+
+#[derive(Serialize, Clone, Debug)]
+pub struct ImportProgress {
+    pub stage: ImportStage,
+    pub current: usize,
+    pub total: usize,
+    pub message: String,
+}
+
+pub trait ProgressReporter: Send + Sync {
+    fn report(&self, progress: ImportProgress);
 }
 
 const IMG_EXTS: &[&str] = &["bmp", "gif", "jfif", "jpeg", "jpg", "png", "webp"];
@@ -177,10 +184,18 @@ pub async fn add_test_asset(pool: &SqlitePool, name: &str) -> anyhow::Result<Str
     Ok(id)
 }
 pub async fn perform_import_assets(
-    window: tauri::Window,
+    reporter: Arc<dyn ProgressReporter>,
     source_dir: PathBuf,
     pool: SqlitePool,
 ) -> Result<ImportResult> {
+    reporter.report(ImportProgress {
+        stage: ImportStage::Scanning,
+        current: 0,
+        total: 0,
+        message: "Scanning folder structure...".into(),
+    });
+
+    // Get library root and assets directory
     let library_root = get_library_root(&pool).await?;
 
     let assets_dir = library_root.join("assets");
@@ -194,6 +209,14 @@ pub async fn perform_import_assets(
     // 2. Collect file paths
     let all_files = fs::collect_file_paths(&source_dir);
 
+    let total_files = all_files.len();
+    reporter.report(ImportProgress {
+        stage: ImportStage::ProcessingMetadata,
+        current: 0,
+        total: total_files,
+        message: format!("Processing {} files...", total_files),
+    });
+
     // 3. Proccess assets metadata parallel
     let asset_tasks: Vec<AssetMetadata> = all_files
         .into_par_iter()
@@ -201,10 +224,24 @@ pub async fn perform_import_assets(
         .filter_map(|src| process_asset_metadata(src, &assets_dir))
         .collect();
 
+    reporter.report(ImportProgress {
+        stage: ImportStage::CopyingFiles,
+        current: 0,
+        total: asset_tasks.len(),
+        message: "Copying files...".into(),
+    });
+
     // 4. Copy files
-    copy_files_with_progress(window.clone(), &asset_tasks).await?;
+    copy_files_with_progress(reporter.clone(), &asset_tasks).await?;
 
     // 5. Insert into database
+
+    reporter.report(ImportProgress {
+        stage: ImportStage::Finalizing,
+        current: 0,
+        total: asset_tasks.len(),
+        message: "Finalizing and saving to database...".into(),
+    });
     save_assets_to_db(&pool, &asset_tasks).await?;
 
     Ok(ImportResult {
@@ -240,7 +277,10 @@ fn process_asset_metadata(src: PathBuf, dest_dir: &Path) -> Option<AssetMetadata
     })
 }
 
-async fn copy_files_with_progress(window: tauri::Window, assets: &[AssetMetadata]) -> Result<()> {
+async fn copy_files_with_progress(
+    reporter: Arc<dyn ProgressReporter>,
+    assets: &[AssetMetadata],
+) -> Result<()> {
     let semaphore = Arc::new(Semaphore::new(10));
     let completed_count = Arc::new(AtomicUsize::new(0));
     let total = assets.len();
@@ -248,30 +288,34 @@ async fn copy_files_with_progress(window: tauri::Window, assets: &[AssetMetadata
 
     for asset in assets {
         let permit = Arc::clone(&semaphore).acquire_owned().await?;
+
         let src = PathBuf::from(&asset.source_path);
         let dst = PathBuf::from(&asset.dest_path);
 
-        let w = window.clone();
+        let r = Arc::clone(&reporter);
         let counter = Arc::clone(&completed_count);
+        let filename = asset.filename.clone();
 
         handles.push(tokio::spawn(async move {
             let _permit = permit;
+
             if tokio::fs::copy(&src, &dst).await.is_ok() {
                 let current = counter.fetch_add(1, Ordering::SeqCst) + 1;
-                let _ = w.emit(
-                    "import-progress",
-                    ImportProgress {
-                        current,
-                        total,
-                        percentage: (current as f64 / total as f64) * 100.0,
-                    },
-                );
+
+                r.report(ImportProgress {
+                    stage: ImportStage::CopyingFiles,
+                    current,
+                    total,
+                    message: format!("Importing: {}", filename),
+                });
             }
         }));
     }
 
+    // Esperamos a que todas las tareas terminen
     for h in handles {
-        h.await?;
+        h.await.context("Error en el hilo de copiado")?;
     }
+
     Ok(())
 }
