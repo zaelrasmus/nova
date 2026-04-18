@@ -1,3 +1,4 @@
+use crate::error::AppError;
 use anyhow::{Context, Result};
 use serde::Serialize;
 use sqlx::{sqlite::SqliteConnectOptions, SqlitePool};
@@ -9,19 +10,25 @@ pub struct LibraryInfo {
     pub root_path: PathBuf,
 }
 
-pub async fn perform_create_library(location: &str, name: &str) -> Result<PathBuf> {
+// #[instrument(fields(location = %location, name = %name))]
+pub async fn perform_create_library(location: &str, name: &str) -> Result<PathBuf, AppError> {
     let root = PathBuf::from(location).join(format!("{}.library", name));
 
     if root.exists() {
-        anyhow::bail!("Library path already exists")
+        // Typed error: the command can display a specific message for this case.
+        return Err(AppError::LibraryAlreadyExists);
     }
 
-    let workspace_res: anyhow::Result<()> = async {
+    // debug!(root = ?root, "Starting library creation");
+
+    // All setups steps run in a nested block so we can rollback cleanly on failure
+    let setup: anyhow::Result<()> = async {
         tokio::fs::create_dir_all(root.join("assets"))
             .await
-            .context("Cannot create assets dir")?;
+            .context("Failed to create assets directory")?;
 
         let db_path = root.join("library.db");
+        // debug!(db_path = ?db_path, "Initializing database");
         let options = SqliteConnectOptions::new()
             .filename(&db_path)
             .create_if_missing(true)
@@ -30,26 +37,31 @@ pub async fn perform_create_library(location: &str, name: &str) -> Result<PathBu
 
         let pool = SqlitePool::connect_with(options)
             .await
-            .context("Cannot open pool Database SQlite")?;
+            .context("Failed to open SQLite pool for new library")?;
 
         sqlx::migrate!()
             .run(&pool)
             .await
-            .context("Error executing migrations in database")?;
+            .context("Failed to run database migrations")?;
 
         pool.close().await;
-
         Ok(())
     }
     .await;
 
-    if let Err(e) = workspace_res {
-        // Rollback: remove the root directory if creation failed
+    if let Err(e) = setup {
+        // Rollback: remove anything we created before the failure.
         if root.exists() {
-            let _ = tokio::fs::remove_dir_all(&root).await;
+            // warn!(root = ?root, "Library creation failed, rolling back directory");
+            if let Err(rm_err) = tokio::fs::remove_dir_all(&root).await {
+                // Log the rollback failure but still surface the original error.
+                // tracing::error!(error = %rm_err, "Rollback failed — orphaned directory may remain");
+            }
         }
-        return Err(e).context("Error creating library");
+        // Wrap anyhow error into AppError::Internal for the command layer.
+        return Err(AppError::from(e));
     }
 
+    // info!(root = ?root, "Library created successfully");
     Ok(root)
 }

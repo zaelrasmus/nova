@@ -1,6 +1,7 @@
 mod assets;
 mod commands;
 mod db;
+mod error;
 mod fs;
 mod library;
 
