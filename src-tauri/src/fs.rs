@@ -1,11 +1,12 @@
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
+use tracing::{debug, instrument, warn};
 use walkdir::WalkDir;
 
-// #[instrument(fields(path = %path.display()))]
+#[instrument(fields(path = %path.display()))]
 pub async fn ensure_dir(path: &Path) -> Result<()> {
     if !path.exists() {
-        // debug!(path = ?path, "Directory no exists. Creating directory again");
+        debug!(path = ?path, "Directory no exists. Creating directory again");
         tokio::fs::create_dir_all(path)
             .await
             .with_context(|| format!("Failed to create directory: {:?}", path))?;
@@ -13,7 +14,7 @@ pub async fn ensure_dir(path: &Path) -> Result<()> {
     Ok(())
 }
 
-// #[instrument(fields(source = %source_dir.display()))]
+#[instrument(fields(source = %source_dir.display()))]
 pub fn scan_folder_structure(
     source_dir: &Path,
 ) -> (
@@ -21,7 +22,7 @@ pub fn scan_folder_structure(
     std::collections::HashMap<PathBuf, String>,
 ) {
     let mut folders = Vec::new();
-    // let mut folder_map = std::collections::HashMap::new();
+
     let mut folder_map: std::collections::HashMap<PathBuf, String> =
         std::collections::HashMap::new();
 
@@ -30,7 +31,7 @@ pub fn scan_folder_structure(
         .into_iter()
         .filter_map(|e| {
             e.inspect_err(|err| {
-                // tracing::warn!(error = %err, "WalkDir error while scanning folders, skipping entry")
+                tracing::warn!(error = %err, "WalkDir error while scanning folders, skipping entry")
             })
             .ok()
         })
@@ -52,11 +53,11 @@ pub fn scan_folder_structure(
 
         folder_map.insert(path, id);
     }
-    // debug!(
-    //     folders = folders.len(),
-    //     source = %source_dir.display(),
-    //     "Folder structure scan complete"
-    // );
+    debug!(
+        folders = folders.len(),
+        source = %source_dir.display(),
+        "Folder structure scan complete"
+    );
     (folders, folder_map)
 }
 
@@ -64,17 +65,11 @@ pub fn scan_folder_structure(
 /// WalkDir errors for individual entries are logged and skipped,
 /// not propagated — a single unreadable file should not abort the scan.
 pub fn collect_file_paths(source_dir: &Path) -> Vec<PathBuf> {
-    // WalkDir::new(source_dir)
-    //     .into_iter()
-    //     .filter_map(|e| e.ok())
-    //     .filter(|e| e.file_type().is_file())
-    //     .map(|e| e.into_path())
-    //     .collect()
     let paths: Vec<PathBuf> = WalkDir::new(source_dir)
         .into_iter()
         .filter_map(|e| {
             e.inspect_err(|err| {
-                // tracing::warn!(error = %err, "WalkDir error while collecting files, skipping entry")
+                tracing::warn!(error = %err, "WalkDir error while collecting files, skipping entry")
             })
             .ok()
         })
@@ -82,11 +77,11 @@ pub fn collect_file_paths(source_dir: &Path) -> Vec<PathBuf> {
         .map(|e| e.into_path())
         .collect();
 
-    // debug!(
-    //     count = paths.len(),
-    //     source = %source_dir.display(),
-    //     "File path collection complete"
-    // );
+    debug!(
+        count = paths.len(),
+        source = %source_dir.display(),
+        "File path collection complete"
+    );
 
     paths
 }

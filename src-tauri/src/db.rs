@@ -4,7 +4,7 @@ use sqlx::SqlitePool;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-
+use tracing::{debug, info, instrument, warn};
 pub struct DbState {
     // We use RwLock for better concurrent read performance
     pub pool: Arc<RwLock<Option<SqlitePool>>>,
@@ -24,19 +24,18 @@ impl DbState {
     }
 
     // Establishing a connection to the SQlite database library
-    // #[instrument(skip(self), fields(library_path = %path.as_ref().display()))]
+    #[instrument(skip(self, path), fields(library_path = %path.as_ref().display()))]
     pub async fn connect<P: AsRef<Path>>(&self, path: P) -> Result<(), AppError> {
         let db_path = path.as_ref().join("library.db");
 
         if !db_path.exists() {
-            // return Err(format!("Database file not found at {:?}", db_path);
             return Err(AppError::Io(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
                 format!("library.db not found at {:?}", db_path),
             )));
         }
 
-        // debug!(db_path = ?db_path, "Opening SQLite connection pool");
+        debug!(db_path = ?db_path, "Opening SQLite connection pool");
 
         let options = SqliteConnectOptions::new()
             .filename(&db_path)
@@ -50,13 +49,13 @@ impl DbState {
 
         // If a pool is already connected, disconnect it first
         if let Some(old_pool) = lock.take() {
-            // warn!("Replacing existing library connection. Closing old pool.");
+            warn!("Replacing existing library connection. Closing old pool.");
             old_pool.close().await;
         }
 
         *lock = Some(pool);
 
-        // info!(db_path = ?db_path, "Library connected sucessfully");
+        info!(db_path = ?db_path, "Library connected sucessfully");
         Ok(())
     }
 }

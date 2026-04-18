@@ -13,6 +13,7 @@ use std::{
     },
 };
 use tokio::sync::Semaphore;
+use tracing::{debug, info, instrument, warn};
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Type)]
 #[sqlx(rename_all = "lowercase")]
@@ -107,7 +108,7 @@ fn get_asset_type(path: &Path) -> AssetType {
     AssetType::Unknown
 }
 
-// #{instrument(skip(pool))}
+#[instrument(skip(pool))]
 async fn get_library_root(pool: &SqlitePool) -> Result<PathBuf> {
     let db_info: (i32, String, String) = sqlx::query_as("PRAGMA database_list")
         .fetch_one(pool)
@@ -120,9 +121,9 @@ async fn get_library_root(pool: &SqlitePool) -> Result<PathBuf> {
         .context("Library database has an invalid path structure")
 }
 
-// #[instrument(skip(pool, assets), fields(count = assets.len()))]
+#[instrument(skip(pool, assets), fields(count = assets.len()))]
 async fn save_assets_to_db(pool: &SqlitePool, assets: &[AssetMetadata]) -> Result<()> {
-    // let start = std::time::Instant::now();
+    let start = std::time::Instant::now();
 
     let mut tx = pool
         .begin()
@@ -150,15 +151,15 @@ async fn save_assets_to_db(pool: &SqlitePool, assets: &[AssetMetadata]) -> Resul
         .await
         .context("Failed to commit asset transaction")?;
 
-    // info!(
-    //     count = assets.len(),
-    //     elapsed_ms = start.elapsed().as_millis(),
-    //     "Assets persisted to database"
-    // );
+    info!(
+        count = assets.len(),
+        elapsed_ms = start.elapsed().as_millis(),
+        "Assets persisted to database"
+    );
     Ok(())
 }
 
-// #[instrument(skip(pool))]
+#[instrument(skip(pool))]
 pub async fn list_assets(pool: &SqlitePool) -> anyhow::Result<Vec<AssetMetadata>> {
     let assets = sqlx::query_as::<_, AssetMetadata>(
         r#"
@@ -171,7 +172,7 @@ pub async fn list_assets(pool: &SqlitePool) -> anyhow::Result<Vec<AssetMetadata>
     .await
     .context("Failed to fetch assets from database")?;
 
-    // debug!(count = assets.len(), "Assets fetched from database");
+    debug!(count = assets.len(), "Assets fetched from database");
     Ok(assets)
 }
 
@@ -195,7 +196,7 @@ pub async fn add_test_asset(pool: &SqlitePool, name: &str) -> Result<String> {
     .execute(pool)
     .await.with_context(|| format!("Failed to insert test asset '{}'", name))?;
 
-    // debug!(id = %id, name = name, "Test asset inserted");
+    debug!(id = %id, name = name, "Test asset inserted");
 
     Ok(id)
 }
@@ -204,7 +205,7 @@ pub async fn perform_import_assets(
     source_dir: PathBuf,
     pool: SqlitePool,
 ) -> Result<ImportResult> {
-    // let import_start = std::time::Instant::now();
+    let import_start = std::time::Instant::now();
 
     reporter.report(ImportProgress {
         stage: ImportStage::Scanning,
@@ -222,17 +223,17 @@ pub async fn perform_import_assets(
 
     // Stage 2: Scan folder structure and collect file paths
 
-    // let scan_start = std::time::Instant::now();
+    let scan_start = std::time::Instant::now();
     let (folders, folder_map) = fs::scan_folder_structure(&source_dir);
     let all_files = fs::collect_file_paths(&source_dir);
     let total_files = all_files.len();
 
-    // info!(
-    //         folders = folders.len(),
-    //         files = total_files,
-    //         elapsed_ms = scan_start.elapsed().as_millis(),
-    //         "Scan complete"
-    //     );
+    info!(
+        folders = folders.len(),
+        files = total_files,
+        elapsed_ms = scan_start.elapsed().as_millis(),
+        "Scan complete"
+    );
 
     reporter.report(ImportProgress {
         stage: ImportStage::ProcessingMetadata,
@@ -242,7 +243,7 @@ pub async fn perform_import_assets(
     });
 
     // Stage 3: Process metadata in parallel using rayon
-    // let meta_start = std::time::Instant::now();
+    let meta_start = std::time::Instant::now();
 
     let asset_tasks: Vec<AssetMetadata> = all_files
         .into_par_iter()
@@ -250,11 +251,11 @@ pub async fn perform_import_assets(
         .filter_map(|src| process_asset_metadata(src, &assets_dir))
         .collect();
 
-    // info!(
-    //     count = asset_tasks.len(),
-    //     elapsed_ms = meta_start.elapsed().as_millis(),
-    //     "Metadata processing complete"
-    // );
+    info!(
+        count = asset_tasks.len(),
+        elapsed_ms = meta_start.elapsed().as_millis(),
+        "Metadata processing complete"
+    );
 
     reporter.report(ImportProgress {
         stage: ImportStage::CopyingFiles,
@@ -276,12 +277,12 @@ pub async fn perform_import_assets(
 
     save_assets_to_db(&pool, &asset_tasks).await?;
 
-    // info!(
-    //     assets = asset_tasks.len(),
-    //     folders = folders.len(),
-    //     total_elapsed_ms = import_start.elapsed().as_millis(),
-    //     "Import pipeline complete"
-    // );
+    info!(
+        assets = asset_tasks.len(),
+        folders = folders.len(),
+        total_elapsed_ms = import_start.elapsed().as_millis(),
+        "Import pipeline complete"
+    );
 
     Ok(ImportResult {
         folders,
@@ -295,16 +296,14 @@ pub async fn perform_import_assets(
 
 fn process_asset_metadata(src: PathBuf, dest_dir: &Path) -> Option<AssetMetadata> {
     let asset_type = get_asset_type(&src);
-    let meta = std::fs::metadata(&src).ok()?;
-    // let meta = std::fs::metadata(&src)
-    //         .inspect_err(|e| warn!(path = ?src, error = %e, "Could not read file metadata, skipping"))
-    //         .ok()?;
-    let created: DateTime<Utc> = meta.created().ok()?.into();
-    // let created: DateTime<Utc> = meta
-    //         .created()
-    //         .inspect_err(|e| debug!(path = ?src, error = %e, "btime unavailable, falling back"))
-    //         .ok()?
-    //         .into();
+    let meta = std::fs::metadata(&src)
+        .inspect_err(|e| warn!(path = ?src, error = %e, "Could not read file metadata, skipping"))
+        .ok()?;
+    let created: DateTime<Utc> = meta
+        .created()
+        .inspect_err(|e| debug!(path = ?src, error = %e, "btime unavailable, falling back"))
+        .ok()?
+        .into();
     let modified: DateTime<Utc> = meta.modified().ok()?.into();
 
     let ext = src.extension()?.to_str()?;
@@ -324,48 +323,17 @@ fn process_asset_metadata(src: PathBuf, dest_dir: &Path) -> Option<AssetMetadata
     })
 }
 
-// #{instrument(skip(reporter, assets), fields(total = assets.len()))}
+#[instrument(skip(reporter, assets), fields(total = assets.len()))]
 async fn copy_files_with_progress(
     reporter: Arc<dyn ProgressReporter>,
     assets: &[AssetMetadata],
 ) -> Result<()> {
-    // let start = std::time::Instant::now();
+    let start = std::time::Instant::now();
     let semaphore = Arc::new(Semaphore::new(10));
     let completed = Arc::new(AtomicUsize::new(0));
     let failed = Arc::new(AtomicUsize::new(0));
     let total = assets.len();
     let mut handles = Vec::with_capacity(total);
-
-    // for asset in assets {
-    //     let permit = Arc::clone(&semaphore).acquire_owned().await.context("Failed to acquire semaphore permit for file copy")?;
-
-    //     let src = PathBuf::from(&asset.source_path);
-    //     let dst = PathBuf::from(&asset.dest_path);
-
-    //     let r = Arc::clone(&reporter);
-    //     let counter = Arc::clone(&completed_count);
-    //     let filename = asset.filename.clone();
-
-    //     handles.push(tokio::spawn(async move {
-    //         let _permit = permit;
-
-    //         match tokio::fs::copy(&src, &dst).await {
-    //             Ok(bytes) => {
-    //                 let current = completed.fetch
-    //             }
-    //         }
-    //         // if tokio::fs::copy(&src, &dst).await.is_ok() {
-    //         //     let current = counter.fetch_add(1, Ordering::SeqCst) + 1;
-
-    //         //     r.report(ImportProgress {
-    //         //         stage: ImportStage::CopyingFiles,
-    //         //         current,
-    //         //         total,
-    //         //         message: format!("Importing: {}", filename),
-    //         //     });
-    //         // }
-    //     }));
-    // }
 
     for asset in assets {
         let permit = Arc::clone(&semaphore)
@@ -386,7 +354,7 @@ async fn copy_files_with_progress(
             match tokio::fs::copy(&src, &dst).await {
                 Ok(bytes) => {
                     let current = completed.fetch_add(1, Ordering::SeqCst) + 1;
-                    // debug!(file = %filename, bytes, "File copied");
+                    debug!(file = %filename, bytes, "File copied");
 
                     reporter.report(ImportProgress {
                         stage: ImportStage::CopyingFiles,
@@ -399,7 +367,7 @@ async fn copy_files_with_progress(
                     // We log and count failures but don't abort the entire import.
                     // A partial import is better than losing all progress on a bad file.
                     failed.fetch_add(1, Ordering::SeqCst);
-                    // warn!(src = ?src, error = %e, "Failed to copy file, skipping");
+                    warn!(src = ?src, error = %e, "Failed to copy file, skipping");
                 }
             }
         }));
@@ -410,19 +378,19 @@ async fn copy_files_with_progress(
     }
 
     let failed_count = failed.load(Ordering::SeqCst);
-    // if failed_count > 0 {
-    //     warn!(
-    //         failed = failed_count,
-    //         total, "Import completed with failed copies"
-    //     );
-    // }
+    if failed_count > 0 {
+        warn!(
+            failed = failed_count,
+            total, "Import completed with failed copies"
+        );
+    }
 
-    // info!(
-    //     total,
-    //     failed = failed_count,
-    //     elapsed_ms = start.elapsed().as_millis(),
-    //     "File copy stage complete"
-    // );
+    info!(
+        total,
+        failed = failed_count,
+        elapsed_ms = start.elapsed().as_millis(),
+        "File copy stage complete"
+    );
 
     Ok(())
 }

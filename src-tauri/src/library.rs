@@ -3,6 +3,7 @@ use anyhow::{Context, Result};
 use serde::Serialize;
 use sqlx::{sqlite::SqliteConnectOptions, SqlitePool};
 use std::path::PathBuf;
+use tracing::{debug, info, instrument, warn};
 
 #[derive(Debug, Serialize)]
 pub struct LibraryInfo {
@@ -10,7 +11,7 @@ pub struct LibraryInfo {
     pub root_path: PathBuf,
 }
 
-// #[instrument(fields(location = %location, name = %name))]
+#[instrument(fields(location = %location, name = %name))]
 pub async fn perform_create_library(location: &str, name: &str) -> Result<PathBuf, AppError> {
     let root = PathBuf::from(location).join(format!("{}.library", name));
 
@@ -19,7 +20,7 @@ pub async fn perform_create_library(location: &str, name: &str) -> Result<PathBu
         return Err(AppError::LibraryAlreadyExists);
     }
 
-    // debug!(root = ?root, "Starting library creation");
+    debug!(root = ?root, "Starting library creation");
 
     // All setups steps run in a nested block so we can rollback cleanly on failure
     let setup: anyhow::Result<()> = async {
@@ -28,7 +29,7 @@ pub async fn perform_create_library(location: &str, name: &str) -> Result<PathBu
             .context("Failed to create assets directory")?;
 
         let db_path = root.join("library.db");
-        // debug!(db_path = ?db_path, "Initializing database");
+        debug!(db_path = ?db_path, "Initializing database");
         let options = SqliteConnectOptions::new()
             .filename(&db_path)
             .create_if_missing(true)
@@ -52,16 +53,16 @@ pub async fn perform_create_library(location: &str, name: &str) -> Result<PathBu
     if let Err(e) = setup {
         // Rollback: remove anything we created before the failure.
         if root.exists() {
-            // warn!(root = ?root, "Library creation failed, rolling back directory");
+            warn!(root = ?root, "Library creation failed, rolling back directory");
             if let Err(rm_err) = tokio::fs::remove_dir_all(&root).await {
                 // Log the rollback failure but still surface the original error.
-                // tracing::error!(error = %rm_err, "Rollback failed — orphaned directory may remain");
+                tracing::error!(error = %rm_err, "Rollback failed — orphaned directory may remain");
             }
         }
         // Wrap anyhow error into AppError::Internal for the command layer.
         return Err(AppError::from(e));
     }
 
-    // info!(root = ?root, "Library created successfully");
+    info!(root = ?root, "Library created successfully");
     Ok(root)
 }
