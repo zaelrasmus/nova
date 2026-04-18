@@ -1,5 +1,5 @@
 use crate::error::AppError;
-use anyhow::{Context, Result};
+use anyhow::Context;
 use serde::Serialize;
 use sqlx::{sqlite::SqliteConnectOptions, SqlitePool};
 use std::path::PathBuf;
@@ -11,25 +11,32 @@ pub struct LibraryInfo {
     pub root_path: PathBuf,
 }
 
+/// Creates a new `.library` package — a directory containing the SQLite
+/// database and an `assets/` folder for binary files.
+///
+/// Returns `AppError::LibraryAlreadyExists` when the target path is taken,
+/// which lets the command layer surface a specific, actionable message.
+/// On any other failure, the partially created directory is removed before
+/// returning so no orphaned state is left on disk.
 #[instrument(fields(location = %location, name = %name))]
-pub async fn perform_create_library(location: &str, name: &str) -> Result<PathBuf, AppError> {
-    let root = PathBuf::from(location).join(format!("{}.library", name));
+pub async fn create_library(location: &str, name: &str) -> Result<PathBuf, AppError> {
+    let library_root = PathBuf::from(location).join(format!("{}.library", name));
 
-    if root.exists() {
-        // Typed error: the command can display a specific message for this case.
+    if library_root.exists() {
         return Err(AppError::LibraryAlreadyExists);
     }
 
-    debug!(root = ?root, "Starting library creation");
+    debug!(root = ?library_root, "Starting library creation");
 
-    // All setups steps run in a nested block so we can rollback cleanly on failure
-    let setup: anyhow::Result<()> = async {
-        tokio::fs::create_dir_all(root.join("assets"))
+    // All setup steps run inside this block so a single `if let Err` can rollback cleanly.
+    let setup_result: anyhow::Result<()> = async {
+        tokio::fs::create_dir_all(library_root.join("assets"))
             .await
             .context("Failed to create assets directory")?;
 
-        let db_path = root.join("library.db");
+        let db_path = library_root.join("library.db");
         debug!(db_path = ?db_path, "Initializing database");
+
         let options = SqliteConnectOptions::new()
             .filename(&db_path)
             .create_if_missing(true)
@@ -50,19 +57,20 @@ pub async fn perform_create_library(location: &str, name: &str) -> Result<PathBu
     }
     .await;
 
-    if let Err(e) = setup {
-        // Rollback: remove anything we created before the failure.
-        if root.exists() {
-            warn!(root = ?root, "Library creation failed, rolling back directory");
-            if let Err(rm_err) = tokio::fs::remove_dir_all(&root).await {
-                // Log the rollback failure but still surface the original error.
-                tracing::error!(error = %rm_err, "Rollback failed — orphaned directory may remain");
+    if let Err(e) = setup_result {
+        if library_root.exists() {
+            warn!(root = ?library_root, "Library creation failed — rolling back directory");
+            if let Err(rm_err) = tokio::fs::remove_dir_all(&library_root).await {
+                tracing::error!(
+                    error = %rm_err,
+                    "Rollback failed — orphaned directory may remain at {:?}",
+                    library_root
+                );
             }
         }
-        // Wrap anyhow error into AppError::Internal for the command layer.
         return Err(AppError::from(e));
     }
 
-    info!(root = ?root, "Library created successfully");
-    Ok(root)
+    info!(root = ?library_root, "Library created successfully");
+    Ok(library_root)
 }

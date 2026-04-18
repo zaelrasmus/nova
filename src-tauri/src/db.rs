@@ -5,9 +5,13 @@ use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, info, instrument, warn};
+
+/// Global database connection state managed by Tauri.
+///
+/// `RwLock` is used instead of `Mutex` so concurrent reads (e.g. `fetch_assets`
+/// running while a background task holds a reference) do not block each other.
 pub struct DbState {
-    // We use RwLock for better concurrent read performance
-    pub pool: Arc<RwLock<Option<SqlitePool>>>,
+    pool: Arc<RwLock<Option<SqlitePool>>>,
 }
 
 impl DbState {
@@ -17,13 +21,21 @@ impl DbState {
         }
     }
 
-    /// Senior helper: Centralizes pool access and error handling
-    pub async fn get_pool(&self) -> Result<SqlitePool, AppError> {
+    /// Returns a clone of the active connection pool.
+    ///
+    /// Cloning `SqlitePool` is cheap — it increments an `Arc` reference count.
+    /// Returns `AppError::NoLibrary` if no library has been connected yet.
+    pub async fn acquire_pool(&self) -> Result<SqlitePool, AppError> {
         let lock = self.pool.read().await;
         lock.as_ref().cloned().ok_or(AppError::NoLibrary)
     }
 
-    // Establishing a connection to the SQlite database library
+    /// Opens a WAL-mode SQLite connection to `{path}/library.db`.
+    ///
+    /// WAL + Normal synchronous is the right tradeoff for a local asset manager:
+    /// concurrent reads, fast writes, and crash-safe enough for non-critical data.
+    /// If a connection is already open, it is gracefully closed before the new
+    /// one is established.
     #[instrument(skip(self, path), fields(library_path = %path.as_ref().display()))]
     pub async fn connect<P: AsRef<Path>>(&self, path: P) -> Result<(), AppError> {
         let db_path = path.as_ref().join("library.db");
@@ -42,20 +54,18 @@ impl DbState {
             .journal_mode(SqliteJournalMode::Wal)
             .synchronous(SqliteSynchronous::Normal);
 
-        // sqlx::Error is #[from] on AppError, so ? converts directly.
-        let pool = SqlitePool::connect_with(options).await?;
+        let new_pool = SqlitePool::connect_with(options).await?;
 
         let mut lock = self.pool.write().await;
 
-        // If a pool is already connected, disconnect it first
         if let Some(old_pool) = lock.take() {
             warn!("Replacing existing library connection. Closing old pool.");
             old_pool.close().await;
         }
 
-        *lock = Some(pool);
+        *lock = Some(new_pool);
 
-        info!(db_path = ?db_path, "Library connected sucessfully");
+        info!(db_path = ?db_path, "Library connected successfully");
         Ok(())
     }
 }

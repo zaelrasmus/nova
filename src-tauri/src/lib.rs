@@ -7,6 +7,11 @@ mod library;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Tracing filter priority:
+    //   1. `RUST_LOG` environment variable — overrides everything (useful in CI).
+    //   2. Fallback: this crate at DEBUG, noisy dependencies silenced to WARN.
+    //
+    // TODO: Write structured logs to a rotating file to disk for crash reports.
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -16,7 +21,7 @@ pub fn run() {
         .compact()
         .init();
 
-    tracing::info!("Starting Nova Application");
+    tracing::info!("Starting Nova");
 
     tauri::Builder::default()
         .plugin(tauri_plugin_store::Builder::new().build())
@@ -29,7 +34,7 @@ pub fn run() {
             commands::import_assets,
             commands::connect_library,
             commands::inject_test_asset,
-            commands::fetch_assets
+            commands::fetch_assets,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

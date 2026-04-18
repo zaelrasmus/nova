@@ -1,12 +1,13 @@
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
-use tracing::{debug, instrument, warn};
+use tracing::{debug, instrument};
 use walkdir::WalkDir;
 
+/// Creates a directory and all missing parents if it does not already exist.
 #[instrument(fields(path = %path.display()))]
 pub async fn ensure_dir(path: &Path) -> Result<()> {
     if !path.exists() {
-        debug!(path = ?path, "Directory no exists. Creating directory again");
+        debug!(path = ?path, "Directory missing, creating");
         tokio::fs::create_dir_all(path)
             .await
             .with_context(|| format!("Failed to create directory: {:?}", path))?;
@@ -14,16 +15,21 @@ pub async fn ensure_dir(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Recursively walks `source_dir` and returns:
+/// - A flat list of `Folder` values preserving parent hierarchy.
+/// - A map of `PathBuf → folder_id` used to build `ImportResult::path_links`.
+///
+/// Both are built in a single pass. WalkDir errors for individual entries are
+/// logged and skipped — a single unreadable directory should not abort the scan.
 #[instrument(fields(source = %source_dir.display()))]
-pub fn scan_folder_structure(
+pub fn scan_directories(
     source_dir: &Path,
 ) -> (
     Vec<crate::assets::Folder>,
     std::collections::HashMap<PathBuf, String>,
 ) {
     let mut folders = Vec::new();
-
-    let mut folder_map: std::collections::HashMap<PathBuf, String> =
+    let mut folder_id_by_path: std::collections::HashMap<PathBuf, String> =
         std::collections::HashMap::new();
 
     for entry in WalkDir::new(source_dir)
@@ -31,7 +37,7 @@ pub fn scan_folder_structure(
         .into_iter()
         .filter_map(|e| {
             e.inspect_err(|err| {
-                tracing::warn!(error = %err, "WalkDir error while scanning folders, skipping entry")
+                tracing::warn!(error = %err, "WalkDir error while scanning directories, skipping entry")
             })
             .ok()
         })
@@ -39,8 +45,7 @@ pub fn scan_folder_structure(
     {
         let path = entry.path().to_path_buf();
         let id = uuid::Uuid::new_v4().to_string();
-
-        let parent_id = path.parent().and_then(|p| folder_map.get(p).cloned());
+        let parent_id = path.parent().and_then(|p| folder_id_by_path.get(p).cloned());
 
         folders.push(crate::assets::Folder {
             id: id.clone(),
@@ -51,21 +56,25 @@ pub fn scan_folder_structure(
             original_path: path.to_string_lossy().into_owned(),
         });
 
-        folder_map.insert(path, id);
+        folder_id_by_path.insert(path, id);
     }
+
     debug!(
         folders = folders.len(),
         source = %source_dir.display(),
-        "Folder structure scan complete"
+        "Directory scan complete"
     );
-    (folders, folder_map)
+
+    (folders, folder_id_by_path)
 }
 
-/// Collects all file paths under `source_dir` recursively.
-/// WalkDir errors for individual entries are logged and skipped,
-/// not propagated — a single unreadable file should not abort the scan.
-pub fn collect_file_paths(source_dir: &Path) -> Vec<PathBuf> {
-    let paths: Vec<PathBuf> = WalkDir::new(source_dir)
+/// Recursively collects all file paths under `source_dir`.
+///
+/// WalkDir errors for individual entries are logged and skipped — a single
+/// unreadable file should not prevent the rest of the scan from completing.
+#[instrument(fields(source = %source_dir.display()))]
+pub fn collect_files(source_dir: &Path) -> Vec<PathBuf> {
+    let files: Vec<PathBuf> = WalkDir::new(source_dir)
         .into_iter()
         .filter_map(|e| {
             e.inspect_err(|err| {
@@ -78,10 +87,10 @@ pub fn collect_file_paths(source_dir: &Path) -> Vec<PathBuf> {
         .collect();
 
     debug!(
-        count = paths.len(),
+        count = files.len(),
         source = %source_dir.display(),
-        "File path collection complete"
+        "File collection complete"
     );
 
-    paths
+    files
 }
