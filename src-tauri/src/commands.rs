@@ -138,3 +138,17 @@ pub async fn import_assets(
         .inspect_err(|e| tracing::error!(error = %e, source = %source_path, "import_assets failed"))
         .map_err(AppError::from)
 }
+
+// ANTICIPATED: Backend sync
+// Apply a preference change to the backend
+#[tauri::command]
+pub async fn apply_preference(key: String, value: serde_json::Value) -> Result<(), AppError> {
+    match key.as_str() {
+        // "max_import_size_mb" => { ... }
+        // "thumbnail_quality"  => { ... }
+        unknown => {
+            tracing::warn!(key = unknown, "Unknown preference key, ignoring");
+        }
+    }
+    Ok(())
+}
