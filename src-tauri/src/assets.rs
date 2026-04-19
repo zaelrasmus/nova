@@ -64,8 +64,8 @@ pub struct Folder {
     pub id: String,
     pub name: String,
     pub parent_id: Option<String>,
-    pub order_by: String,
-    pub is_ascending: String,
+    pub order_by: String,     // TODO: Use an enum
+    pub is_ascending: String, // TODO: Use a bool
     pub original_path: String,
 }
 
@@ -107,6 +107,7 @@ pub trait ProgressReporter: Send + Sync {
 // ─── File-type detection ──────────────────────────────────────────────────────
 
 // These arrays must remain sorted — `binary_search` requires it.
+// TODO: Use phf
 const IMG_EXTS: &[&str] = &["bmp", "gif", "jfif", "jpeg", "jpg", "png", "webp"];
 const VID_EXTS: &[&str] = &["avi", "mkv", "mov", "mp4", "webm"];
 const AUD_EXTS: &[&str] = &["flac", "m4a", "mp3", "ogg", "wav"];
