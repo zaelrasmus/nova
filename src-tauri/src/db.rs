@@ -6,10 +6,6 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, info, instrument, warn};
 
-/// Global database connection state managed by Tauri.
-///
-/// `RwLock` is used instead of `Mutex` so concurrent reads (e.g. `fetch_assets`
-/// running while a background task holds a reference) do not block each other.
 pub struct DbState {
     pool: Arc<RwLock<Option<SqlitePool>>>,
 }
@@ -21,21 +17,11 @@ impl DbState {
         }
     }
 
-    /// Returns a clone of the active connection pool.
-    ///
-    /// Cloning `SqlitePool` is cheap — it increments an `Arc` reference count.
-    /// Returns `AppError::NoLibrary` if no library has been connected yet.
     pub async fn acquire_pool(&self) -> Result<SqlitePool, AppError> {
         let lock = self.pool.read().await;
         lock.as_ref().cloned().ok_or(AppError::NoLibrary)
     }
 
-    /// Opens a WAL-mode SQLite connection to `{path}/library.db`.
-    ///
-    /// WAL + Normal synchronous is the right tradeoff for a local asset manager:
-    /// concurrent reads, fast writes, and crash-safe enough for non-critical data.
-    /// If a connection is already open, it is gracefully closed before the new
-    /// one is established.
     #[instrument(skip(self, path), fields(library_path = %path.as_ref().display()))]
     pub async fn connect<P: AsRef<Path>>(&self, path: P) -> Result<(), AppError> {
         let db_path = path.as_ref().join("library.db");

@@ -15,12 +15,6 @@ pub async fn ensure_dir(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Recursively walks `source_dir` and returns:
-/// - A flat list of `Folder` values preserving parent hierarchy.
-/// - A map of `PathBuf → folder_id` used to build `ImportResult::path_links`.
-///
-/// Both are built in a single pass. WalkDir errors for individual entries are
-/// logged and skipped — a single unreadable directory should not abort the scan.
 #[instrument(fields(source = %source_dir.display()))]
 pub fn scan_directories(
     source_dir: &Path,
@@ -68,10 +62,6 @@ pub fn scan_directories(
     (folders, folder_id_by_path)
 }
 
-/// Recursively collects all file paths under `source_dir`.
-///
-/// WalkDir errors for individual entries are logged and skipped — a single
-/// unreadable file should not prevent the rest of the scan from completing.
 #[instrument(fields(source = %source_dir.display()))]
 pub fn collect_files(source_dir: &Path) -> Vec<PathBuf> {
     let files: Vec<PathBuf> = WalkDir::new(source_dir)

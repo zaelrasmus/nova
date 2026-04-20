@@ -1,12 +1,3 @@
-//! Asset domain — models, file-type detection, and the import pipeline.
-//!
-//! The import pipeline runs in five stages:
-//! 1. Resolve the library root from the active database connection.
-//! 2. Scan the source directory for subdirectories and files.
-//! 3. Build asset metadata in parallel (Rayon — CPU-bound).
-//! 4. Copy files concurrently (Tokio + bounded semaphore — I/O-bound).
-//! 5. Persist all metadata in a single atomic database transaction.
-
 use crate::fs;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -23,8 +14,6 @@ use std::{
 };
 use tokio::sync::Semaphore;
 use tracing::{debug, info, instrument, warn};
-
-// ─── Models ──────────────────────────────────────────────────────────────────
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Type)]
 #[sqlx(rename_all = "lowercase")]
@@ -45,9 +34,6 @@ pub struct AssetMetadata {
     #[sqlx(rename = "path")]
     pub dest_path: String,
 
-    /// Populated during the import pipeline only — not stored in the database
-    /// and not serialized to the frontend. Kept on this struct to avoid a
-    /// separate staging type.
     #[serde(skip)]
     #[sqlx(skip)]
     pub source_path: String,
@@ -76,8 +62,6 @@ pub struct ImportResult {
     pub path_links: HashMap<String, String>,
 }
 
-// ─── Progress reporting ───────────────────────────────────────────────────────
-
 #[derive(Serialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub enum ImportStage {
@@ -95,18 +79,10 @@ pub struct ImportProgress {
     pub message: String,
 }
 
-/// Decouples the import pipeline from Tauri's event system.
-///
-/// The pipeline depends only on this trait, which allows it to be driven by a
-/// `TauriProgressReporter` in production or a no-op mock in unit tests — no
-/// conditional compilation or feature flags required.
 pub trait ProgressReporter: Send + Sync {
     fn report(&self, progress: ImportProgress);
 }
 
-// ─── File-type detection ──────────────────────────────────────────────────────
-
-// These arrays must remain sorted — `binary_search` requires it.
 // TODO: Use phf
 const IMG_EXTS: &[&str] = &["bmp", "gif", "jfif", "jpeg", "jpg", "png", "webp"];
 const VID_EXTS: &[&str] = &["avi", "mkv", "mov", "mp4", "webm"];
@@ -132,13 +108,6 @@ fn detect_asset_type(path: &Path) -> AssetType {
     AssetType::Unknown
 }
 
-// ─── Internal helpers ─────────────────────────────────────────────────────────
-
-/// Resolves the library's root directory from the active pool.
-///
-/// Uses `PRAGMA database_list` to read the physical file path at runtime, which
-/// avoids storing the path redundantly in `DbState` and keeps it always in sync
-/// with the actual connection.
 #[instrument(skip(pool))]
 async fn resolve_library_root(pool: &SqlitePool) -> Result<PathBuf> {
     let db_info: (i32, String, String) = sqlx::query_as("PRAGMA database_list")
@@ -152,11 +121,6 @@ async fn resolve_library_root(pool: &SqlitePool) -> Result<PathBuf> {
         .context("Library database has an invalid path structure")
 }
 
-/// Inserts all staged assets in a single transaction.
-///
-/// Atomicity is intentional: either the entire batch is saved or nothing is.
-/// A partial write would leave files on disk with no corresponding database
-/// record, making them invisible to the library without a manual repair.
 #[instrument(skip(pool, assets), fields(count = assets.len()))]
 async fn persist_assets(pool: &SqlitePool, assets: &[AssetMetadata]) -> Result<()> {
     let start = std::time::Instant::now();
@@ -197,10 +161,6 @@ async fn persist_assets(pool: &SqlitePool, assets: &[AssetMetadata]) -> Result<(
     Ok(())
 }
 
-/// Attempts to construct an `AssetMetadata` from a source path.
-///
-/// Returns `None` on any I/O failure rather than propagating an error — a
-/// single unreadable file should not abort the entire import batch.
 fn build_asset_metadata(src: PathBuf, dest_dir: &Path) -> Option<AssetMetadata> {
     let asset_type = detect_asset_type(&src);
     let meta = std::fs::metadata(&src)
@@ -231,11 +191,6 @@ fn build_asset_metadata(src: PathBuf, dest_dir: &Path) -> Option<AssetMetadata> 
     })
 }
 
-/// Copies assets to the library directory with bounded concurrency.
-///
-/// The semaphore is capped at 10 to avoid exhausting OS file descriptors on
-/// large imports. Individual failures are counted and logged but do not abort
-/// the batch — a partial import is preferable to losing all progress.
 #[instrument(skip(reporter, assets), fields(total = assets.len()))]
 async fn copy_assets(reporter: Arc<dyn ProgressReporter>, assets: &[AssetMetadata]) -> Result<()> {
     let start = std::time::Instant::now();
@@ -303,9 +258,6 @@ async fn copy_assets(reporter: Arc<dyn ProgressReporter>, assets: &[AssetMetadat
     Ok(())
 }
 
-// ─── Public API ───────────────────────────────────────────────────────────────
-
-/// Returns all assets currently stored in the library database.
 #[instrument(skip(pool))]
 pub async fn fetch_assets(pool: &SqlitePool) -> Result<Vec<AssetMetadata>> {
     let assets = sqlx::query_as::<_, AssetMetadata>(
@@ -323,7 +275,6 @@ pub async fn fetch_assets(pool: &SqlitePool) -> Result<Vec<AssetMetadata>> {
     Ok(assets)
 }
 
-/// Inserts a synthetic asset record for development and testing.
 #[instrument(skip(pool))]
 pub async fn insert_test_asset(pool: &SqlitePool, name: &str) -> Result<String> {
     let id = uuid::Uuid::new_v4().to_string();
@@ -350,10 +301,6 @@ pub async fn insert_test_asset(pool: &SqlitePool, name: &str) -> Result<String> 
     Ok(id)
 }
 
-/// Runs the full import pipeline for a source directory.
-///
-/// Progress is emitted through `reporter` so this function stays independent
-/// of Tauri and can be unit-tested with a mock reporter.
 #[instrument(skip(reporter, pool), fields(source = %source_dir.display()))]
 pub async fn import_assets(
     reporter: Arc<dyn ProgressReporter>,

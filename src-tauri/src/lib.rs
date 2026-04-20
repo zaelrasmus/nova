@@ -7,10 +7,6 @@ mod library;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // Tracing filter priority:
-    //   1. `RUST_LOG` environment variable — overrides everything (useful in CI).
-    //   2. Fallback: this crate at DEBUG, noisy dependencies silenced to WARN.
-    //
     // TODO: Write structured logs to a rotating file to disk for crash reports.
     tracing_subscriber::fmt()
         .with_env_filter(

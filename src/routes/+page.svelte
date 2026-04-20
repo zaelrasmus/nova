@@ -8,7 +8,7 @@
 
     import { toast } from "svelte-sonner";
     import { Alert, AlertDescription, AlertTitle } from "$components/ui/alert";
-    import { Button } from "$components/ui/button";
+    import { Button, buttonVariants } from "$components/ui/button";
     import AssetGrid from "$components/AssetGrid.svelte";
     import { libraryManager } from "../routes/settings.svelte";
 
@@ -184,6 +184,32 @@
     // Alert is shown as persistent inline state — not a toast —
     // because "no library connected" requires user action before anything else works.
     let noLibraryConnected = $derived(!libraryManager.state.activeLibrary);
+
+    import * as Dialog from "$components/ui/dialog";
+    import * as Tabs from "$components/ui/tabs";
+    import { SETTINGS_SECTIONS, DEFAULT_SECTION_ID } from "./settings-sections";
+
+    // import { Settings, Palette, FolderInput, LayoutGrid, Library, Info } from "lucide-svelte";
+
+    // To add a new section: import its component and register it below.
+    import AppearanceSection from "../components/settings/AppaeranceSection.svelte";
+    // import ImportSection from "./sections/ImportSection.svelte";
+    // import DisplaySection from "./sections/DisplaySection.svelte";
+    // import LibrarySection from "./sections/LibrarySection.svelte";
+    // import AboutSection from "./sections/AboutSection.svelte";
+
+    const sectionComponents: Record<string, any> = {
+        appearance: AppearanceSection,
+        // Add other sections here
+    };
+
+    // const iconComponents: Record<string, any> = {
+    //     Palette,
+    //     FolderInput,
+    //     LayoutGrid,
+    //     Library,
+    //     Info,
+    // };
 </script>
 
 <QueryClientProvider client={queryClient}>
@@ -201,6 +227,77 @@
                 </AlertDescription>
             </Alert>
         {/if}
+
+        <Dialog.Root>
+            <Dialog.Trigger type="button" class={buttonVariants({ variant: "ghost" })}>
+                Open Dialog Settings
+            </Dialog.Trigger>
+            <Dialog.Content
+                class="sm:max-w-[calc(100%-10rem)] flex gap-0 p-0 overflow-hidden h-[85vh]
+                       bg-neutral-950 border border-neutral-800 rounded-xl shadow-2xl flex-col"
+            >
+                <Dialog.Title class="sr-only">Settings</Dialog.Title>
+
+                <Tabs.Root
+                    value={DEFAULT_SECTION_ID}
+                    orientation="vertical"
+                    class="flex flex-1 overflow-hidden h-full w-full"
+                >
+                    <Tabs.List
+                        class="w-52 shrink-0 h-full rounded-none border-r border-neutral-800
+                           bg-neutral-900/60 justify-start pt-4 gap-0.5 px-2"
+                    >
+                        <p
+                            class="px-3 pb-3 w-full text-[11px] font-semibold uppercase tracking-widest text-neutral-500"
+                        >
+                            Settings
+                        </p>
+
+                        {#each SETTINGS_SECTIONS as section}
+                            {#if section.dividerAbove}
+                                <div
+                                    class="my-2 mx-1 h-px w-full bg-neutral-800"
+                                    aria-hidden="true"
+                                ></div>
+                            {/if}
+
+                            <Tabs.Trigger
+                                value={section.id}
+                                class="gap-2.5 px-3 text-neutral-400
+                               hover:bg-neutral-800/60 hover:text-neutral-200
+                               data-[state=active]:bg-neutral-800
+                               data-[state=active]:text-neutral-100"
+                            >
+                                <!-- <svelte:component
+                                    this={iconComponents[section.icon]}
+                                    class="h-4 w-4 shrink-0"
+                                /> -->
+                                {section.label}
+                            </Tabs.Trigger>
+                        {/each}
+                    </Tabs.List>
+
+                    <!-- Content panels — each section gets its own Tabs.Content -->
+                    <div class="flex flex-col flex-1 min-w-0 overflow-hidden h-full">
+                        {#each SETTINGS_SECTIONS as section}
+                            <Tabs.Content
+                                value={section.id}
+                                class="flex flex-col flex-1 overflow-hidden mt-0"
+                            >
+                                <div class="px-6 py-4 border-b border-neutral-800 shrink-0">
+                                    <h2 class="text-sm font-semibold text-neutral-100">
+                                        {section.label}
+                                    </h2>
+                                </div>
+                                <div class="flex-1 overflow-y-auto px-6 py-5 text-neutral-200">
+                                    <svelte:component this={sectionComponents[section.id]} />
+                                </div>
+                            </Tabs.Content>
+                        {/each}
+                    </div>
+                </Tabs.Root>
+            </Dialog.Content>
+        </Dialog.Root>
 
         <Button onclick={createLibrary}>Create a new library</Button>
 

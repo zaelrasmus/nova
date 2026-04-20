@@ -1,12 +1,3 @@
-//! Tauri command handlers.
-//!
-//! Every function in this module follows the same contract:
-//! - Annotated with `#[tauri::command]` — callable from the frontend via `invoke()`.
-//! - Contains zero business logic — delegates immediately to a service function.
-//! - Returns `Result<T, AppError>`. Never `Result<T, String>`.
-//! - Logs the full error with `tracing` before returning, so `AppError::Serialize`
-//!   can safely send only the generic frontend message over IPC.
-
 use crate::assets::{self, AssetMetadata, ImportProgress, ImportResult, ProgressReporter};
 use crate::db::DbState;
 use crate::error::AppError;
@@ -16,12 +7,6 @@ use tauri::{AppHandle, Emitter, Runtime};
 use tauri_plugin_fs::FsExt;
 use tracing::{info, instrument, warn};
 
-// ─── Progress reporter ────────────────────────────────────────────────────────
-
-/// Bridges the `ProgressReporter` trait to Tauri's window event system.
-///
-/// Throttled to ~60 fps (16 ms) to avoid flooding the frontend event queue
-/// when importing tens of thousands of files.
 struct TauriProgressReporter {
     window: tauri::Window,
     last_emit: std::sync::Mutex<std::time::Instant>,
@@ -42,8 +27,6 @@ impl ProgressReporter for TauriProgressReporter {
         }
     }
 }
-
-// ─── Commands ─────────────────────────────────────────────────────────────────
 
 #[instrument(skip_all, fields(library_path = %library_path))]
 #[tauri::command]

@@ -11,13 +11,6 @@ pub struct LibraryInfo {
     pub root_path: PathBuf,
 }
 
-/// Creates a new `.library` package — a directory containing the SQLite
-/// database and an `assets/` folder for binary files.
-///
-/// Returns `AppError::LibraryAlreadyExists` when the target path is taken,
-/// which lets the command layer surface a specific, actionable message.
-/// On any other failure, the partially created directory is removed before
-/// returning so no orphaned state is left on disk.
 #[instrument(fields(location = %location, name = %name))]
 pub async fn create_library(location: &str, name: &str) -> Result<PathBuf, AppError> {
     let library_root = PathBuf::from(location).join(format!("{}.library", name));
