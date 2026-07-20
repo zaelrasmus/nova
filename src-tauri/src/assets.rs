@@ -3,7 +3,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use rayon::prelude::{IntoParallelIterator, ParallelIterator};
 use serde::{Deserialize, Serialize};
-use sqlx::{sqlite::SqlitePool, FromRow, Type};
+use sqlx::{sqlite::SqlitePool, FromRow, QueryBuilder, Type};
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
@@ -128,35 +128,53 @@ async fn resolve_library_root(pool: &SqlitePool) -> Result<PathBuf> {
 async fn persist_assets(pool: &SqlitePool, assets: &[AssetMetadata]) -> Result<()> {
     let start = std::time::Instant::now();
 
+    // SQLite caps bound parameters at 32766. With 10 columns per row, keep each
+    // multi-row INSERT well under that (10 * 2000 = 20000 params per statement)
+    const ROWS_PER_INSERT: usize = 2000;
+
     let mut tx = pool
         .begin()
         .await
         .context("Failed to begin database transaction")?;
 
-    for asset in assets {
-        sqlx::query(
-            "INSERT INTO assets (id, asset_type, filename, extension, path, width, height,
-                                 imported_date, creation_date, modified_date)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(&asset.id)
-        .bind("image") // TODO: bind asset.asset_type directly once the migration uses the enum column
-        .bind(&asset.filename)
-        .bind(&asset.extension)
-        .bind(&asset.dest_path)
-        .bind(&asset.width)
-        .bind(&asset.height)
-        .bind(&asset.imported_date)
-        .bind(&asset.creation_date)
-        .bind(&asset.modified_date)
-        .execute(&mut *tx)
-        .await
-        .with_context(|| format!("Failed to insert asset '{}'", asset.filename))?;
+    for chunk in assets.chunks(ROWS_PER_INSERT) {
+        let mut qb = QueryBuilder::new(
+            "INSERT INTO assets (id, asset_type, filename, extension, path, \
+                width, height, imported_date, creation_date, modified_date) ",
+        );
+
+        qb.push_values(chunk, |mut b, asset| {
+            b.push_bind(&asset.id)
+                .push_bind(asset.asset_type)
+                .push_bind(&asset.filename)
+                .push_bind(&asset.extension)
+                .push_bind(&asset.dest_path)
+                .push_bind(asset.width)
+                .push_bind(asset.height)
+                .push_bind(&asset.imported_date)
+                .push_bind(&asset.creation_date)
+                .push_bind(&asset.modified_date);
+        });
+
+        qb.build()
+            .execute(&mut *tx)
+            .await
+            .context("Failed to batch insert asset chunk")?;
     }
 
     tx.commit()
         .await
         .context("Failed to commit asset transaction")?;
+
+    // Fold the WAL back into the main DB after a large write so the -wal file
+    // doesnt grow too large. Non-fatal: The data is already comitted.
+
+    if let Err(e) = sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
+        .execute(pool)
+        .await
+    {
+        warn!(error = %e, "WAL checkpoint after persist failed (non-fatal)");
+    }
 
     info!(
         count = assets.len(),
