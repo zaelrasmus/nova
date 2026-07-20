@@ -5,6 +5,8 @@
     import { createVirtualizer } from "@tanstack/svelte-virtual";
     import AssetCard from "./AssetCard.svelte";
 
+    import {get} from "svelte/store";
+
     import { join, dirname } from "@tauri-apps/api/path";
 
     interface AssetMetadata {
@@ -19,8 +21,8 @@
 
         // TODO: Add to the SELECT query in assets.rs once ready.
         // Required for accurate masonry height estimation in AssetGrid.
-        width?: number;
-        height?: number;
+        width: number;
+        height: number;
     }
 
     const assetsQuery = useAssets();
@@ -70,26 +72,52 @@
         containerWidth > 0 ? (containerWidth - GAP * (numColumns - 1)) / numColumns : 200, // safe fallback before first measuremnt
     );
 
-    const virtualizer = $derived.by(() => {
-        return createVirtualizer<HTMLDivElement, HTMLDivElement>({
-            count: assets.length,
-            getScrollElement: () => scrollEl,
-            lanes: numColumns,
-            estimateSize: (index) => {
-                const asset = assets[index];
+    const virtualizer = createVirtualizer<HTMLDivElement, HTMLDivElement>({
+      count: assets.length,
+      getScrollElement: () => scrollEl,
+      lanes: numColumns,
+      estimateSize: (index) => {
+        const asset = assets[index];
+        const aspectRatio = asset?.width && asset?.height ? asset.width / asset.height : 1;
+        return columnWidth / aspectRatio + GAP;
+      },
+      overscan: 6, // lane masonry needs more than 3 or fast flings show gaps
+      getItemKey: (index) => assets[index].id,
+    })
 
-                // TODO: uses asset.width / asset.height
-                // Uses a default 1:1 ratio
+    $effect(() => {
+      const count = assets.length;
+      const lanes = numColumns;
+      void columnWidth;
+      void scrollEl;
 
-                const aspectRatio =
-                    asset.width && asset.height ? asset.width / asset.height : 1;
+      const instance = get(virtualizer);
 
-                return columnWidth / aspectRatio + GAP;
-            },
-            overscan: 3,
-            getItemKey: (index) => assets[index].id,
-        });
-    });
+      instance.setOptions({ count, lanes});
+
+      instance.measure();
+    })
+
+    // const virtualizer = $derived.by(() => {
+    //     return createVirtualizer<HTMLDivElement, HTMLDivElement>({
+    //         count: assets.length,
+    //         getScrollElement: () => scrollEl,
+    //         lanes: numColumns,
+    //         estimateSize: (index) => {
+    //             const asset = assets[index];
+
+    //             // TODO: uses asset.width / asset.height
+    //             // Uses a default 1:1 ratio
+
+    //             const aspectRatio =
+    //                 asset.width && asset.height ? asset.width / asset.height : 1;
+
+    //             return columnWidth / aspectRatio + GAP;
+    //         },
+    //         overscan: 3,
+    //         getItemKey: (index) => assets[index].id,
+    //     });
+    // });
 
     // ── FUTURE: Pragmatic Drag and Drop (Atlassian) ───────────────────────────
     // When you're ready to implement drag-to-reorder:
@@ -103,29 +131,27 @@
     // ────────────────────────────────────────────────────────────────────────
 </script>
 
-<!-- ── Toolbar ──────────────────────────────────────────────────────────────
-     Column slider: controls numColumns, which drives the masonry layout.
-     Min 2, max 8 — same range as Eagle.
-──────────────────────────────────────────────────────────────────────────── -->
-<div class="flex items-center justify-between px-4 py-2 border-b border-neutral-800 bg-white">
-    <span class="text-xs text-neutral-400">
-        {assets.length} assets
-    </span>
+<div class="flex flex-col h-full">
+    <div class="flex items-center justify-between px-4 py-2 border-b border-neutral-800 bg-white shrink-0">
+        <span class="text-xs text-neutral-400">
+            {assets.length} assets
+        </span>
 
-    <div class="flex items-center gap-2">
-        <span class="text-xs text-neutral-500">Columns</span>
-        <input
-            type="range"
-            min="2"
-            max="8"
-            step="1"
-            defaultValue="4"
-            bind:value={numColumns}
-            class="w-24 accent-neutral-400"
-        />
-        <span class="text-xs text-neutral-400 w-3 text-center">{numColumns}</span>
+        <div class="flex items-center gap-2">
+            <span class="text-xs text-neutral-500">Columns</span>
+            <input
+                type="range"
+                min="2"
+                max="8"
+                step="1"
+                defaultValue="4"
+                bind:value={numColumns}
+                class="w-24 accent-neutral-400"
+            />
+            <span class="text-xs text-neutral-400 w-3 text-center">{numColumns}</span>
+        </div>
     </div>
-</div>
+
 
 <!-- ── Loading / error states ─────────────────────────────────────────────── -->
 {#if assetsQuery.isLoading}
@@ -144,14 +170,9 @@
     {console.log(assets.slice(0, 10))}
     <div
         bind:this={scrollEl}
-        class="relative overflow-y-auto w-full h-full
+        class="relative flex-1 min-h-0 overflow-y-auto w-full
            [scrollbar-width:thin] [scrollbar-color:theme(colors.neutral.700)_transparent] bg-white"
     >
-        <!--
-      TanStack Virtual standard pattern:
-      - Outer div: total virtual height (so the scrollbar thumb is sized correctly)
-      - Inner items: absolutely positioned with translateY from the virtualizer
-    -->
         <div
             style="background-color: white; width: full; height: {$virtualizer.getTotalSize()}px; position: relative;"
         >
@@ -175,3 +196,4 @@
         </div>
     </div>
 {/if}
+</div>

@@ -390,7 +390,8 @@
             </div>
         {/if}
 
-        <div class="mt-8">
+        <!-- (h-[70vh] is pragmatic; long-term make <main> a h-screen flex flex-col and this flex-1 min-h-0. Any bounded height works.) -->
+        <div class="mt-8  h-[70vh]">
             <AssetGrid />
         </div>
     </main>
