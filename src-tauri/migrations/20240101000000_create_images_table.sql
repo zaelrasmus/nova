@@ -15,6 +15,9 @@ CREATE TABLE IF NOT EXISTS assets (
     asset_type TEXT NOT NULL, -- 'image', 'video', 'audio', "etc."
     path TEXT NOT NULL,
 
+    width INTEGER NOT NULL, -- todo: DEFAULT 0
+    height INTEGER NOT NULL, -- todo: DEFAULT 0
+
 
     filename TEXT NOT NULL,
     extension TEXT NOT NULL,

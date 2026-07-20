@@ -150,7 +150,7 @@
         // We can't await toast.promise directly and also run finally,
         // so we manage isImporting with the underlying invoke call.
         try {
-            await invoke<ImportResult>("import_assets", { sourcePath: selectedSource });
+            await importPromise;
         } catch {
             // Error is already handled by toast.promise above.
         } finally {

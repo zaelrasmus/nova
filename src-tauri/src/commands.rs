@@ -14,23 +14,41 @@ struct TauriProgressReporter {
 
 impl ProgressReporter for TauriProgressReporter {
     fn report(&self, progress: ImportProgress) {
-        let mut last = self.last_emit.lock().unwrap();
-        let stage_finished = progress.current == progress.total && progress.total > 0;
-        let throttle_passed = last.elapsed().as_millis() >= 16;
+        let is_high_frequency = matches!(progress.stage, assets::ImportStage::CopyingFiles);
+        let stage_finished = progress.total > 0 && progress.current == progress.total;
 
-        if throttle_passed || stage_finished {
-            if let Err(e) = self.window.emit("import-progress", &progress) {
-                // Non-fatal: the window may have been closed mid-import.
-                warn!(error = %e, "Failed to emit import-progress event");
+        if is_high_frequency && !stage_finished {
+            let mut last = self.last_emit.lock().unwrap();
+            if last.elapsed().as_millis() < 16 {
+                return; // drop this intermediate frame
             }
             *last = std::time::Instant::now();
+            // guard drops here - we never hold the mutex across emit()
         }
+
+        if let Err(e) = self.window.emit("import-progress", &progress) {
+            // Non-fatal: the window may have been closed mid-import
+            warn!(error = %e, "Failed to emit import-progress event");
+        }
+
+        // let mut last = self.last_emit.lock().unwrap();
+        // let stage_finished = progress.current == progress.total && progress.total > 0;
+        // let throttle_passed = last.elapsed().as_millis() >= 16;
+
+        // if throttle_passed || stage_finished {
+        //     if let Err(e) = self.window.emit("import-progress", &progress) {
+        //         // Non-fatal: the window may have been closed mid-import.
+        //         warn!(error = %e, "Failed to emit import-progress event");
+        //     }
+        //     *last = std::time::Instant::now();
+        // }
     }
 }
 
 #[instrument(skip_all, fields(library_path = %library_path))]
 #[tauri::command]
-pub async fn connect_library(
+pub async fn connect_library<R: Runtime>(
+    app: AppHandle<R>,
     library_path: String,
     state: tauri::State<'_, DbState>,
 ) -> Result<String, AppError> {
@@ -38,6 +56,11 @@ pub async fn connect_library(
         .connect(&library_path)
         .await
         .inspect_err(|e| tracing::error!(error = %e, "connect_library failed"))?;
+
+    app.fs_scope().allow_directory(&library_path, true).map_err(|e| {
+        tracing::error!(error = %e, path = %library_path, "Failed to allow directory on connect");
+        AppError::Io(std::io::Error::new(std::io::ErrorKind::PermissionDenied, e.to_string(),))
+    })?;
 
     info!(library_path = %library_path, "Library connected");
     Ok("Library connected successfully".into())

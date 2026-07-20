@@ -38,6 +38,9 @@ pub struct AssetMetadata {
     #[sqlx(skip)]
     pub source_path: String,
 
+    pub width: u32,
+    pub height: u32,
+
     pub imported_date: String,
     #[sqlx(rename = "creation_date")]
     pub creation_date: String,
@@ -63,7 +66,7 @@ pub struct ImportResult {
 }
 
 #[derive(Serialize, Clone, Debug)]
-#[serde(rename_all = "camelCase")]
+// #[serde(rename_all = "camelCase")]
 pub enum ImportStage {
     Scanning,
     ProcessingMetadata,
@@ -132,15 +135,17 @@ async fn persist_assets(pool: &SqlitePool, assets: &[AssetMetadata]) -> Result<(
 
     for asset in assets {
         sqlx::query(
-            "INSERT INTO assets (id, asset_type, filename, extension, path,
+            "INSERT INTO assets (id, asset_type, filename, extension, path, width, height,
                                  imported_date, creation_date, modified_date)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&asset.id)
         .bind("image") // TODO: bind asset.asset_type directly once the migration uses the enum column
         .bind(&asset.filename)
         .bind(&asset.extension)
         .bind(&asset.dest_path)
+        .bind(&asset.width)
+        .bind(&asset.height)
         .bind(&asset.imported_date)
         .bind(&asset.creation_date)
         .bind(&asset.modified_date)
@@ -163,16 +168,22 @@ async fn persist_assets(pool: &SqlitePool, assets: &[AssetMetadata]) -> Result<(
 
 fn build_asset_metadata(src: PathBuf, dest_dir: &Path) -> Option<AssetMetadata> {
     let asset_type = detect_asset_type(&src);
+    let (width, height) = image::image_dimensions(&src)
+        .inspect_err(|e| warn!(path = ?src, error = %e, "Could not read image dimensions"))
+        .ok()?;
     let meta = std::fs::metadata(&src)
         .inspect_err(|e| warn!(path = ?src, error = %e, "Could not read file metadata, skipping"))
         .ok()?;
 
+    let modified: DateTime<Utc> = meta
+        .modified()
+        .map(DateTime::<Utc>::from)
+        .unwrap_or_else(|_| Utc::now());
+
     let created: DateTime<Utc> = meta
         .created()
-        .inspect_err(|e| debug!(path = ?src, error = %e, "btime unavailable, falling back"))
-        .ok()?
-        .into();
-    let modified: DateTime<Utc> = meta.modified().ok()?.into();
+        .map(DateTime::<Utc>::from)
+        .unwrap_or(modified);
 
     let ext = src.extension()?.to_str()?;
     let id = uuid::Uuid::new_v4().to_string();
@@ -185,6 +196,8 @@ fn build_asset_metadata(src: PathBuf, dest_dir: &Path) -> Option<AssetMetadata> 
         extension: ext.to_string(),
         dest_path: dest_path.to_string_lossy().into_owned(),
         source_path: src.to_string_lossy().into_owned(),
+        width,
+        height,
         imported_date: Utc::now().to_rfc3339(),
         creation_date: created.to_rfc3339(),
         modified_date: modified.to_rfc3339(),
@@ -262,7 +275,7 @@ async fn copy_assets(reporter: Arc<dyn ProgressReporter>, assets: &[AssetMetadat
 pub async fn fetch_assets(pool: &SqlitePool) -> Result<Vec<AssetMetadata>> {
     let assets = sqlx::query_as::<_, AssetMetadata>(
         r#"
-        SELECT id, asset_type, filename, extension, path,
+        SELECT id, asset_type, filename, extension, path, width, height,
                imported_date, creation_date, modified_date
         FROM assets
         "#,
@@ -281,15 +294,17 @@ pub async fn insert_test_asset(pool: &SqlitePool, name: &str) -> Result<String> 
     let now = chrono::Utc::now().to_rfc3339();
 
     sqlx::query(
-        "INSERT INTO assets (id, asset_type, filename, extension, path,
+        "INSERT INTO assets (id, asset_type, filename, extension, path, width, height,
                              imported_date, creation_date, modified_date)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&id)
     .bind("image")
     .bind(name)
     .bind("png")
     .bind(format!("assets/{}", name))
+    .bind(0_i64) // width — placeholder for the test row
+    .bind(0_i64) // height
     .bind(&now)
     .bind(&now)
     .bind(&now)
