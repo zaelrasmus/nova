@@ -1,13 +1,10 @@
 <script lang="ts">
     import { useAssets } from "$lib/queries.svelte";
-    import { convertFileSrc } from "@tauri-apps/api/core";
-    import { libraryManager } from "../routes/settings.svelte";
+
     import { createVirtualizer } from "@tanstack/svelte-virtual";
     import AssetCard from "./AssetCard.svelte";
 
     import {get} from "svelte/store";
-
-    import { join, dirname } from "@tauri-apps/api/path";
 
     interface AssetMetadata {
         id: string;
@@ -18,9 +15,6 @@
         imported_date: string;
         creation_date: string;
         modified_date: string;
-
-        // TODO: Add to the SELECT query in assets.rs once ready.
-        // Required for accurate masonry height estimation in AssetGrid.
         width: number;
         height: number;
     }
@@ -31,17 +25,14 @@
 
     const assets = $derived(datas.slice(0, 500));
 
-    // Estado para la ruta base física
-    let baseDir = $state("");
 
-    // Reaccionamos al cambio de librería para calcular el directorio padre
-    $effect(() => {
-        if (libraryManager.state.activeLibrary) {
-            dirname(libraryManager.state.activeLibrary).then((path) => {
-                baseDir = path;
-            });
-        }
-    });
+    // $effect(() => {
+    //     if (libraryManager.state.activeLibrary) {
+    //         dirname(libraryManager.state.activeLibrary).then((path) => {
+    //             baseDir = path;
+    //         });
+    //     }
+    // });
 
     // User-controlled. The slider writes here
     let numColumns = $state(4);
@@ -98,26 +89,7 @@
       instance.measure();
     })
 
-    // const virtualizer = $derived.by(() => {
-    //     return createVirtualizer<HTMLDivElement, HTMLDivElement>({
-    //         count: assets.length,
-    //         getScrollElement: () => scrollEl,
-    //         lanes: numColumns,
-    //         estimateSize: (index) => {
-    //             const asset = assets[index];
 
-    //             // TODO: uses asset.width / asset.height
-    //             // Uses a default 1:1 ratio
-
-    //             const aspectRatio =
-    //                 asset.width && asset.height ? asset.width / asset.height : 1;
-
-    //             return columnWidth / aspectRatio + GAP;
-    //         },
-    //         overscan: 3,
-    //         getItemKey: (index) => assets[index].id,
-    //     });
-    // });
 
     // ── FUTURE: Pragmatic Drag and Drop (Atlassian) ───────────────────────────
     // When you're ready to implement drag-to-reorder:

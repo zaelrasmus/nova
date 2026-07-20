@@ -10,11 +10,8 @@
         imported_date: string;
         creation_date: string;
         modified_date: string;
-
-        // TODO: Add to the SELECT query in assets.rs once ready.
-        // Required for accurate masonry height estimation in AssetGrid.
-        width?: number;
-        height?: number;
+        width: number;
+        height: number;
     }
 
     interface Props {
@@ -71,6 +68,7 @@
     onkeydown={(e) => e.key === "Enter" && onClick?.()}
 >
     <img
+        use:fadeOnLoad
         src={convertFileSrc(asset.dest_path)}
         alt={asset.filename}
         class="w-full h-full object-cover"

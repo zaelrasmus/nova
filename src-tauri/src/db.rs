@@ -3,6 +3,7 @@ use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqliteSynchronous};
 use sqlx::SqlitePool;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::RwLock;
 use tracing::{debug, info, instrument, warn};
 
@@ -38,9 +39,20 @@ impl DbState {
         let options = SqliteConnectOptions::new()
             .filename(&db_path)
             .journal_mode(SqliteJournalMode::Wal)
-            .synchronous(SqliteSynchronous::Normal);
+            .synchronous(SqliteSynchronous::Normal)
+            .foreign_keys(true)
+            .busy_timeout(Duration::from_secs(5))
+            .pragma("cache_size", "-65536") // 64 MiB page cache (negative = KiB)
+            .pragma("temp_store", "MEMORY")
+            .pragma("mmap_size", "268435456"); // 256 MiB memory mapped reads
 
         let new_pool = SqlitePool::connect_with(options).await?;
+
+        // Run migrations on connect
+        sqlx::migrate!().run(&new_pool).await.map_err(|e| {
+            tracing::error!(error = %e, "Failed to run migrations on connect");
+            AppError::Internal(e.into())
+        })?;
 
         let mut lock = self.pool.write().await;
 

@@ -3,6 +3,8 @@ use anyhow::Context;
 use serde::Serialize;
 use sqlx::{sqlite::SqliteConnectOptions, SqlitePool};
 use std::path::PathBuf;
+use std::time::Duration;
+
 use tracing::{debug, info, instrument, warn};
 
 #[derive(Debug, Serialize)]
@@ -34,7 +36,8 @@ pub async fn create_library(location: &str, name: &str) -> Result<PathBuf, AppEr
             .filename(&db_path)
             .create_if_missing(true)
             .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
-            .synchronous(sqlx::sqlite::SqliteSynchronous::Normal);
+            .synchronous(sqlx::sqlite::SqliteSynchronous::Normal)
+            .busy_timeout(Duration::from_secs(5));
 
         let pool = SqlitePool::connect_with(options)
             .await
