@@ -94,11 +94,26 @@
 <div class="flex flex-col h-full">
     <div class="flex items-center justify-between px-4 py-2 border-b border-neutral-800 bg-white shrink-0">
         <span class="text-xs text-neutral-400">{assets.length} assets</span>
-        <div class="flex items-center gap-2">
-            <span class="text-xs text-neutral-500">Columns</span>
-            <input type="range" min="2" max="8" step="1" bind:value={numColumns}
-                class="w-24 accent-neutral-400" />
-            <span class="text-xs text-neutral-400 w-3 text-center">{numColumns}</span>
+        <div class="flex items-center gap-3">
+            <button
+                type="button"
+                onclick={() =>
+                    settings.set("animateGifsInGrid", !settings.preferences.animateGifsInGrid)}
+                title="Animate GIFs in the grid"
+                aria-pressed={settings.preferences.animateGifsInGrid}
+                class="rounded px-2 py-0.5 text-xs font-medium transition-colors
+                       {settings.preferences.animateGifsInGrid
+                    ? 'bg-blue-600 text-white'
+                    : 'bg-neutral-200 text-neutral-500 hover:bg-neutral-300'}"
+            >
+                GIF
+            </button>
+            <div class="flex items-center gap-2">
+                <span class="text-xs text-neutral-500">Columns</span>
+                <input type="range" min="2" max="8" step="1" bind:value={numColumns}
+                    class="w-24 accent-neutral-400" />
+                <span class="text-xs text-neutral-400 w-3 text-center">{numColumns}</span>
+            </div>
         </div>
     </div>
 
