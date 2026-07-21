@@ -2,6 +2,7 @@ mod assets;
 mod commands;
 mod db;
 mod error;
+mod extract;
 mod fs;
 mod library;
 mod thumbnail;

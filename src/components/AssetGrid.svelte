@@ -1,7 +1,7 @@
 <script lang="ts">
     import { createVirtualizer } from "@tanstack/svelte-virtual";
     import AssetCard from "./AssetCard.svelte";    import {get} from "svelte/store";
-    import { libraryManager } from "../routes/settings.svelte";
+    import { libraryManager, settings } from "../routes/settings.svelte";
     import { assetLibrary } from "$lib/assets.svelte";
 
 
@@ -120,7 +120,10 @@
                         {@const light = assets[item.index]}
                         {@const heavy = assetLibrary.heavy.get(light.id)}
                         <AssetCard
+                            assetType={light.asset_type}
                             thumbHash={light.thumb_hash}
+                            isAnimated={light.is_animated}
+                            animate={settings.preferences.animateGifsInGrid}
                             {heavy}
                             style="width: {columnWidth}px; height: {item.size - GAP}px; left: {item.lane * (columnWidth + GAP)}px; transform: translateY({item.start}px);"
                             onClick={() => console.log("Selected asset:", light.id)}

@@ -131,17 +131,19 @@ pub async fn create_library<R: Runtime>(
 pub async fn import_assets(
     window: tauri::Window,
     source_path: String,
+    thumb_mode: String,
     state: tauri::State<'_, DbState>,
 ) -> Result<ImportResult, AppError> {
     let handle = state.acquire().await?;
     let source_dir = std::path::PathBuf::from(&source_path);
+    let mode = crate::thumbnail::ThumbMode::from_setting(&thumb_mode);
 
     let reporter = Arc::new(TauriProgressReporter {
         window,
         last_emit: std::sync::Mutex::new(std::time::Instant::now()),
     });
 
-    assets::import_assets(reporter, source_dir, handle.pool, handle.root)
+    assets::import_assets(reporter, source_dir, handle.pool, handle.root, mode)
         .await
         .inspect_err(|e| tracing::error!(error = %e, source = %source_path, "import_assets failed"))
         .map_err(AppError::from)

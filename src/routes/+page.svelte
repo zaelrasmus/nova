@@ -11,7 +11,7 @@
     import { Alert, AlertDescription, AlertTitle } from "$components/ui/alert";
     import { Button, buttonVariants } from "$components/ui/button";
     import AssetGrid from "$components/AssetGrid.svelte";
-    import { libraryManager } from "../routes/settings.svelte";
+    import { libraryManager, settings } from "../routes/settings.svelte";
 
     interface LibraryInfo {
         db_path: string;
@@ -137,6 +137,7 @@
 
         const importPromise = invoke<ImportResult>("import_assets", {
             sourcePath: selectedSource,
+            thumbMode: settings.preferences.thumbnailQuality,
         }).then(async (result) => {
             await assetLibrary.reload();
             return result; // pass through so toast.promise still receives it
@@ -194,15 +195,13 @@
 
     // To add a new section: import its component and register it below.
     import AppearanceSection from "../components/settings/AppaeranceSection.svelte";
-    import { asset } from "$app/paths";
-    // import ImportSection from "./sections/ImportSection.svelte";
-    // import DisplaySection from "./sections/DisplaySection.svelte";
-    // import LibrarySection from "./sections/LibrarySection.svelte";
-    // import AboutSection from "./sections/AboutSection.svelte";
+    import ImportSection from "../components/settings/ImportSection.svelte";
+    import DisplaySection from "../components/settings/DisplaySection.svelte";
 
     const sectionComponents: Record<string, any> = {
         appearance: AppearanceSection,
-        // Add other sections here
+        import: ImportSection,
+        display: DisplaySection,
     };
 
     // const iconComponents: Record<string, any> = {

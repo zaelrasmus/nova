@@ -8,6 +8,8 @@ export interface AppPreferences {
   fontFamily: string;
   fontSize: "sm" | "md" | "lg";
   navItemVisibility: Record<string, boolean>;
+  thumbnailQuality: "auto" | "lossy" | "lossless";
+  animateGifsInGrid: boolean;
   // Add new fields here. They will be filled from DEFAULT_PREFERENCES on first
   // load so existing installations are never broken by a new field.
 }
@@ -29,6 +31,8 @@ const DEFAULT_PREFERENCES: AppPreferences = {
     Random: true,
     Trash: true,
   },
+  thumbnailQuality: "auto",
+  animateGifsInGrid: false,
 };
 
 const DEFAULT_LIBRARY_STATE: LibraryState = {

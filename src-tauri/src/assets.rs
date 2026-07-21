@@ -1,3 +1,4 @@
+use crate::extract;
 use crate::fs;
 use crate::thumbnail;
 use anyhow::{Context, Result};
@@ -268,11 +269,13 @@ async fn persist_assets(pool: &SqlitePool, assets: &[AssetMetadata]) -> Result<(
     Ok(())
 }
 
-fn build_asset_metadata(src: PathBuf, dest_dir: &Path, thumbs_dir: &Path) -> Option<AssetMetadata> {
+fn build_asset_metadata(
+    src: PathBuf,
+    dest_dir: &Path,
+    thumbs_dir: &Path,
+    thumb_mode: thumbnail::ThumbMode,
+) -> Option<AssetMetadata> {
     let asset_type = detect_asset_type(&src);
-    let (width, height) = image::image_dimensions(&src)
-        .inspect_err(|e| warn!(path = ?src, error = %e, "Could not read image dimensions"))
-        .ok()?;
     let meta = std::fs::metadata(&src)
         .inspect_err(|e| warn!(path = ?src, error = %e, "Could not read file metadata, skipping"))
         .ok()?;
@@ -290,21 +293,29 @@ fn build_asset_metadata(src: PathBuf, dest_dir: &Path, thumbs_dir: &Path) -> Opt
     let ext = src.extension()?.to_str()?;
     let id = uuid::Uuid::new_v4().to_string();
     let dest_path = dest_dir.join(format!("{}.{}", id, ext));
-    let thumb_dest = thumbs_dir.join(format!("{}.webp", id));
 
-    // Thumbnail is best-effort: a failure must NOT drop the asset
-    let thumb = thumbnail::generate(&src, &thumb_dest, thumbnail::ThumbMode::Auto)
-        .inspect_err(|e| warn!(path = ?src, error = %e, "Thumbnail generation failed"))
-        .ok();
+    // Type-specific visual extraction. A failure yields "no visual" — the asset
+    // still persists (never drop a user's file).
+    let ctx = extract::ExtractContext {
+        thumbs_dir,
+        id: &id,
+        mode: thumb_mode,
+    };
+    let visual = match extract::extractor_for(asset_type).extract(&src, &ctx) {
+        Ok(v) => v,
+        Err(e) => {
+            warn!(path = ?src, error = %e, "Metadata extraction failed; keeping asset with no visual");
+            extract::ExtractedVisual::default()
+        }
+    };
 
-    let (thumb_hash, thumb_config, is_animated, thumb_path) = match thumb {
-        Some(t) => (
-            Some(t.thumb_hash),
-            Some(t.thumb_config),
-            t.is_animated,
-            thumb_dest.to_string_lossy().into_owned(),
-        ),
-        None => (None, None, false, String::new()),
+    let thumb_path = if visual.has_thumb {
+        thumbs_dir
+            .join(format!("{}.webp", id))
+            .to_string_lossy()
+            .into_owned()
+    } else {
+        String::new()
     };
 
     Some(AssetMetadata {
@@ -314,14 +325,14 @@ fn build_asset_metadata(src: PathBuf, dest_dir: &Path, thumbs_dir: &Path) -> Opt
         extension: ext.to_string(),
         dest_path: dest_path.to_string_lossy().into_owned(),
         source_path: src.to_string_lossy().into_owned(),
-        width,
-        height,
+        width: visual.width,
+        height: visual.height,
         imported_date: Utc::now().to_rfc3339(),
         creation_date: created.to_rfc3339(),
         modified_date: modified.to_rfc3339(),
-        thumb_hash,
-        thumb_config,
-        is_animated,
+        thumb_hash: visual.thumb_hash,
+        thumb_config: visual.thumb_config,
+        is_animated: visual.is_animated,
         thumb_path,
     })
 }
@@ -444,6 +455,7 @@ pub async fn import_assets(
     source_dir: PathBuf,
     pool: SqlitePool,
     library_root: PathBuf,
+    thumb_mode: thumbnail::ThumbMode,
 ) -> Result<ImportResult> {
     let pipeline_start = std::time::Instant::now();
 
@@ -485,8 +497,8 @@ pub async fn import_assets(
 
     let staged_assets: Vec<AssetMetadata> = discovered_files
         .into_par_iter()
-        .filter(|p| matches!(detect_asset_type(p), AssetType::Image))
-        .filter_map(|src| build_asset_metadata(src, &assets_dir, &thumbs_dir))
+        .filter(|p| !matches!(detect_asset_type(p), AssetType::Unknown))
+        .filter_map(|src| build_asset_metadata(src, &assets_dir, &thumbs_dir, thumb_mode))
         .collect();
 
     info!(

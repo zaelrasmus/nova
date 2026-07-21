@@ -4,17 +4,27 @@
     import type { AssetMetadata } from "$lib/assets.svelte";
 
     interface Props {
+        assetType: "image" | "video" | "audio" | "unknown";
         thumbHash: string | null;
+        isAnimated: boolean;
+        animate: boolean;
         heavy?: AssetMetadata;
         style: string;
         onClick?: () => void;
     }
 
-    let { thumbHash, heavy, style, onClick }: Props = $props();
+    let { assetType, thumbHash, isAnimated, animate, heavy, style, onClick }: Props = $props();
 
     const placeholder = $derived(thumbHashUrl(thumbHash));
-    // Prefer the Webp thumbnail; fallback to the original if no thumb exists
-    const imgSrc = $derived( heavy ? convertFileSrc(heavy.thumb_path || heavy.dest_path) : null ,);
+    // Animated original when the toggle is on and the asset is animated;
+    // otherwise the static WebP thumbnail. No thumbnail => generic per-type card.
+    const previewSrc = $derived(
+        animate && isAnimated && heavy?.dest_path
+            ? convertFileSrc(heavy.dest_path)
+            : heavy?.thumb_path
+              ? convertFileSrc(heavy.thumb_path)
+              : null,
+    );
 
     function fadeOnLoad(node: HTMLImageElement) {
             node.style.opacity = "0";
@@ -33,40 +43,60 @@
         }
 </script>
 
+<!-- Shared preview renderer: any type that has a thumbnail (images now;
+     videos/audio once 11d generates keyframes/waveforms). -->
+{#snippet thumbnail()}
+    {#if placeholder}
+        <img
+            src={placeholder}
+            alt=""
+            aria-hidden="true"
+            class="absolute inset-0 w-full h-full object-cover"
+        />
+    {/if}
+    <img
+        use:fadeOnLoad
+        src={previewSrc}
+        alt={heavy?.filename ?? ""}
+        class="relative w-full h-full object-cover"
+        draggable="false"
+        decoding="async"
+    />
+{/snippet}
 
+
+<!-- Generic card for types without a preview yet. -->
+{#snippet generic(icon: string)}
+    <div
+        class="flex flex-col items-center justify-center gap-1.5 w-full h-full
+               bg-neutral-800 text-neutral-400 p-2"
+    >
+        <span class="text-3xl leading-none">{icon}</span>
+        {#if heavy?.filename}
+            <span class="text-[10px] text-neutral-500 truncate max-w-full">{heavy.filename}</span>
+        {/if}
+    </div>
+{/snippet}
+
+<!-- The shell: owns positioning, focus, interaction. #12's DnD attaches here,
+     unaffected by which interior snippet renders. -->
 <div
     {style}
     role="button"
     tabindex="0"
-    class="absolute top-0 overflow-hidden rounded-md bg-neutral-900
-         cursor-pointer select-none
-         ring-offset-neutral-950
-         hover:ring-2 hover:ring-neutral-500 hover:ring-offset-1
-         focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-400"
+    class="absolute top-0 overflow-hidden rounded-md bg-neutral-900 cursor-pointer select-none
+           ring-offset-neutral-950 hover:ring-2 hover:ring-neutral-500 hover:ring-offset-1
+           focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-400"
     onclick={onClick}
     onkeydown={(e) => e.key === "Enter" && onClick?.()}
 >
-    <!-- Instant ThumbHash placeholder (paints on jump, before the thumb loads). -->
-    {#if placeholder}
-           <img
-               src={placeholder}
-               alt=""
-               aria-hidden="true"
-               class="absolute inset-0 w-full h-full object-cover"
-           />
-       {:else}
-       <div class="absolute inset-0 bg-neutral-800"></div>
-       {/if}
-
-        <!-- Real thumbnail fades in over the placeholder once hydrated. -->
-        {#if imgSrc}
-                <img
-                    use:fadeOnLoad
-                    src={imgSrc}
-                    alt={heavy?.filename ?? ""}
-                    class="relative w-full h-full object-cover"
-                    draggable="false"
-                    decoding="async"
-                />
-            {/if}
+    {#if previewSrc}
+        {@render thumbnail()}
+    {:else if assetType === "audio"}
+        {@render generic("🎵")}
+    {:else if assetType === "video"}
+        {@render generic("🎬")}
+    {:else}
+        {@render generic("📄")}
+    {/if}
 </div>

@@ -11,8 +11,8 @@ use image::{imageops::FilterType, AnimationDecoder, DynamicImage};
 use std::collections::HashSet;
 use std::path::Path;
 
-/// Longes edge (px) of the cached thumbnail
-const THUMB_MAX: u32 = 100;
+/// Longest edge (px) of the cached thumbnail
+const THUMB_MAX: u32 = 512;
 /// ThumbHash expects a small input; cap the edge used to compute it
 const HASH_MAX: u32 = 100;
 /// WebP lossy quality (0.0 - 100.0)
@@ -30,6 +30,15 @@ pub enum ThumbMode {
 }
 
 impl ThumbMode {
+    /// Map the frontend setting string to a mode.
+    pub fn from_setting(s: &str) -> Self {
+        match s {
+            "lossy" => ThumbMode::Lossy,
+            "lossless" => ThumbMode::Lossless,
+            _ => ThumbMode::Auto,
+        }
+    }
+
     /// Staleness tag stored per asset. Compared against the current setting to
     /// decide whether a thumbnail needs regenerating
     fn config_tag(self) -> &'static str {
@@ -69,7 +78,7 @@ pub fn generate(src: &Path, dest: &Path, mode: ThumbMode) -> Result<ThumbOutput>
         encoder.encode(LOSSY_QUALITY)
     };
     std::fs::write(dest, &*encoded)
-        .with_context(|| format!("Failed to write thumbnail: [dest:?]"))?;
+        .with_context(|| format!("Failed to write thumbnail: {dest:?}"))?;
 
     // ThumbHash from a small copy (the algorithm expects a <= 100px input)
     let small = img.thumbnail(HASH_MAX, HASH_MAX).to_rgba8();
