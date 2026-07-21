@@ -544,20 +544,26 @@ struct ThumbUpdate {
     thumb_config: String,
 }
 
-/// Progress sink for background thumbnail generation. `ready` is the batch of
-/// `(id, thumb_hash)` that just completed, so the UI can patch those rows in
-/// place instead of reloading the whole manifest. Never dropped/throttled by the
-/// caller — losing a batch would leave rows un-patched until the next reload.
-pub trait ThumbProgress: Send + Sync {
-    fn report(&self, done: usize, total: usize, ready: &[(String, String)]);
+/// A completed thumbnail, ready for the UI to patch into its row in place: the
+/// `thumb_hash` drives the placeholder and `thumb_path` the full thumbnail, so no
+/// manifest reload or re-fetch is needed.
+#[derive(Serialize, Clone)]
+pub struct ThumbReady {
+    pub id: String,
+    pub thumb_hash: String,
+    pub thumb_path: String,
 }
 
-/// Generate thumbnails for every image whose `thumb_hash` is still NULL, in
-/// chunks, updating rows as they complete. Idempotent and resumable: a crash or
-/// app-close mid-run simply leaves the remaining rows NULL for the next call.
-///
-/// `thumb_hash IS NULL` is the single source of truth for "not generated yet",
-/// so callers can invoke this freely on import completion and on library open.
+/// Progress sink for thumbnail generation. `ready` is the batch that just
+/// completed. Never dropped/throttled by the caller — losing a batch would leave
+/// rows un-patched until the next reload.
+pub trait ThumbProgress: Send + Sync {
+    fn report(&self, done: usize, total: usize, ready: &[ThumbReady]);
+}
+
+/// Generate thumbnails for every image whose `thumb_hash` is still NULL. Used by
+/// an explicit "generate all" action; on-view generation uses the by-ids variant.
+/// Idempotent and resumable — `thumb_hash IS NULL` is the only "pending" marker.
 #[instrument(skip(pool, root, progress))]
 pub async fn generate_pending_thumbnails(
     pool: &SqlitePool,
@@ -574,6 +580,52 @@ pub async fn generate_pending_thumbnails(
     .await
     .context("Failed to query pending thumbnails")?;
 
+    run_generation(pool, root, mode, pending, progress).await
+}
+
+/// Generate thumbnails only for the given ids that are still missing one — the
+/// lazy, on-view path. Ids already generated, non-image, or unknown are ignored.
+#[instrument(skip(pool, root, progress, ids), fields(requested = ids.len()))]
+pub async fn generate_thumbnails_for_ids(
+    pool: &SqlitePool,
+    root: &Path,
+    mode: thumbnail::ThumbMode,
+    ids: &[String],
+    progress: Arc<dyn ThumbProgress>,
+) -> Result<usize> {
+    if ids.is_empty() {
+        return Ok(0);
+    }
+
+    let mut qb = QueryBuilder::new(
+        "SELECT id, extension FROM assets \
+         WHERE thumb_hash IS NULL AND asset_type = 'image' AND id IN (",
+    );
+    let mut separated = qb.separated(", ");
+    for id in ids {
+        separated.push_bind(id);
+    }
+    qb.push(")");
+
+    let pending: Vec<PendingThumb> = qb
+        .build_query_as::<PendingThumb>()
+        .fetch_all(pool)
+        .await
+        .context("Failed to query pending thumbnails by id")?;
+
+    run_generation(pool, root, mode, pending, progress).await
+}
+
+/// Shared chunked generator: decode/resize/encode on the blocking pool (Rayon
+/// fan-out), persist per chunk, and report each completed batch for in-place UI
+/// patching.
+async fn run_generation(
+    pool: &SqlitePool,
+    root: &Path,
+    mode: thumbnail::ThumbMode,
+    pending: Vec<PendingThumb>,
+    progress: Arc<dyn ThumbProgress>,
+) -> Result<usize> {
     let total = pending.len();
     if total == 0 {
         return Ok(0);
@@ -583,27 +635,25 @@ pub async fn generate_pending_thumbnails(
     let thumbs_dir = root.join("thumbnails");
     fs::ensure_dir(&thumbs_dir).await?;
 
-    info!(total, "Background thumbnail generation started");
+    info!(total, "Thumbnail generation started");
     let start = std::time::Instant::now();
 
     // Small enough that the UI sees updates often; large enough to keep Rayon fed.
-    const CHUNK: usize = 128;
+    const CHUNK: usize = 64;
     let mut done = 0usize;
 
     for chunk in pending.chunks(CHUNK) {
         let chunk = chunk.to_vec();
         let chunk_len = chunk.len();
-        let assets_dir = assets_dir.clone();
-        let thumbs_dir = thumbs_dir.clone();
+        let job_assets = assets_dir.clone();
+        let job_thumbs = thumbs_dir.clone();
 
-        // CPU-bound decode/resize/encode: Rayon fan-out on the blocking pool so
-        // the async runtime keeps serving other commands.
         let results: Vec<ThumbUpdate> = tokio::task::spawn_blocking(move || {
             chunk
                 .into_par_iter()
                 .filter_map(|p| {
-                    let src = assets_dir.join(format!("{}.{}", p.id, p.extension));
-                    let dest = thumbs_dir.join(format!("{}.webp", p.id));
+                    let src = job_assets.join(format!("{}.{}", p.id, p.extension));
+                    let dest = job_thumbs.join(format!("{}.webp", p.id));
                     match thumbnail::generate(&src, &dest, mode) {
                         Ok(t) => Some(ThumbUpdate {
                             id: p.id,
@@ -623,9 +673,16 @@ pub async fn generate_pending_thumbnails(
 
         update_thumbnails(pool, &results).await?;
 
-        let ready: Vec<(String, String)> = results
+        let ready: Vec<ThumbReady> = results
             .iter()
-            .map(|u| (u.id.clone(), u.thumb_hash.clone()))
+            .map(|u| ThumbReady {
+                id: u.id.clone(),
+                thumb_hash: u.thumb_hash.clone(),
+                thumb_path: thumbs_dir
+                    .join(format!("{}.webp", u.id))
+                    .to_string_lossy()
+                    .into_owned(),
+            })
             .collect();
         done += chunk_len;
         progress.report(done, total, &ready);
@@ -641,7 +698,7 @@ pub async fn generate_pending_thumbnails(
     info!(
         total,
         elapsed_ms = start.elapsed().as_millis(),
-        "Background thumbnail generation complete"
+        "Thumbnail generation complete"
     );
     Ok(total)
 }

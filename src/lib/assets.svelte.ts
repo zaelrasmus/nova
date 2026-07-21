@@ -55,6 +55,11 @@ class AssetLibrary {
   #pending = new Set<string>();
   #loadToken = 0;
 
+  /** id -> manifest index, for O(1) row patching (rebuilt on each load). */
+  #indexById = new Map<string, number>();
+  /** Ids with an in-flight on-view thumbnail request, to avoid re-requesting. */
+  #thumbRequested = new Set<string>();
+
   /** (Re)load the full manifest for the active library. */
   async load(): Promise<void> {
     const token = ++this.#loadToken;
@@ -63,13 +68,20 @@ class AssetLibrary {
     this.manifest = [];
     this.heavy.clear();
     this.#pending.clear();
+    this.#thumbRequested.clear();
+    this.#indexById.clear();
 
     try {
       const channel = new Channel<AssetLightRow[]>();
       const collected: AssetLightRow[] = [];
       channel.onmessage = (chunk) => {
         if (token !== this.#loadToken) return; // a newer load superseded this one
+        // Build the id->index map incrementally, in lock-step with the manifest.
+        // (Channel messages can arrive AFTER the invoke promise resolves, so a
+        // one-shot rebuild after `await` would run on an empty manifest.)
+        const base = collected.length;
         collected.push(...chunk);
+        for (let i = 0; i < chunk.length; i++) this.#indexById.set(chunk[i].id, base + i);
         this.manifest = collected.slice(); // publish progressively as chunks arrive
       };
       await invoke("stream_manifest", { onChunk: channel });
@@ -87,35 +99,42 @@ class AssetLibrary {
   }
 
   /**
-   * Kick off background thumbnail generation for any images still missing one
-   * (freshly imported, or interrupted on a previous run). Fire-and-forget: the
-   * backend emits `thumbnail-progress` as rows fill in; a run already in flight
-   * makes this a no-op. Thumbnails are a rebuildable cache, so a failure here is
-   * non-fatal and simply retried the next time the library opens.
+   * On-view thumbnail generation: request thumbnails for the given ids (the
+   * caller passes only images still missing one). De-dupes in-flight ids so
+   * scrolling doesn't re-request; the backend also filters `WHERE thumb_hash IS
+   * NULL`, so this is idempotent. The backend emits `thumbnail-progress` as
+   * batches complete and `applyThumbnails` patches them in. Non-fatal on failure.
    */
-  async generateThumbnails(mode: string): Promise<void> {
+  async ensureThumbnails(ids: string[], mode: string): Promise<void> {
+    const need = ids.filter((id) => !this.#thumbRequested.has(id));
+    if (!need.length) return;
+
+    need.forEach((id) => this.#thumbRequested.add(id));
     try {
-      await invoke("generate_thumbnails", { thumbMode: mode });
-    } catch {
-      /* non-fatal */
+      await invoke<number>("generate_thumbnails_for_ids", { ids: need, thumbMode: mode });
+    } catch (e) {
+      console.error("Thumbnail generation request failed:", e);
+    } finally {
+      need.forEach((id) => this.#thumbRequested.delete(id));
     }
   }
 
   /**
-   * Patch freshly-generated thumbnails into the manifest in place, without a
-   * full reload (which would flash the grid empty). Sets each row's thumb_hash
-   * so the ThumbHash placeholder appears immediately, and evicts the stale heavy
-   * row (its thumb_path was "") so it re-hydrates with the real thumbnail — the
-   * manifest reassignment re-runs AssetGrid's hydration effect, so no scroll is
-   * needed. (Phase 2: index rows by id to avoid the O(n) manifest map at scale.)
+   * Patch freshly-generated thumbnails into their rows in place — O(batch), no
+   * manifest reload (which would flash the grid). Sets `thumb_hash` so the
+   * ThumbHash placeholder appears, and, if the heavy row is cached, updates its
+   * `thumb_path` so the real thumbnail loads immediately (no re-fetch needed).
+   * Uncached rows pick up `thumb_path` on their next hydration.
    */
-  applyThumbnails(ready: { id: string; thumb_hash: string }[]): void {
-    if (!ready.length) return;
-    const byId = new Map(ready.map((r) => [r.id, r.thumb_hash]));
-    this.manifest = this.manifest.map((row) =>
-      byId.has(row.id) ? { ...row, thumb_hash: byId.get(row.id)! } : row,
-    );
-    for (const r of ready) this.heavy.delete(r.id);
+  applyThumbnails(ready: { id: string; thumb_hash: string; thumb_path: string }[]): void {
+    for (const r of ready) {
+      const idx = this.#indexById.get(r.id);
+      if (idx !== undefined) this.manifest[idx].thumb_hash = r.thumb_hash; // deep-reactive
+      const heavy = this.heavy.get(r.id);
+      if (heavy) {
+        this.heavy.set(r.id, { ...heavy, thumb_hash: r.thumb_hash, thumb_path: r.thumb_path });
+      }
+    }
   }
 
   /** Hydrate heavy rows for the given ids (visible window + overscan). */
@@ -126,8 +145,8 @@ class AssetLibrary {
         try {
           const rows = await invoke<AssetMetadata[]>("fetch_assets_by_ids", { ids: missing });
           for (const row of rows) this.heavy.set(row.id, row);
-        } catch {
-          // Swallow — the cell keeps its placeholder and retries on next scroll.
+        } catch (e) {
+          console.error("Asset hydration failed:", e);
         } finally {
           missing.forEach((id) => this.#pending.delete(id));
         }

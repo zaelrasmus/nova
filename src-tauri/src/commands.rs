@@ -155,11 +155,7 @@ struct ThumbProgressEmitter {
 }
 
 impl assets::ThumbProgress for ThumbProgressEmitter {
-    fn report(&self, done: usize, total: usize, ready: &[(String, String)]) {
-        let ready: Vec<_> = ready
-            .iter()
-            .map(|(id, hash)| serde_json::json!({ "id": id, "thumb_hash": hash }))
-            .collect();
+    fn report(&self, done: usize, total: usize, ready: &[assets::ThumbReady]) {
         if let Err(e) = self.window.emit(
             "thumbnail-progress",
             serde_json::json!({ "current": done, "total": total, "ready": ready }),
@@ -196,6 +192,28 @@ pub async fn generate_thumbnails(
     assets::generate_pending_thumbnails(&handle.pool, &handle.root, mode, reporter)
         .await
         .inspect_err(|e| tracing::error!(error = %e, "generate_thumbnails failed"))
+        .map_err(AppError::from)
+}
+
+/// Generate thumbnails only for the given asset ids that are still missing one —
+/// the on-view (lazy) path. Called per visible window as the user scrolls, so it
+/// runs unlocked (the frontend de-dupes in-flight ids); ids already generated are
+/// filtered out by the query, making repeated calls cheap and idempotent.
+#[instrument(skip_all, fields(requested = ids.len()))]
+#[tauri::command]
+pub async fn generate_thumbnails_for_ids(
+    window: tauri::Window,
+    ids: Vec<String>,
+    thumb_mode: String,
+    state: tauri::State<'_, DbState>,
+) -> Result<usize, AppError> {
+    let handle = state.acquire().await?;
+    let mode = crate::thumbnail::ThumbMode::from_setting(&thumb_mode);
+    let reporter = Arc::new(ThumbProgressEmitter { window });
+
+    assets::generate_thumbnails_for_ids(&handle.pool, &handle.root, mode, &ids, reporter)
+        .await
+        .inspect_err(|e| tracing::error!(error = %e, "generate_thumbnails_for_ids failed"))
         .map_err(AppError::from)
 }
 

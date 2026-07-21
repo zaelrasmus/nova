@@ -2,7 +2,7 @@
     import { createVirtualizer } from "@tanstack/svelte-virtual";
     import AssetCard from "./AssetCard.svelte";    import {get} from "svelte/store";
     import { libraryManager, settings } from "../routes/settings.svelte";
-    import { assetLibrary } from "$lib/assets.svelte";
+    import { assetLibrary, type AssetLightRow } from "$lib/assets.svelte";
 
 
     // Manifest = layout source of truth (id, width, height, asset_type).
@@ -23,11 +23,9 @@
 
     $effect(() => {
       if (libraryManager.state.activeLibrary) {
-        // Load the manifest, then resume thumbnail generation for any images
-        // still missing one (interrupted on a previous run, or never started).
-        assetLibrary.load().then(() => {
-          assetLibrary.generateThumbnails(settings.preferences.thumbnailQuality);
-        });
+        // Load the manifest. Thumbnails are generated on-view (below) as items
+        // scroll into the window — no eager pass over the whole library.
+        assetLibrary.load();
       }
     })
 
@@ -67,19 +65,49 @@
       instance.measure();
     })
 
-    // Hydrate heavy rows for the visible window (+overscan). Deduped/cached by
-       // the store, so this fires cheaply on every scroll tick.
-       $effect(() => {
-           const ids = $virtualizer
-               .getVirtualItems()
-               .map((item) => assets[item.index]?.id)
-               .filter((id): id is string => !!id);
-           // if (ids.length) assetLibrary.ensure(ids);
-           const timer = setTimeout(() => {
-                      if (ids.length) assetLibrary.ensure(ids);
-                  }, 100);
-                  return () => clearTimeout(timer);
-       });
+    // Hydrate heavy rows + generate thumbnails for the visible window (+overscan).
+    //
+    // CRITICAL: read the virtualizer via get(virtualizer), NOT $virtualizer.
+    // Reading $virtualizer reactively inside an effect self-invalidates (calling
+    // getVirtualItems() re-notifies the store, re-running the effect faster than
+    // the debounce, so the timer is cleared forever and this never runs). Instead
+    // we trigger off the scroll DOM event and off manifest changes.
+    let hydrateTimer: ReturnType<typeof setTimeout>;
+    function scheduleHydrate() {
+        clearTimeout(hydrateTimer);
+        hydrateTimer = setTimeout(() => {
+            const rows = get(virtualizer)
+                .getVirtualItems()
+                .map((item) => assets[item.index])
+                .filter((r): r is AssetLightRow => !!r);
+            if (!rows.length) return;
+            assetLibrary.ensure(rows.map((r) => r.id)); // hydrate heavy rows for the window
+            // Only images still missing a thumbnail need generation.
+            const needIds = rows
+                .filter((r) => r.asset_type === "image" && r.thumb_hash === null)
+                .map((r) => r.id);
+            if (needIds.length) {
+                assetLibrary.ensureThumbnails(needIds, settings.preferences.thumbnailQuality);
+            }
+        }, 100);
+    }
+
+    // Scroll-driven: a plain DOM listener, no reactive virtualizer read.
+    $effect(() => {
+        const el = scrollEl;
+        if (!el) return;
+        const onScroll = () => scheduleHydrate();
+        el.addEventListener("scroll", onScroll, { passive: true });
+        return () => el.removeEventListener("scroll", onScroll);
+    });
+
+    // Manifest/layout-driven: hydrate the initial window after load/import and
+    // when the column count changes (which shifts what's visible).
+    $effect(() => {
+        void assets.length;
+        void numColumns;
+        scheduleHydrate();
+    });
 
 
     // ── FUTURE: Pragmatic Drag and Drop (Atlassian) ───────────────────────────

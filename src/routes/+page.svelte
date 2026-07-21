@@ -139,10 +139,10 @@
         const importPromise = invoke<ImportResult>("import_assets", {
             sourcePath: selectedSource,
         }).then(async (result) => {
+            // Import is now near-instant (no thumbnailing). Reloading the manifest
+            // re-runs the grid's on-view effect, which generates thumbnails for the
+            // visible window; the rest generate as the user scrolls.
             await assetLibrary.reload();
-            // Import is now near-instant (no thumbnailing). Generate thumbnails in
-            // the background; the grid fills in as `thumbnail-progress` arrives.
-            assetLibrary.generateThumbnails(settings.preferences.thumbnailQuality);
             return result; // pass through so toast.promise still receives it
         });
 
@@ -193,7 +193,7 @@
         const unlisten = listen<{
             current: number;
             total: number;
-            ready: { id: string; thumb_hash: string }[];
+            ready: { id: string; thumb_hash: string; thumb_path: string }[];
         }>("thumbnail-progress", (event) => {
             assetLibrary.applyThumbnails(event.payload.ready);
         });
