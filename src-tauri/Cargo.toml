@@ -41,3 +41,20 @@ tracing = "0.1.44"
 tracing-subscriber = { version ="0.3.23", features = ["env-filter"] }
 # TODO  — uncomment when file-based logs for CI artifacts / crash reports:
 # tracing-appender = "0.2"
+
+# ── Build profiles ────────────────────────────────────────────────────────────
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true
+# NOTE: deliberately NOT panic = "abort" — AppError::TaskJoin relies on catching
+# a panicked spawned task's JoinError; "abort" would kill the process instead.
+
+# Optimize DEPENDENCIES at full speed even in dev/debug builds. Nova's own crate
+# still compiles unoptimized (fast incremental rebuilds), but image decode/resize
+# and WebP encode — which dominate thumbnail time — run 10-50x faster. This is the
+# single biggest win for dev-mode import/thumbnail performance.
+[profile.dev.package."*"]
+opt-level = 3
