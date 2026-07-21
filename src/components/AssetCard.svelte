@@ -1,15 +1,20 @@
 <script lang="ts">
     import { convertFileSrc } from "@tauri-apps/api/core";
+    import { thumbHashUrl } from "$lib/assets.svelte";
     import type { AssetMetadata } from "$lib/assets.svelte";
 
     interface Props {
+        thumbHash: string | null;
         heavy?: AssetMetadata;
         style: string;
         onClick?: () => void;
     }
 
-    let { heavy, style, onClick }: Props = $props();
+    let { thumbHash, heavy, style, onClick }: Props = $props();
 
+    const placeholder = $derived(thumbHashUrl(thumbHash));
+    // Prefer the Webp thumbnail; fallback to the original if no thumb exists
+    const imgSrc = $derived( heavy ? convertFileSrc(heavy.thumb_path || heavy.dest_path) : null ,);
 
     function fadeOnLoad(node: HTMLImageElement) {
             node.style.opacity = "0";
@@ -41,17 +46,27 @@
     onclick={onClick}
     onkeydown={(e) => e.key === "Enter" && onClick?.()}
 >
-    {#if heavy}
+    <!-- Instant ThumbHash placeholder (paints on jump, before the thumb loads). -->
+    {#if placeholder}
            <img
-               use:fadeOnLoad
-               src={convertFileSrc(heavy.dest_path)}
-               alt={heavy.filename}
-               class="w-full h-full object-cover"
-               draggable="false"
-               decoding="async"
+               src={placeholder}
+               alt=""
+               aria-hidden="true"
+               class="absolute inset-0 w-full h-full object-cover"
            />
        {:else}
-           <!-- Placeholder until the heavy row hydrates. BlurHash lands here in. -->
-           <div class="w-full h-full bg-neutral-800 animate-pulse"></div>
+       <div class="absolute inset-0 bg-neutral-800"></div>
        {/if}
+
+        <!-- Real thumbnail fades in over the placeholder once hydrated. -->
+        {#if imgSrc}
+                <img
+                    use:fadeOnLoad
+                    src={imgSrc}
+                    alt={heavy?.filename ?? ""}
+                    class="relative w-full h-full object-cover"
+                    draggable="false"
+                    decoding="async"
+                />
+            {/if}
 </div>

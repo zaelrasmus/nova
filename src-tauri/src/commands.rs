@@ -171,8 +171,8 @@ pub async fn fetch_assets_by_ids(
     ids: Vec<String>,
     state: tauri::State<'_, DbState>,
 ) -> Result<Vec<AssetMetadata>, AppError> {
-    let pool = state.acquire_pool().await?;
-    assets::fetch_assets_by_ids(&pool, &ids)
+    let handle = state.acquire().await?;
+    assets::fetch_assets_by_ids(&handle.pool, &handle.root, &ids)
         .await
         .inspect_err(|e| tracing::error!(error = %e, "fetch_assets_by_ids failed"))
         .map_err(AppError::from)

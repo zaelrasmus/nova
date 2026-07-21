@@ -120,6 +120,7 @@
                         {@const light = assets[item.index]}
                         {@const heavy = assetLibrary.heavy.get(light.id)}
                         <AssetCard
+                            thumbHash={light.thumb_hash}
                             {heavy}
                             style="width: {columnWidth}px; height: {item.size - GAP}px; left: {item.lane * (columnWidth + GAP)}px; transform: translateY({item.start}px);"
                             onClick={() => console.log("Selected asset:", light.id)}

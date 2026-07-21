@@ -33,6 +33,9 @@ uuid = { version = "1.23.0", features = ["v4"] }
 rayon = "1.11.0"
 chrono = "0.4.44"
 image = "0.25.10"
+webp = "0.3.1"
+thumbhash = "0.1.0"
+base64 = "0.22.1"
 thiserror = "2.0.18"
 tracing = "0.1.44"
 tracing-subscriber = { version ="0.3.23", features = ["env-filter"] }

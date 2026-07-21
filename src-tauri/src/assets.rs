@@ -1,4 +1,5 @@
 use crate::fs;
+use crate::thumbnail;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use rayon::prelude::{IntoParallelIterator, ParallelIterator};
@@ -31,6 +32,8 @@ pub struct AssetLightRow {
     pub width: u32,
     pub height: u32,
     pub asset_type: AssetType,
+    pub thumb_hash: Option<String>,
+    pub is_animated: bool,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, FromRow)]
@@ -55,6 +58,20 @@ pub struct AssetMetadata {
     pub creation_date: String,
     #[sqlx(rename = "modified_date")]
     pub modified_date: String,
+
+    #[sqlx(default)]
+    pub thumb_hash: Option<String>,
+
+    #[serde(skip)]
+    #[sqlx(default)]
+    pub thumb_config: Option<String>,
+
+    #[sqlx(default)]
+    pub is_animated: bool,
+
+    // Runtime-only: derived from library root, not a DB column. No thumb.
+    #[sqlx(skip)]
+    pub thumb_path: String,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -136,7 +153,7 @@ fn detect_asset_type(path: &Path) -> AssetType {
 #[instrument(skip(pool))]
 pub async fn fetch_manifest(pool: &SqlitePool) -> Result<Vec<AssetLightRow>> {
     let rows = sqlx::query_as::<_, AssetLightRow>(
-        "SELECT id, width, height, asset_type
+        "SELECT id, width, height, asset_type, thumb_hash, is_animated
          FROM assets
          ORDER BY imported_date DESC, id DESC",
     )
@@ -147,7 +164,11 @@ pub async fn fetch_manifest(pool: &SqlitePool) -> Result<Vec<AssetLightRow>> {
 }
 
 #[instrument(skip(pool, ids), fields(count = ids.len()))]
-pub async fn fetch_assets_by_ids(pool: &SqlitePool, ids: &[String]) -> Result<Vec<AssetMetadata>> {
+pub async fn fetch_assets_by_ids(
+    pool: &SqlitePool,
+    root: &Path,
+    ids: &[String],
+) -> Result<Vec<AssetMetadata>> {
     if ids.is_empty() {
         return Ok(Vec::new());
     }
@@ -155,7 +176,8 @@ pub async fn fetch_assets_by_ids(pool: &SqlitePool, ids: &[String]) -> Result<Ve
     // 32766 bind-parameter limit, so no chunking needed.
     let mut qb = QueryBuilder::new(
         "SELECT id, asset_type, filename, extension, path, width, height, \
-         imported_date, creation_date, modified_date FROM assets WHERE id IN (",
+         imported_date, creation_date, modified_date, thumb_hash, is_animated \
+         FROM assets WHERE id IN (",
     );
     let mut separated = qb.separated(", ");
     for id in ids {
@@ -163,11 +185,23 @@ pub async fn fetch_assets_by_ids(pool: &SqlitePool, ids: &[String]) -> Result<Ve
     }
     qb.push(")");
 
-    let rows = qb
+    let mut rows = qb
         .build_query_as::<AssetMetadata>()
         .fetch_all(pool)
         .await
         .context("Failed to fetch assets by ids")?;
+
+    // Derive the thumbnail path from the stored root. only when thumbnail actually exists.
+    // Otherwise, leave "" so the frontend falls back to full res
+    for row in &mut rows {
+        if row.thumb_hash.is_some() {
+            row.thumb_path = root
+                .join("thumbnails")
+                .join(format!("{}.webp", row.id))
+                .to_string_lossy()
+                .into_owned();
+        }
+    }
     Ok(rows)
 }
 
@@ -187,7 +221,7 @@ async fn persist_assets(pool: &SqlitePool, assets: &[AssetMetadata]) -> Result<(
     for chunk in assets.chunks(ROWS_PER_INSERT) {
         let mut qb = QueryBuilder::new(
             "INSERT INTO assets (id, asset_type, filename, extension, path, \
-                width, height, imported_date, creation_date, modified_date) ",
+                width, height, imported_date, creation_date, modified_date, thumb_hash, thumb_config, is_animated) ",
         );
 
         qb.push_values(chunk, |mut b, asset| {
@@ -200,7 +234,10 @@ async fn persist_assets(pool: &SqlitePool, assets: &[AssetMetadata]) -> Result<(
                 .push_bind(asset.height)
                 .push_bind(&asset.imported_date)
                 .push_bind(&asset.creation_date)
-                .push_bind(&asset.modified_date);
+                .push_bind(&asset.modified_date)
+                .push_bind(asset.thumb_hash.as_deref())
+                .push_bind(asset.thumb_config.as_deref())
+                .push_bind(asset.is_animated);
         });
 
         qb.build()
@@ -231,7 +268,7 @@ async fn persist_assets(pool: &SqlitePool, assets: &[AssetMetadata]) -> Result<(
     Ok(())
 }
 
-fn build_asset_metadata(src: PathBuf, dest_dir: &Path) -> Option<AssetMetadata> {
+fn build_asset_metadata(src: PathBuf, dest_dir: &Path, thumbs_dir: &Path) -> Option<AssetMetadata> {
     let asset_type = detect_asset_type(&src);
     let (width, height) = image::image_dimensions(&src)
         .inspect_err(|e| warn!(path = ?src, error = %e, "Could not read image dimensions"))
@@ -253,6 +290,22 @@ fn build_asset_metadata(src: PathBuf, dest_dir: &Path) -> Option<AssetMetadata> 
     let ext = src.extension()?.to_str()?;
     let id = uuid::Uuid::new_v4().to_string();
     let dest_path = dest_dir.join(format!("{}.{}", id, ext));
+    let thumb_dest = thumbs_dir.join(format!("{}.webp", id));
+
+    // Thumbnail is best-effort: a failure must NOT drop the asset
+    let thumb = thumbnail::generate(&src, &thumb_dest, thumbnail::ThumbMode::Auto)
+        .inspect_err(|e| warn!(path = ?src, error = %e, "Thumbnail generation failed"))
+        .ok();
+
+    let (thumb_hash, thumb_config, is_animated, thumb_path) = match thumb {
+        Some(t) => (
+            Some(t.thumb_hash),
+            Some(t.thumb_config),
+            t.is_animated,
+            thumb_dest.to_string_lossy().into_owned(),
+        ),
+        None => (None, None, false, String::new()),
+    };
 
     Some(AssetMetadata {
         id,
@@ -266,6 +319,10 @@ fn build_asset_metadata(src: PathBuf, dest_dir: &Path) -> Option<AssetMetadata> 
         imported_date: Utc::now().to_rfc3339(),
         creation_date: created.to_rfc3339(),
         modified_date: modified.to_rfc3339(),
+        thumb_hash,
+        thumb_config,
+        is_animated,
+        thumb_path,
     })
 }
 
@@ -399,7 +456,9 @@ pub async fn import_assets(
 
     // Stage 1: Resolve destination directory.
     let assets_dir = library_root.join("assets");
+    let thumbs_dir = library_root.join("thumbnails");
     fs::ensure_dir(&assets_dir).await?;
+    fs::ensure_dir(&thumbs_dir).await?;
 
     // Stage 2: Walk directory tree.
     let scan_start = std::time::Instant::now();
@@ -427,7 +486,7 @@ pub async fn import_assets(
     let staged_assets: Vec<AssetMetadata> = discovered_files
         .into_par_iter()
         .filter(|p| matches!(detect_asset_type(p), AssetType::Image))
-        .filter_map(|src| build_asset_metadata(src, &assets_dir))
+        .filter_map(|src| build_asset_metadata(src, &assets_dir, &thumbs_dir))
         .collect();
 
     info!(

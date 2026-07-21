@@ -2,12 +2,15 @@
 
 import { invoke, Channel } from "@tauri-apps/api/core";
 import { SvelteMap } from "svelte/reactivity";
+import { thumbHashToDataURL } from "thumbhash";
 
 export interface AssetLightRow {
   id: string;
   width: number;
   height: number;
   asset_type: "image" | "audio" | "video" | "unknown";
+  thumb_hash: string | null;
+  is_animated: boolean;
 }
 
 export interface AssetMetadata extends AssetLightRow {
@@ -17,6 +20,23 @@ export interface AssetMetadata extends AssetLightRow {
   imported_date: string;
   creation_date: string;
   modified_date: string;
+
+  thumb_path: string; // "" => no thumbnail; fallback to dest_path
+}
+
+// ThumbHash (base64) -> data URL, memoized (cards mount/unmount on scroll).
+const thumbUrlCache = new Map<string, string>();
+export function thumbHashUrl(hash: string | null): string | null {
+  if (!hash) return null;
+  let url = thumbUrlCache.get(hash);
+  if (!url) {
+    const bin = atob(hash);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    url = thumbHashToDataURL(bytes);
+    thumbUrlCache.set(hash, url);
+  }
+  return url;
 }
 
 // Cap on hydrated heavy rows kept in memory. A few sccreenfuls of slacks.

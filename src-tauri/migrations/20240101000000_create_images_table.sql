@@ -23,7 +23,12 @@ CREATE TABLE IF NOT EXISTS assets (
     extension TEXT NOT NULL,
     imported_date TEXT NOT NULL,
     modified_date TEXT NOT NULL,
-    creation_date TEXT NOT NULL
+    creation_date TEXT NOT NULL,
+
+    -- TESTING Columns
+    thumb_hash TEXT, -- base64 ThumbHash (NULL until generated)
+    thumb_config TEXT, -- recipe tag, e.g. "webp:auto" (staleness marker)
+    is_animated INTEGER NOT NULL DEFAULT 0 -- 1 if multi-frame (GIF/animated) source
 );
 
 CREATE TABLE IF NOT EXISTS assets_folders (
