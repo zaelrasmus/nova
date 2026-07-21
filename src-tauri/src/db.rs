@@ -1,31 +1,43 @@
 use crate::error::AppError;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqliteSynchronous};
 use sqlx::SqlitePool;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
 use tracing::{debug, info, instrument, warn};
 
+#[derive(Clone)]
+pub struct LibraryHandle {
+    pub pool: SqlitePool,
+    pub root: PathBuf,
+}
+
 pub struct DbState {
-    pool: Arc<RwLock<Option<SqlitePool>>>,
+    inner: Arc<RwLock<Option<LibraryHandle>>>,
 }
 
 impl DbState {
     pub fn new() -> Self {
         Self {
-            pool: Arc::new(RwLock::new(None)),
+            inner: Arc::new(RwLock::new(None)),
         }
     }
 
-    pub async fn acquire_pool(&self) -> Result<SqlitePool, AppError> {
-        let lock = self.pool.read().await;
+    // Full handle (pool + root path). Errors if no library is open
+    pub async fn acquire(&self) -> Result<LibraryHandle, AppError> {
+        let lock = self.inner.read().await;
         lock.as_ref().cloned().ok_or(AppError::NoLibrary)
+    }
+    /// Convenience for ccallers that only need the pool
+    pub async fn acquire_pool(&self) -> Result<SqlitePool, AppError> {
+        Ok(self.acquire().await?.pool)
     }
 
     #[instrument(skip(self, path), fields(library_path = %path.as_ref().display()))]
     pub async fn connect<P: AsRef<Path>>(&self, path: P) -> Result<(), AppError> {
-        let db_path = path.as_ref().join("library.db");
+        let root = path.as_ref().to_path_buf();
+        let db_path = root.join("library.db");
 
         if !db_path.exists() {
             return Err(AppError::Io(std::io::Error::new(
@@ -54,14 +66,19 @@ impl DbState {
             AppError::Internal(e.into())
         })?;
 
-        let mut lock = self.pool.write().await;
+        let handle = LibraryHandle {
+            pool: new_pool,
+            root,
+        };
 
-        if let Some(old_pool) = lock.take() {
+        let mut lock = self.inner.write().await;
+
+        if let Some(old_handle) = lock.take() {
             warn!("Replacing existing library connection. Closing old pool.");
-            old_pool.close().await;
+            old_handle.pool.close().await;
         }
 
-        *lock = Some(new_pool);
+        *lock = Some(handle);
 
         info!(db_path = ?db_path, "Library connected successfully");
         Ok(())

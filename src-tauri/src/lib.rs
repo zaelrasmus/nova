@@ -31,6 +31,8 @@ pub fn run() {
             commands::connect_library,
             commands::inject_test_asset,
             commands::fetch_assets,
+            commands::stream_manifest,
+            commands::fetch_assets_by_ids,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

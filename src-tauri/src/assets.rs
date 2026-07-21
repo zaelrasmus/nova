@@ -17,11 +17,20 @@ use tracing::{debug, info, instrument, warn};
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Type)]
 #[sqlx(rename_all = "lowercase")]
+#[serde(rename_all = "lowercase")]
 pub enum AssetType {
     Image,
     Audio,
     Video,
     Unknown,
+}
+
+#[derive(Serialize, Clone, Debug, FromRow)]
+pub struct AssetLightRow {
+    pub id: String,
+    pub width: u32,
+    pub height: u32,
+    pub asset_type: AssetType,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, FromRow)]
@@ -111,17 +120,55 @@ fn detect_asset_type(path: &Path) -> AssetType {
     AssetType::Unknown
 }
 
-#[instrument(skip(pool))]
-async fn resolve_library_root(pool: &SqlitePool) -> Result<PathBuf> {
-    let db_info: (i32, String, String) = sqlx::query_as("PRAGMA database_list")
-        .fetch_one(pool)
-        .await
-        .context("Failed to read library path via PRAGMA database_list")?;
+// #[instrument(skip(pool))]
+// async fn resolve_library_root(pool: &SqlitePool) -> Result<PathBuf> {
+//     let db_info: (i32, String, String) = sqlx::query_as("PRAGMA database_list")
+//         .fetch_one(pool)
+//         .await
+//         .context("Failed to read library path via PRAGMA database_list")?;
 
-    PathBuf::from(db_info.2)
-        .parent()
-        .map(|p| p.to_path_buf())
-        .context("Library database has an invalid path structure")
+//     PathBuf::from(db_info.2)
+//         .parent()
+//         .map(|p| p.to_path_buf())
+//         .context("Library database has an invalid path structure")
+// }
+
+#[instrument(skip(pool))]
+pub async fn fetch_manifest(pool: &SqlitePool) -> Result<Vec<AssetLightRow>> {
+    let rows = sqlx::query_as::<_, AssetLightRow>(
+        "SELECT id, width, height, asset_type
+         FROM assets
+         ORDER BY imported_date DESC, id DESC",
+    )
+    .fetch_all(pool)
+    .await
+    .context("Failed to fetch asset manifest")?;
+    Ok(rows)
+}
+
+#[instrument(skip(pool, ids), fields(count = ids.len()))]
+pub async fn fetch_assets_by_ids(pool: &SqlitePool, ids: &[String]) -> Result<Vec<AssetMetadata>> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    // Window sizes stay small (visible + overscan), well under SQLite's
+    // 32766 bind-parameter limit, so no chunking needed.
+    let mut qb = QueryBuilder::new(
+        "SELECT id, asset_type, filename, extension, path, width, height, \
+         imported_date, creation_date, modified_date FROM assets WHERE id IN (",
+    );
+    let mut separated = qb.separated(", ");
+    for id in ids {
+        separated.push_bind(id);
+    }
+    qb.push(")");
+
+    let rows = qb
+        .build_query_as::<AssetMetadata>()
+        .fetch_all(pool)
+        .await
+        .context("Failed to fetch assets by ids")?;
+    Ok(rows)
 }
 
 #[instrument(skip(pool, assets), fields(count = assets.len()))]
@@ -339,6 +386,7 @@ pub async fn import_assets(
     reporter: Arc<dyn ProgressReporter>,
     source_dir: PathBuf,
     pool: SqlitePool,
+    library_root: PathBuf,
 ) -> Result<ImportResult> {
     let pipeline_start = std::time::Instant::now();
 
@@ -350,7 +398,6 @@ pub async fn import_assets(
     });
 
     // Stage 1: Resolve destination directory.
-    let library_root = resolve_library_root(&pool).await?;
     let assets_dir = library_root.join("assets");
     fs::ensure_dir(&assets_dir).await?;
 

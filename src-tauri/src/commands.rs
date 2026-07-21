@@ -1,4 +1,6 @@
-use crate::assets::{self, AssetMetadata, ImportProgress, ImportResult, ProgressReporter};
+use crate::assets::{
+    self, AssetLightRow, AssetMetadata, ImportProgress, ImportResult, ProgressReporter,
+};
 use crate::db::DbState;
 use crate::error::AppError;
 use crate::library::{self, LibraryInfo};
@@ -131,7 +133,7 @@ pub async fn import_assets(
     source_path: String,
     state: tauri::State<'_, DbState>,
 ) -> Result<ImportResult, AppError> {
-    let pool = state.acquire_pool().await?;
+    let handle = state.acquire().await?;
     let source_dir = std::path::PathBuf::from(&source_path);
 
     let reporter = Arc::new(TauriProgressReporter {
@@ -139,9 +141,40 @@ pub async fn import_assets(
         last_emit: std::sync::Mutex::new(std::time::Instant::now()),
     });
 
-    assets::import_assets(reporter, source_dir, pool)
+    assets::import_assets(reporter, source_dir, handle.pool, handle.root)
         .await
         .inspect_err(|e| tracing::error!(error = %e, source = %source_path, "import_assets failed"))
+        .map_err(AppError::from)
+}
+
+#[instrument(skip_all)]
+#[tauri::command]
+pub async fn stream_manifest(
+    on_chunk: tauri::ipc::Channel<Vec<AssetLightRow>>,
+    state: tauri::State<'_, DbState>,
+) -> Result<(), AppError> {
+    let pool = state.acquire_pool().await?;
+    let rows = assets::fetch_manifest(&pool).await?;
+
+    // Chunk so first paint starts before the whole manifest is deserialized.
+    for chunk in rows.chunks(5000) {
+        on_chunk
+            .send(chunk.to_vec())
+            .map_err(|e| AppError::Internal(e.into()))?;
+    }
+    Ok(())
+}
+
+#[instrument(skip_all, fields(count = ids.len()))]
+#[tauri::command]
+pub async fn fetch_assets_by_ids(
+    ids: Vec<String>,
+    state: tauri::State<'_, DbState>,
+) -> Result<Vec<AssetMetadata>, AppError> {
+    let pool = state.acquire_pool().await?;
+    assets::fetch_assets_by_ids(&pool, &ids)
+        .await
+        .inspect_err(|e| tracing::error!(error = %e, "fetch_assets_by_ids failed"))
         .map_err(AppError::from)
 }
 

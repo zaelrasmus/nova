@@ -5,6 +5,7 @@
     import { cubicOut } from "svelte/easing";
     import { tweened } from "svelte/motion";
     import { QueryClient, QueryClientProvider } from "@tanstack/svelte-query";
+    import { assetLibrary } from "$lib/assets.svelte";
 
     import { toast } from "svelte-sonner";
     import { Alert, AlertDescription, AlertTitle } from "$components/ui/alert";
@@ -137,7 +138,7 @@
         const importPromise = invoke<ImportResult>("import_assets", {
             sourcePath: selectedSource,
         }).then(async (result) => {
-            await queryClient.invalidateQueries({ queryKey: ["assets"] });
+            await assetLibrary.reload();
             return result; // pass through so toast.promise still receives it
         });
 
@@ -193,6 +194,7 @@
 
     // To add a new section: import its component and register it below.
     import AppearanceSection from "../components/settings/AppaeranceSection.svelte";
+    import { asset } from "$app/paths";
     // import ImportSection from "./sections/ImportSection.svelte";
     // import DisplaySection from "./sections/DisplaySection.svelte";
     // import LibrarySection from "./sections/LibrarySection.svelte";

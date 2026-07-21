@@ -1,38 +1,12 @@
 <script lang="ts">
-    import { useAssets } from "$lib/queries.svelte";
-
     import { createVirtualizer } from "@tanstack/svelte-virtual";
-    import AssetCard from "./AssetCard.svelte";
-
-    import {get} from "svelte/store";
-
-    interface AssetMetadata {
-        id: string;
-        asset_type: "image" | "audio" | "video" | "unknown";
-        filename: string;
-        extension: string;
-        dest_path: string;
-        imported_date: string;
-        creation_date: string;
-        modified_date: string;
-        width: number;
-        height: number;
-    }
-
-    const assetsQuery = useAssets();
-
-    const datas = $derived((assetsQuery.data as any[]) ?? []);
-
-    const assets = $derived(datas.slice(0, 500));
+    import AssetCard from "./AssetCard.svelte";    import {get} from "svelte/store";
+    import { libraryManager } from "../routes/settings.svelte";
+    import { assetLibrary } from "$lib/assets.svelte";
 
 
-    // $effect(() => {
-    //     if (libraryManager.state.activeLibrary) {
-    //         dirname(libraryManager.state.activeLibrary).then((path) => {
-    //             baseDir = path;
-    //         });
-    //     }
-    // });
+    // Manifest = layout source of truth (id, width, height, asset_type).
+    const assets = $derived(assetLibrary.manifest);
 
     // User-controlled. The slider writes here
     let numColumns = $state(4);
@@ -46,15 +20,18 @@
 
     const GAP = 10; // px, gap between items in the grid
 
-    // Measures the scroll container width reactively so the virtualizer
-    // can recalculate dimension on window/panel resize.
+
+    $effect(() => {
+      if (libraryManager.state.activeLibrary) {
+        assetLibrary.load();
+      }
+    })
+
     $effect(() => {
         if (!scrollEl) return;
-
         const observer = new ResizeObserver(([entry]) => {
             containerWidth = entry.contentRect.width;
         });
-
         observer.observe(scrollEl);
         return () => observer.disconnect();
     });
@@ -68,12 +45,12 @@
       getScrollElement: () => scrollEl,
       lanes: numColumns,
       estimateSize: (index) => {
-        const asset = assets[index];
-        const aspectRatio = asset?.width && asset?.height ? asset.width / asset.height : 1;
-        return columnWidth / aspectRatio + GAP;
+        const a = assets[index];
+        const ratio = a?.width && a?.height ? a.width / a.height : 1;
+        return columnWidth / ratio + GAP;
       },
-      overscan: 6, // lane masonry needs more than 3 or fast flings show gaps
-      getItemKey: (index) => assets[index].id,
+      overscan: 6,
+      getItemKey: (index) => assets[index]?.id ?? index,
     })
 
     $effect(() => {
@@ -81,14 +58,24 @@
       const lanes = numColumns;
       void columnWidth;
       void scrollEl;
-
       const instance = get(virtualizer);
-
       instance.setOptions({ count, lanes});
-
       instance.measure();
     })
 
+    // Hydrate heavy rows for the visible window (+overscan). Deduped/cached by
+       // the store, so this fires cheaply on every scroll tick.
+       $effect(() => {
+           const ids = $virtualizer
+               .getVirtualItems()
+               .map((item) => assets[item.index]?.id)
+               .filter((id): id is string => !!id);
+           // if (ids.length) assetLibrary.ensure(ids);
+           const timer = setTimeout(() => {
+                      if (ids.length) assetLibrary.ensure(ids);
+                  }, 100);
+                  return () => clearTimeout(timer);
+       });
 
 
     // ── FUTURE: Pragmatic Drag and Drop (Atlassian) ───────────────────────────
@@ -103,69 +90,42 @@
     // ────────────────────────────────────────────────────────────────────────
 </script>
 
+
 <div class="flex flex-col h-full">
     <div class="flex items-center justify-between px-4 py-2 border-b border-neutral-800 bg-white shrink-0">
-        <span class="text-xs text-neutral-400">
-            {assets.length} assets
-        </span>
-
+        <span class="text-xs text-neutral-400">{assets.length} assets</span>
         <div class="flex items-center gap-2">
             <span class="text-xs text-neutral-500">Columns</span>
-            <input
-                type="range"
-                min="2"
-                max="8"
-                step="1"
-                defaultValue="4"
-                bind:value={numColumns}
-                class="w-24 accent-neutral-400"
-            />
+            <input type="range" min="2" max="8" step="1" bind:value={numColumns}
+                class="w-24 accent-neutral-400" />
             <span class="text-xs text-neutral-400 w-3 text-center">{numColumns}</span>
         </div>
     </div>
 
+    {#if assetLibrary.isLoading && assets.length === 0}
+            <div class="flex items-center justify-center h-32 text-sm text-neutral-500">Loading assets...</div>
+        {:else if assetLibrary.error}
+            <div class="flex items-center justify-center h-32 text-sm text-red-400">{assetLibrary.error}</div>
+        {:else if assets.length === 0}
+            <div class="flex items-center justify-center h-32 text-sm text-neutral-500">No assets in this library yet.</div>
+        {:else}
+            <div
+                bind:this={scrollEl}
+                class="relative flex-1 min-h-0 overflow-y-auto w-full
+                       [scrollbar-width:thin] [scrollbar-color:theme(colors.neutral.700)_transparent] bg-white"
+            >
+                <div style="position: relative; width: 100%; height: {$virtualizer.getTotalSize()}px;">
+                    {#each $virtualizer.getVirtualItems() as item (item.key)}
 
-<!-- ── Loading / error states ─────────────────────────────────────────────── -->
-{#if assetsQuery.isLoading}
-    <div class="flex items-center justify-center h-32 text-sm text-neutral-500">
-        Loading assets...
+                        {@const light = assets[item.index]}
+                        {@const heavy = assetLibrary.heavy.get(light.id)}
+                        <AssetCard
+                            {heavy}
+                            style="width: {columnWidth}px; height: {item.size - GAP}px; left: {item.lane * (columnWidth + GAP)}px; transform: translateY({item.start}px);"
+                            onClick={() => console.log("Selected asset:", light.id)}
+                        />
+                    {/each}
+                </div>
+            </div>
+        {/if}
     </div>
-{:else if assetsQuery.isError}
-    <div class="flex items-center justify-center h-32 text-sm text-red-400">
-        Failed to load assets.
-    </div>
-{:else if assets.length === 0}
-    <div class="flex items-center justify-center h-32 text-sm text-neutral-500">
-        No assets in this library yet.
-    </div>
-{:else}
-    {console.log(assets.slice(0, 10))}
-    <div
-        bind:this={scrollEl}
-        class="relative flex-1 min-h-0 overflow-y-auto w-full
-           [scrollbar-width:thin] [scrollbar-color:theme(colors.neutral.700)_transparent] bg-white"
-    >
-        <div
-            style="background-color: white; width: full; height: {$virtualizer.getTotalSize()}px; position: relative;"
-        >
-            {#each $virtualizer.getVirtualItems() as item (item.key)}
-                {@const asset = assets[item.index]}
-
-                <AssetCard
-                    {asset}
-                    style="
-            width: {columnWidth}px;
-            height: {item.size - GAP}px;
-            left: {item.lane * (columnWidth + GAP)}px;
-            transform: translateY({item.start}px);
-          "
-                    onClick={() => {
-                        // TODO: open asset inspector / viewer
-                        console.log("Selected asset:", asset.id);
-                    }}
-                />
-            {/each}
-        </div>
-    </div>
-{/if}
-</div>
