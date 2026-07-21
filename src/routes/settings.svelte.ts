@@ -161,21 +161,27 @@ class LibraryManager {
     const saved = await store.get<LibraryState>("library");
     if (!saved) return;
 
-    this.state = { ...DEFAULT_LIBRARY_STATE, ...saved };
+    // Restore history immediately, but keep activeLibrary null until the backend
+    // pool is actually connected. Consumers treat activeLibrary as "library ready"
+    // (AssetGrid fires assetLibrary.load() the moment it turns truthy), so setting
+    // it before connect_library resolves races the manifest stream against an
+    // unconnected pool — the first fetch fails with NoLibrary and, unlike the old
+    // TanStack query, never retries.
+    this.state = {
+      ...DEFAULT_LIBRARY_STATE,
+      history: saved.history ?? [],
+      activeLibrary: null,
+    };
 
-    if (this.state.activeLibrary) {
-      await this.reconnectOnStartup(this.state.activeLibrary);
-    }
-  }
-
-  private async reconnectOnStartup(path: string): Promise<void> {
-    try {
-      await invoke("connect_library", { libraryPath: path });
-    } catch {
-      const libraryName = path.split("/").pop() ?? path;
-      this.state.activeLibrary = null;
-      this.connectionWarning = `Could not reconnect to "${libraryName}". The library may have been moved or deleted.`;
-      await this.persist();
+    if (saved.activeLibrary) {
+      try {
+        await invoke("connect_library", { libraryPath: saved.activeLibrary });
+        this.state.activeLibrary = saved.activeLibrary; // pool live → safe to load
+      } catch {
+        const name = saved.activeLibrary.split(/[\\/]/).pop() ?? saved.activeLibrary;
+        this.connectionWarning = `Could not reconnect to "${name}". The library may have been moved or deleted.`;
+        await this.persist();
+      }
     }
   }
 

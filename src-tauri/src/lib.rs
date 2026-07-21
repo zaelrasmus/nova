@@ -35,6 +35,7 @@ pub fn run() {
             commands::fetch_assets,
             commands::stream_manifest,
             commands::fetch_assets_by_ids,
+            commands::generate_thumbnails,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

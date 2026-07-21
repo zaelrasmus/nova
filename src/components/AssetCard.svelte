@@ -65,6 +65,11 @@
 {/snippet}
 
 
+<!-- Image whose thumbnail is still being generated in the background. -->
+{#snippet pendingImage()}
+    <div class="w-full h-full bg-neutral-800/60 animate-pulse"></div>
+{/snippet}
+
 <!-- Generic card for types without a preview yet. -->
 {#snippet generic(icon: string)}
     <div
@@ -90,12 +95,14 @@
     onclick={onClick}
     onkeydown={(e) => e.key === "Enter" && onClick?.()}
 >
-    {#if previewSrc}
+    {#if placeholder || previewSrc}
         {@render thumbnail()}
     {:else if assetType === "audio"}
         {@render generic("🎵")}
     {:else if assetType === "video"}
         {@render generic("🎬")}
+    {:else if assetType === "image"}
+        {@render pendingImage()}
     {:else}
         {@render generic("📄")}
     {/if}

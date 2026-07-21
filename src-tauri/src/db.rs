@@ -4,7 +4,7 @@ use sqlx::SqlitePool;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tracing::{debug, info, instrument, warn};
 
 #[derive(Clone)]
@@ -15,12 +15,16 @@ pub struct LibraryHandle {
 
 pub struct DbState {
     inner: Arc<RwLock<Option<LibraryHandle>>>,
+    /// Held for the duration of a background thumbnail run. `try_lock` failing
+    /// means a run is already in flight, so a duplicate request is a no-op.
+    pub thumb_gen: Arc<Mutex<()>>,
 }
 
 impl DbState {
     pub fn new() -> Self {
         Self {
             inner: Arc::new(RwLock::new(None)),
+            thumb_gen: Arc::new(Mutex::new(())),
         }
     }
 

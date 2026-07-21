@@ -86,6 +86,38 @@ class AssetLibrary {
     return this.load();
   }
 
+  /**
+   * Kick off background thumbnail generation for any images still missing one
+   * (freshly imported, or interrupted on a previous run). Fire-and-forget: the
+   * backend emits `thumbnail-progress` as rows fill in; a run already in flight
+   * makes this a no-op. Thumbnails are a rebuildable cache, so a failure here is
+   * non-fatal and simply retried the next time the library opens.
+   */
+  async generateThumbnails(mode: string): Promise<void> {
+    try {
+      await invoke("generate_thumbnails", { thumbMode: mode });
+    } catch {
+      /* non-fatal */
+    }
+  }
+
+  /**
+   * Patch freshly-generated thumbnails into the manifest in place, without a
+   * full reload (which would flash the grid empty). Sets each row's thumb_hash
+   * so the ThumbHash placeholder appears immediately, and evicts the stale heavy
+   * row (its thumb_path was "") so it re-hydrates with the real thumbnail — the
+   * manifest reassignment re-runs AssetGrid's hydration effect, so no scroll is
+   * needed. (Phase 2: index rows by id to avoid the O(n) manifest map at scale.)
+   */
+  applyThumbnails(ready: { id: string; thumb_hash: string }[]): void {
+    if (!ready.length) return;
+    const byId = new Map(ready.map((r) => [r.id, r.thumb_hash]));
+    this.manifest = this.manifest.map((row) =>
+      byId.has(row.id) ? { ...row, thumb_hash: byId.get(row.id)! } : row,
+    );
+    for (const r of ready) this.heavy.delete(r.id);
+  }
+
   /** Hydrate heavy rows for the given ids (visible window + overscan). */
     async ensure(ids: string[]): Promise<void> {
       const missing = ids.filter((id) => !this.heavy.has(id) && !this.#pending.has(id));

@@ -269,12 +269,7 @@ async fn persist_assets(pool: &SqlitePool, assets: &[AssetMetadata]) -> Result<(
     Ok(())
 }
 
-fn build_asset_metadata(
-    src: PathBuf,
-    dest_dir: &Path,
-    thumbs_dir: &Path,
-    thumb_mode: thumbnail::ThumbMode,
-) -> Option<AssetMetadata> {
+fn build_asset_metadata(src: PathBuf, dest_dir: &Path) -> Option<AssetMetadata> {
     let asset_type = detect_asset_type(&src);
     let meta = std::fs::metadata(&src)
         .inspect_err(|e| warn!(path = ?src, error = %e, "Could not read file metadata, skipping"))
@@ -294,29 +289,16 @@ fn build_asset_metadata(
     let id = uuid::Uuid::new_v4().to_string();
     let dest_path = dest_dir.join(format!("{}.{}", id, ext));
 
-    // Type-specific visual extraction. A failure yields "no visual" — the asset
-    // still persists (never drop a user's file).
-    let ctx = extract::ExtractContext {
-        thumbs_dir,
-        id: &id,
-        mode: thumb_mode,
-    };
-    let visual = match extract::extractor_for(asset_type).extract(&src, &ctx) {
-        Ok(v) => v,
-        Err(e) => {
+    // Import-time extraction is CHEAP metadata only (dimensions, animation flag).
+    // The thumbnail + ThumbHash are produced later by the background pipeline, so
+    // import never blocks on decode/encode. A failure yields "no visual" — the
+    // asset still persists (never drop a user's file).
+    let visual = extract::extractor_for(asset_type)
+        .extract(&src)
+        .unwrap_or_else(|e| {
             warn!(path = ?src, error = %e, "Metadata extraction failed; keeping asset with no visual");
             extract::ExtractedVisual::default()
-        }
-    };
-
-    let thumb_path = if visual.has_thumb {
-        thumbs_dir
-            .join(format!("{}.webp", id))
-            .to_string_lossy()
-            .into_owned()
-    } else {
-        String::new()
-    };
+        });
 
     Some(AssetMetadata {
         id,
@@ -330,10 +312,10 @@ fn build_asset_metadata(
         imported_date: Utc::now().to_rfc3339(),
         creation_date: created.to_rfc3339(),
         modified_date: modified.to_rfc3339(),
-        thumb_hash: visual.thumb_hash,
-        thumb_config: visual.thumb_config,
+        thumb_hash: None,   // generated later by generate_pending_thumbnails
+        thumb_config: None,
         is_animated: visual.is_animated,
-        thumb_path,
+        thumb_path: String::new(),
     })
 }
 
@@ -455,7 +437,6 @@ pub async fn import_assets(
     source_dir: PathBuf,
     pool: SqlitePool,
     library_root: PathBuf,
-    thumb_mode: thumbnail::ThumbMode,
 ) -> Result<ImportResult> {
     let pipeline_start = std::time::Instant::now();
 
@@ -498,7 +479,7 @@ pub async fn import_assets(
     let staged_assets: Vec<AssetMetadata> = discovered_files
         .into_par_iter()
         .filter(|p| !matches!(detect_asset_type(p), AssetType::Unknown))
-        .filter_map(|src| build_asset_metadata(src, &assets_dir, &thumbs_dir, thumb_mode))
+        .filter_map(|src| build_asset_metadata(src, &assets_dir))
         .collect();
 
     info!(
@@ -542,4 +523,151 @@ pub async fn import_assets(
             .map(|(k, v)| (k.to_string_lossy().into_owned(), v))
             .collect(),
     })
+}
+
+// ── Background thumbnail pipeline ─────────────────────────────────────────────
+//
+// Thumbnails are a disposable, rebuildable cache. Import persists rows with
+// thumb_hash = NULL; this stage fills them in afterward (and on next launch,
+// resuming any that were interrupted) without ever blocking import or the UI.
+
+#[derive(FromRow, Clone)]
+struct PendingThumb {
+    id: String,
+    extension: String,
+}
+
+/// One generated thumbnail's DB-facing result.
+struct ThumbUpdate {
+    id: String,
+    thumb_hash: String,
+    thumb_config: String,
+}
+
+/// Progress sink for background thumbnail generation. `ready` is the batch of
+/// `(id, thumb_hash)` that just completed, so the UI can patch those rows in
+/// place instead of reloading the whole manifest. Never dropped/throttled by the
+/// caller — losing a batch would leave rows un-patched until the next reload.
+pub trait ThumbProgress: Send + Sync {
+    fn report(&self, done: usize, total: usize, ready: &[(String, String)]);
+}
+
+/// Generate thumbnails for every image whose `thumb_hash` is still NULL, in
+/// chunks, updating rows as they complete. Idempotent and resumable: a crash or
+/// app-close mid-run simply leaves the remaining rows NULL for the next call.
+///
+/// `thumb_hash IS NULL` is the single source of truth for "not generated yet",
+/// so callers can invoke this freely on import completion and on library open.
+#[instrument(skip(pool, root, progress))]
+pub async fn generate_pending_thumbnails(
+    pool: &SqlitePool,
+    root: &Path,
+    mode: thumbnail::ThumbMode,
+    progress: Arc<dyn ThumbProgress>,
+) -> Result<usize> {
+    let pending: Vec<PendingThumb> = sqlx::query_as::<_, PendingThumb>(
+        "SELECT id, extension FROM assets \
+         WHERE thumb_hash IS NULL AND asset_type = 'image' \
+         ORDER BY imported_date DESC, id DESC",
+    )
+    .fetch_all(pool)
+    .await
+    .context("Failed to query pending thumbnails")?;
+
+    let total = pending.len();
+    if total == 0 {
+        return Ok(0);
+    }
+
+    let assets_dir = root.join("assets");
+    let thumbs_dir = root.join("thumbnails");
+    fs::ensure_dir(&thumbs_dir).await?;
+
+    info!(total, "Background thumbnail generation started");
+    let start = std::time::Instant::now();
+
+    // Small enough that the UI sees updates often; large enough to keep Rayon fed.
+    const CHUNK: usize = 128;
+    let mut done = 0usize;
+
+    for chunk in pending.chunks(CHUNK) {
+        let chunk = chunk.to_vec();
+        let chunk_len = chunk.len();
+        let assets_dir = assets_dir.clone();
+        let thumbs_dir = thumbs_dir.clone();
+
+        // CPU-bound decode/resize/encode: Rayon fan-out on the blocking pool so
+        // the async runtime keeps serving other commands.
+        let results: Vec<ThumbUpdate> = tokio::task::spawn_blocking(move || {
+            chunk
+                .into_par_iter()
+                .filter_map(|p| {
+                    let src = assets_dir.join(format!("{}.{}", p.id, p.extension));
+                    let dest = thumbs_dir.join(format!("{}.webp", p.id));
+                    match thumbnail::generate(&src, &dest, mode) {
+                        Ok(t) => Some(ThumbUpdate {
+                            id: p.id,
+                            thumb_hash: t.thumb_hash,
+                            thumb_config: t.thumb_config,
+                        }),
+                        Err(e) => {
+                            warn!(id = %p.id, error = %e, "Thumbnail generation failed; leaving row NULL");
+                            None
+                        }
+                    }
+                })
+                .collect()
+        })
+        .await
+        .context("Thumbnail generation task panicked")?;
+
+        update_thumbnails(pool, &results).await?;
+
+        let ready: Vec<(String, String)> = results
+            .iter()
+            .map(|u| (u.id.clone(), u.thumb_hash.clone()))
+            .collect();
+        done += chunk_len;
+        progress.report(done, total, &ready);
+    }
+
+    if let Err(e) = sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
+        .execute(pool)
+        .await
+    {
+        warn!(error = %e, "WAL checkpoint after thumbnail generation failed (non-fatal)");
+    }
+
+    info!(
+        total,
+        elapsed_ms = start.elapsed().as_millis(),
+        "Background thumbnail generation complete"
+    );
+    Ok(total)
+}
+
+#[instrument(skip(pool, updates), fields(count = updates.len()))]
+async fn update_thumbnails(pool: &SqlitePool, updates: &[ThumbUpdate]) -> Result<()> {
+    if updates.is_empty() {
+        return Ok(());
+    }
+    let mut tx = pool
+        .begin()
+        .await
+        .context("Failed to begin thumbnail update transaction")?;
+
+    for u in updates {
+        sqlx::query("UPDATE assets SET thumb_hash = ?, thumb_config = ? WHERE id = ?")
+            .bind(&u.thumb_hash)
+            .bind(&u.thumb_config)
+            .bind(&u.id)
+            .execute(&mut *tx)
+            .await
+            .context("Failed to update thumbnail row")?;
+    }
+
+    tx.commit()
+        .await
+        .context("Failed to commit thumbnail updates")?;
+    Ok(())
 }

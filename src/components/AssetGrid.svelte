@@ -23,7 +23,11 @@
 
     $effect(() => {
       if (libraryManager.state.activeLibrary) {
-        assetLibrary.load();
+        // Load the manifest, then resume thumbnail generation for any images
+        // still missing one (interrupted on a previous run, or never started).
+        assetLibrary.load().then(() => {
+          assetLibrary.generateThumbnails(settings.preferences.thumbnailQuality);
+        });
       }
     })
 

@@ -10,6 +10,7 @@ use base64::{engine::general_purpose::STANDARD, Engine as _};
 use image::{imageops::FilterType, AnimationDecoder, DynamicImage};
 use std::collections::HashSet;
 use std::path::Path;
+use tracing::debug;
 
 /// Longest edge (px) of the cached thumbnail
 const THUMB_MAX: u32 = 512;
@@ -53,23 +54,33 @@ impl ThumbMode {
 pub struct ThumbOutput {
     pub thumb_hash: String,
     pub thumb_config: String,
-    pub is_animated: bool,
 }
 
 /// Decode `src` once, write a WebP thumbnail to `dest`, and return the
-/// placeholder hash, recipe tag, and animation flag
+/// placeholder hash and recipe tag. Runs on the background thumbnail pipeline,
+/// never on the import critical path.
 pub fn generate(src: &Path, dest: &Path, mode: ThumbMode) -> Result<ThumbOutput> {
+    let decode_start = std::time::Instant::now();
     let img = image::open(src).with_context(|| format!("Failed to decode image: {src:?}"))?;
+    let decode_ms = decode_start.elapsed().as_millis();
+    let encode_start = std::time::Instant::now();
+
+    // Downscale the full-resolution source exactly ONCE. The encode input, the
+    // ThumbHash source, and the flat-graphic check are all derived from this
+    // 512px thumb — not from three independent resizes of the (up to 12MP)
+    // original, which was the import-speed regression. Triangle is ~3x faster
+    // than Lanczos3 and visually indistinguishable at thumbnail size. (Switch to
+    // FilterType::CatmullRom if you want slightly sharper edges at a small cost.)
+    let thumb = img.resize(THUMB_MAX, THUMB_MAX, FilterType::Triangle);
 
     let lossless = match mode {
         ThumbMode::Lossy => false,
         ThumbMode::Lossless => true,
         // Auto: alpha or few colors => flat graphics => lossless; else photo => lossy.
-        ThumbMode::Auto => img.color().has_alpha() || is_flat_graphic(&img),
+        // Alpha comes from the source color type; flatness from the cheap thumb.
+        ThumbMode::Auto => img.color().has_alpha() || is_flat_graphic(&thumb),
     };
 
-    // High-qualiy downscale for the cached thumbnail (aspect preserved)
-    let thumb = img.resize(THUMB_MAX, THUMB_MAX, FilterType::Lanczos3);
     let rgba = thumb.to_rgba8();
     let encoder = webp::Encoder::from_rgba(&rgba, thumb.width(), thumb.height());
     let encoded = if lossless {
@@ -77,22 +88,39 @@ pub fn generate(src: &Path, dest: &Path, mode: ThumbMode) -> Result<ThumbOutput>
     } else {
         encoder.encode(LOSSY_QUALITY)
     };
-    std::fs::write(dest, &*encoded)
-        .with_context(|| format!("Failed to write thumbnail: {dest:?}"))?;
 
-    // ThumbHash from a small copy (the algorithm expects a <= 100px input)
-    let small = img.thumbnail(HASH_MAX, HASH_MAX).to_rgba8();
+    // Atomic write: encode into a temp file next to the target, then rename.
+    // A crash/close mid-write leaves the .tmp (ignored) instead of a truncated
+    // .webp that the NULL-checking resume pass would wrongly treat as complete.
+    let tmp = dest.with_extension("webp.tmp");
+    std::fs::write(&tmp, &*encoded)
+        .with_context(|| format!("Failed to write thumbnail temp: {tmp:?}"))?;
+    std::fs::rename(&tmp, dest)
+        .with_context(|| format!("Failed to finalize thumbnail: {dest:?}"))?;
+
+    // ThumbHash wants a <= 100px input; derive it from the 512px thumb (cheap),
+    // not another full-resolution downscale of the original.
+    let small = thumb.thumbnail(HASH_MAX, HASH_MAX).to_rgba8();
     let hash =
         thumbhash::rgba_to_thumb_hash(small.width() as usize, small.height() as usize, &small);
+    let encode_ms = encode_start.elapsed().as_millis();
+
+    debug!(
+        ?src,
+        decode_ms,
+        encode_ms,
+        lossless,
+        "Thumbnail generated"
+    );
 
     Ok(ThumbOutput {
         thumb_hash: STANDARD.encode(&hash),
         thumb_config: mode.config_tag().to_string(),
-        is_animated: detect_animated(src),
     })
 }
 
-/// Cheap flat-graphic detector: few distinct colors on a downscaled copy.
+/// Cheap flat-graphic detector: few distinct colors on a 64px copy of the
+/// already-downscaled 512px thumb (not the full-resolution source).
 fn is_flat_graphic(img: &DynamicImage) -> bool {
     let small = img.thumbnail(64, 64).to_rgb8();
     let mut colors = HashSet::new();
@@ -106,8 +134,9 @@ fn is_flat_graphic(img: &DynamicImage) -> bool {
 }
 
 /// True if the source is a multi-frame animation. GIF only for now; animated
-/// WebP detection is a later refinement (#11).
-fn detect_animated(src: &Path) -> bool {
+/// WebP detection is a later refinement (#11). Called at import time (cheap:
+/// reads at most two frames).
+pub fn detect_animated(src: &Path) -> bool {
     let ext = src
         .extension()
         .and_then(|e| e.to_str())

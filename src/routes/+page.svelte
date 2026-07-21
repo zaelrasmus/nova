@@ -1,4 +1,5 @@
 <script lang="ts">
+    import { onMount } from "svelte";
     import { invoke } from "@tauri-apps/api/core";
     import { listen } from "@tauri-apps/api/event";
     import { open } from "@tauri-apps/plugin-dialog";
@@ -137,9 +138,11 @@
 
         const importPromise = invoke<ImportResult>("import_assets", {
             sourcePath: selectedSource,
-            thumbMode: settings.preferences.thumbnailQuality,
         }).then(async (result) => {
             await assetLibrary.reload();
+            // Import is now near-instant (no thumbnailing). Generate thumbnails in
+            // the background; the grid fills in as `thumbnail-progress` arrives.
+            assetLibrary.generateThumbnails(settings.preferences.thumbnailQuality);
             return result; // pass through so toast.promise still receives it
         });
 
@@ -182,6 +185,22 @@
             handleCommandError(e);
         }
     }
+
+    // As background thumbnails finish, patch the just-completed rows into the
+    // manifest in place (ThumbHash placeholder appears, then the real thumbnail
+    // re-hydrates). No full reload → no grid flash.
+    onMount(() => {
+        const unlisten = listen<{
+            current: number;
+            total: number;
+            ready: { id: string; thumb_hash: string }[];
+        }>("thumbnail-progress", (event) => {
+            assetLibrary.applyThumbnails(event.payload.ready);
+        });
+        return () => {
+            unlisten.then((fn) => fn());
+        };
+    });
 
     // Alert is shown as persistent inline state — not a toast —
     // because "no library connected" requires user action before anything else works.

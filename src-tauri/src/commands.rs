@@ -131,21 +131,71 @@ pub async fn create_library<R: Runtime>(
 pub async fn import_assets(
     window: tauri::Window,
     source_path: String,
-    thumb_mode: String,
     state: tauri::State<'_, DbState>,
 ) -> Result<ImportResult, AppError> {
     let handle = state.acquire().await?;
     let source_dir = std::path::PathBuf::from(&source_path);
-    let mode = crate::thumbnail::ThumbMode::from_setting(&thumb_mode);
 
     let reporter = Arc::new(TauriProgressReporter {
         window,
         last_emit: std::sync::Mutex::new(std::time::Instant::now()),
     });
 
-    assets::import_assets(reporter, source_dir, handle.pool, handle.root, mode)
+    assets::import_assets(reporter, source_dir, handle.pool, handle.root)
         .await
         .inspect_err(|e| tracing::error!(error = %e, source = %source_path, "import_assets failed"))
+        .map_err(AppError::from)
+}
+
+/// Progress emitter for background thumbnail generation. Emits once per chunk
+/// (already coarse — a chunk is 128 images), carrying the just-completed
+/// `(id, thumb_hash)` pairs so the UI patches those rows in place.
+struct ThumbProgressEmitter {
+    window: tauri::Window,
+}
+
+impl assets::ThumbProgress for ThumbProgressEmitter {
+    fn report(&self, done: usize, total: usize, ready: &[(String, String)]) {
+        let ready: Vec<_> = ready
+            .iter()
+            .map(|(id, hash)| serde_json::json!({ "id": id, "thumb_hash": hash }))
+            .collect();
+        if let Err(e) = self.window.emit(
+            "thumbnail-progress",
+            serde_json::json!({ "current": done, "total": total, "ready": ready }),
+        ) {
+            warn!(error = %e, "Failed to emit thumbnail-progress event");
+        }
+    }
+}
+
+/// Generate thumbnails for all images still missing one (freshly imported, or
+/// interrupted on a previous run). Safe to call on import completion and on
+/// library open — a run already in flight makes this a no-op.
+#[instrument(skip_all)]
+#[tauri::command]
+pub async fn generate_thumbnails(
+    window: tauri::Window,
+    thumb_mode: String,
+    state: tauri::State<'_, DbState>,
+) -> Result<usize, AppError> {
+    let handle = state.acquire().await?;
+
+    // Concurrency guard: if a run is already active, skip silently.
+    let _guard = match state.thumb_gen.try_lock() {
+        Ok(g) => g,
+        Err(_) => {
+            info!("Thumbnail generation already running; ignoring duplicate request");
+            return Ok(0);
+        }
+    };
+
+    let mode = crate::thumbnail::ThumbMode::from_setting(&thumb_mode);
+    let reporter = Arc::new(ThumbProgressEmitter { window });
+
+    assets::generate_pending_thumbnails(&handle.pool, &handle.root, mode, reporter)
+        .await
+        .inspect_err(|e| tracing::error!(error = %e, "generate_thumbnails failed"))
         .map_err(AppError::from)
 }
 
