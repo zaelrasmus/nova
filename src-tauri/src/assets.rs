@@ -647,7 +647,7 @@ async fn copy_assets(
 
             match tokio::fs::copy(&src, &dst).await {
                 Ok(bytes) => {
-                    let current = completed.fetch_add(1, Ordering::SeqCst) + 1;
+                    let current = completed.fetch_add(1, Ordering::Relaxed) + 1;
                     debug!(file = %filename, bytes, "File copied");
 
                     reporter.report(ImportProgress {
@@ -698,51 +698,6 @@ async fn cleanup_orphans(root: &Path, assets: &[AssetMetadata]) {
             Err(e) => warn!(path = ?path, error = %e, "Failed to remove orphaned file"),
         }
     }
-}
-
-#[instrument(skip(pool))]
-pub async fn fetch_assets(pool: &SqlitePool) -> Result<Vec<AssetMetadata>> {
-    let assets = sqlx::query_as::<_, AssetMetadata>(
-        r#"
-        SELECT id, asset_type, filename, extension, path, width, height,
-               imported_date, creation_date, modified_date
-        FROM assets
-        "#,
-    )
-    .fetch_all(pool)
-    .await
-    .context("Failed to fetch assets from database")?;
-
-    debug!(count = assets.len(), "Assets fetched from database");
-    Ok(assets)
-}
-
-#[instrument(skip(pool))]
-pub async fn insert_test_asset(pool: &SqlitePool, name: &str) -> Result<String> {
-    let id = uuid::Uuid::new_v4().to_string();
-    let now = chrono::Utc::now().to_rfc3339();
-
-    sqlx::query(
-        "INSERT INTO assets (id, asset_type, filename, extension, path, width, height,
-                             imported_date, creation_date, modified_date)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-    )
-    .bind(&id)
-    .bind("image")
-    .bind(name)
-    .bind("png")
-    .bind(format!("assets/{}", name))
-    .bind(0_i64) // width — placeholder for the test row
-    .bind(0_i64) // height
-    .bind(&now)
-    .bind(&now)
-    .bind(&now)
-    .execute(pool)
-    .await
-    .with_context(|| format!("Failed to insert test asset '{}'", name))?;
-
-    debug!(id = %id, name = name, "Test asset inserted");
-    Ok(id)
 }
 
 #[instrument(skip(reporter, pool), fields(source = %source_dir.display()))]

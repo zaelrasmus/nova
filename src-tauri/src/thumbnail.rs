@@ -57,6 +57,14 @@ pub struct ThumbConfig {
     pub quality: f32,
 }
 
+/// The thumbnail knobs as they cross the IPC boundary — one typed object instead
+/// of two loose `thumb_mode` / `quality` args on every generation command.
+#[derive(serde::Deserialize, Debug, Clone)]
+pub struct ThumbSettings {
+    pub mode: String,
+    pub quality: f32,
+}
+
 impl ThumbConfig {
     /// Build from the frontend's mode string + quality-slider value.
     pub fn from_setting(mode: &str, quality: f32) -> Self {
@@ -64,6 +72,11 @@ impl ThumbConfig {
             mode: ThumbMode::from_setting(mode),
             quality: quality.clamp(0.0, 100.0),
         }
+    }
+
+    /// Build from the IPC settings object.
+    pub fn from_settings(s: &ThumbSettings) -> Self {
+        Self::from_setting(&s.mode, s.quality)
     }
 
     /// Staleness tag stored per asset. Includes the lossy quality so a future

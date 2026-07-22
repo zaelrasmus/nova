@@ -34,7 +34,7 @@ const DEFAULT_PREFERENCES: AppPreferences = {
     Trash: true,
   },
   thumbnailQuality: "auto",
-  thumbnailLossyQuality: 82,
+  thumbnailLossyQuality: 80,
   animateGifsInGrid: false,
 };
 

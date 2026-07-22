@@ -80,32 +80,4 @@
             </Select.Content>
         </Select.Root> -->
     </div>
-    <div class="flex items-center justify-between gap-8">
-        <div class="flex flex-col gap-0.5">
-            <Label class="text-sm text-neutral-200">Font Size</Label>
-            <p class="text-xs text-neutral-500">Controls text size across the interface.</p>
-        </div>
-        <!-- <Select.Root
-            selected={{
-                value: settings.preferences.fontSize,
-                label: settings.preferences.fontSize,
-            }}
-            onSelectedChange={(v) =>
-                v && settings.set("fontSize", v.value as typeof settings.preferences.fontSize)}
-        >
-            <Select.Trigger class="w-32 bg-neutral-900 border-neutral-700 text-neutral-200">
-                <Select.Value />
-            </Select.Trigger>
-            <Select.Content class="bg-neutral-900 border-neutral-700">
-                {#each fontSizeOptions as opt}
-                    <Select.Item
-                        value={opt.value}
-                        class="text-neutral-200 focus:bg-neutral-800"
-                    >
-                        {opt.label}
-                    </Select.Item>
-                {/each}
-            </Select.Content>
-        </Select.Root> -->
-    </div>
 </div>

@@ -97,7 +97,7 @@ class AssetLibrary {
   #thumbQueue = new Set<string>();
   #thumbFlushing = false;
   #thumbMode = "auto";
-  #thumbQuality = 82;
+  #thumbQuality = 80;
 
   /** (Re)load the full manifest for the active library. */
   async load(filter: ManifestFilter = this.manifestFilter): Promise<void> {
@@ -209,7 +209,7 @@ class AssetLibrary {
    * is bumped afterward to bust the webview's image cache (see AssetCard).
    */
   async rebuildThumbnails(mode: string, quality: number): Promise<number> {
-    const count = await invoke<number>("rebuild_thumbnails", { thumbMode: mode, quality });
+    const count = await invoke<number>("rebuild_thumbnails", { settings: { mode, quality } });
     // Files were rewritten in place under the same id.webp paths — bump the
     // version so on-screen thumbnails refetch instead of showing the cache.
     this.thumbVersion++;
@@ -246,8 +246,7 @@ class AssetLibrary {
           if (token !== this.#loadToken) break; // library switched before dispatch
           await invoke<number>("generate_thumbnails_for_ids", {
             ids: batch,
-            thumbMode: this.#thumbMode,
-            quality: this.#thumbQuality,
+            settings: { mode: this.#thumbMode, quality: this.#thumbQuality },
           });
           if (token !== this.#loadToken) break; // switched mid-request; stop draining
         } catch (e) {

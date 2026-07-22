@@ -66,35 +66,6 @@ pub async fn connect_library<R: Runtime>(
     Ok("Library connected successfully".into())
 }
 
-#[instrument(skip_all, fields(asset_name = %name))]
-#[tauri::command]
-pub async fn inject_test_asset(
-    name: String,
-    state: tauri::State<'_, DbState>,
-) -> Result<String, AppError> {
-    let pool = state.acquire_pool().await?;
-
-    assets::insert_test_asset(&pool, &name)
-        .await
-        .inspect_err(
-            |e| tracing::error!(error = %e, asset_name = %name, "inject_test_asset failed"),
-        )
-        .map_err(AppError::from)
-}
-
-#[instrument(skip_all)]
-#[tauri::command]
-pub async fn fetch_assets(
-    state: tauri::State<'_, DbState>,
-) -> Result<Vec<AssetMetadata>, AppError> {
-    let pool = state.acquire_pool().await?;
-
-    assets::fetch_assets(&pool)
-        .await
-        .inspect_err(|e| tracing::error!(error = %e, "fetch_assets failed"))
-        .map_err(AppError::from)
-}
-
 #[instrument(skip_all, fields(library_name = %name, location = %location))]
 #[tauri::command]
 pub async fn create_library<R: Runtime>(
@@ -181,47 +152,15 @@ impl assets::ThumbProgress for ThumbProgressEmitter {
     }
 }
 
-/// Generate thumbnails for all images still missing one (freshly imported, or
-/// interrupted on a previous run). Safe to call on import completion and on
-/// library open — a run already in flight makes this a no-op.
-#[instrument(skip_all)]
-#[tauri::command]
-pub async fn generate_thumbnails(
-    window: tauri::Window,
-    thumb_mode: String,
-    quality: f32,
-    state: tauri::State<'_, DbState>,
-) -> Result<usize, AppError> {
-    let handle = state.acquire().await?;
-
-    // Concurrency guard: if a run is already active, skip silently.
-    let _guard = match state.thumb_gen.try_lock() {
-        Ok(g) => g,
-        Err(_) => {
-            info!("Thumbnail generation already running; ignoring duplicate request");
-            return Ok(0);
-        }
-    };
-
-    let config = crate::thumbnail::ThumbConfig::from_setting(&thumb_mode, quality);
-    let reporter = Arc::new(ThumbProgressEmitter { window });
-
-    assets::generate_pending_thumbnails(&handle.pool, &handle.root, config, reporter)
-        .await
-        .inspect_err(|e| tracing::error!(error = %e, "generate_thumbnails failed"))
-        .map_err(AppError::from)
-}
-
 /// Rebuild ALL thumbnails from scratch: clear the cache (files + DB columns),
 /// then regenerate with `thumb_mode`. Used to apply a changed quality setting to
-/// an existing library. Guarded like `generate_thumbnails` — if a run is already
-/// active this is a no-op. Resolves once every thumbnail has been regenerated.
+/// an existing library. Guarded by `thumb_gen` — if a run is already active this
+/// is a no-op. Resolves once every thumbnail has been regenerated.
 #[instrument(skip_all)]
 #[tauri::command]
 pub async fn rebuild_thumbnails(
     window: tauri::Window,
-    thumb_mode: String,
-    quality: f32,
+    settings: crate::thumbnail::ThumbSettings,
     state: tauri::State<'_, DbState>,
 ) -> Result<usize, AppError> {
     let handle = state.acquire().await?;
@@ -238,7 +177,7 @@ pub async fn rebuild_thumbnails(
         .await
         .inspect_err(|e| tracing::error!(error = %e, "reset_thumbnails failed"))?;
 
-    let config = crate::thumbnail::ThumbConfig::from_setting(&thumb_mode, quality);
+    let config = crate::thumbnail::ThumbConfig::from_settings(&settings);
     let reporter = Arc::new(ThumbProgressEmitter { window });
 
     assets::generate_pending_thumbnails(&handle.pool, &handle.root, config, reporter)
@@ -256,12 +195,11 @@ pub async fn rebuild_thumbnails(
 pub async fn generate_thumbnails_for_ids(
     window: tauri::Window,
     ids: Vec<String>,
-    thumb_mode: String,
-    quality: f32,
+    settings: crate::thumbnail::ThumbSettings,
     state: tauri::State<'_, DbState>,
 ) -> Result<usize, AppError> {
     let handle = state.acquire().await?;
-    let config = crate::thumbnail::ThumbConfig::from_setting(&thumb_mode, quality);
+    let config = crate::thumbnail::ThumbConfig::from_settings(&settings);
     let reporter = Arc::new(ThumbProgressEmitter { window });
 
     assets::generate_thumbnails_for_ids(&handle.pool, &handle.root, config, &ids, reporter)
@@ -397,10 +335,15 @@ pub async fn fetch_assets_by_ids(
         .map_err(AppError::from)
 }
 
-// ANTICIPATED: Backend sync
-// Apply a preference change to the backend
+// ANTICIPATED: Backend sync. Intentional scaffolding for pushing preference
+// changes from the frontend to the backend (pairs with BACKEND_SYNCED_KEYS /
+// syncBackendPreferences in settings.svelte.ts). Kept on purpose though unused
+// and not yet in the invoke_handler; wire it up when a preference first needs to
+// affect Rust behavior.
+// match kept (not a `let`) so future per-key arms have an obvious home.
+#[allow(dead_code, clippy::match_single_binding)]
 #[tauri::command]
-pub async fn apply_preference(key: String, value: serde_json::Value) -> Result<(), AppError> {
+pub async fn apply_preference(key: String, _value: serde_json::Value) -> Result<(), AppError> {
     match key.as_str() {
         // "max_import_size_mb" => { ... }
         // "thumbnail_quality"  => { ... }

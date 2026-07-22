@@ -31,8 +31,6 @@ pub fn run() {
             commands::create_library,
             commands::import_assets,
             commands::connect_library,
-            commands::inject_test_asset,
-            commands::fetch_assets,
             commands::stream_manifest,
             commands::fetch_folders,
             commands::create_folder,
@@ -42,7 +40,6 @@ pub fn run() {
             commands::add_assets_to_folder,
             commands::remove_assets_from_folder,
             commands::fetch_assets_by_ids,
-            commands::generate_thumbnails,
             commands::generate_thumbnails_for_ids,
             commands::rebuild_thumbnails,
         ])

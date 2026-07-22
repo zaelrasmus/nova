@@ -220,7 +220,7 @@
     // import { Settings, Palette, FolderInput, LayoutGrid, Library, Info } from "lucide-svelte";
 
     // To add a new section: import its component and register it below.
-    import AppearanceSection from "../components/settings/AppaeranceSection.svelte";
+    import AppearanceSection from "../components/settings/AppearanceSection.svelte";
     import ImportSection from "../components/settings/ImportSection.svelte";
     import DisplaySection from "../components/settings/DisplaySection.svelte";
 
