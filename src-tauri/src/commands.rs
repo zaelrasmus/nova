@@ -119,6 +119,7 @@ pub async fn create_library<R: Runtime>(
 pub async fn import_assets(
     window: tauri::Window,
     source_path: String,
+    import_folders: bool,
     state: tauri::State<'_, DbState>,
 ) -> Result<ImportResult, AppError> {
     let handle = state.acquire().await?;
@@ -129,10 +130,16 @@ pub async fn import_assets(
         last_emit: std::sync::Mutex::new(std::time::Instant::now()),
     });
 
-    assets::import_assets(reporter, source_dir, handle.pool, handle.root)
-        .await
-        .inspect_err(|e| tracing::error!(error = %e, source = %source_path, "import_assets failed"))
-        .map_err(AppError::from)
+    assets::import_assets(
+        reporter,
+        source_dir,
+        handle.pool,
+        handle.root,
+        import_folders,
+    )
+    .await
+    .inspect_err(|e| tracing::error!(error = %e, source = %source_path, "import_assets failed"))
+    .map_err(AppError::from)
 }
 
 /// Progress emitter for background thumbnail generation. Emits once per chunk
@@ -245,11 +252,12 @@ pub async fn generate_thumbnails_for_ids(
 #[instrument(skip_all)]
 #[tauri::command]
 pub async fn stream_manifest(
+    filter: assets::ManifestFilter,
     on_chunk: tauri::ipc::Channel<Vec<AssetLightRow>>,
     state: tauri::State<'_, DbState>,
 ) -> Result<(), AppError> {
     let pool = state.acquire_pool().await?;
-    let rows = assets::fetch_manifest(&pool).await?;
+    let rows = assets::fetch_manifest(&pool, &filter).await?;
 
     // Chunk so first paint starts before the whole manifest is deserialized.
     for chunk in rows.chunks(5000) {
@@ -258,6 +266,101 @@ pub async fn stream_manifest(
             .map_err(|e| AppError::Internal(e.into()))?;
     }
     Ok(())
+}
+
+#[instrument(skip_all)]
+#[tauri::command]
+pub async fn fetch_folders(
+    state: tauri::State<'_, DbState>,
+) -> Result<Vec<assets::Folder>, AppError> {
+    let pool = state.acquire_pool().await?;
+    assets::fetch_folders(&pool)
+        .await
+        .inspect_err(|e| tracing::error!(error = %e, "fetch_folders failed"))
+        .map_err(AppError::from)
+}
+
+#[instrument(skip_all, fields(name = %name))]
+#[tauri::command]
+pub async fn create_folder(
+    name: String,
+    parent_id: Option<String>,
+    state: tauri::State<'_, DbState>,
+) -> Result<assets::Folder, AppError> {
+    let pool = state.acquire_pool().await?;
+    assets::create_folder(&pool, &name, parent_id.as_deref())
+        .await
+        .inspect_err(|e| tracing::error!(error = %e, "create_folder failed"))
+        .map_err(AppError::from)
+}
+
+#[instrument(skip_all)]
+#[tauri::command]
+pub async fn rename_folder(
+    id: String,
+    name: String,
+    state: tauri::State<'_, DbState>,
+) -> Result<(), AppError> {
+    let pool = state.acquire_pool().await?;
+    assets::rename_folder(&pool, &id, &name)
+        .await
+        .inspect_err(|e| tracing::error!(error = %e, "rename_folder failed"))
+        .map_err(AppError::from)
+}
+
+#[instrument(skip_all)]
+#[tauri::command]
+pub async fn delete_folder(
+    id: String,
+    state: tauri::State<'_, DbState>,
+) -> Result<(), AppError> {
+    let pool = state.acquire_pool().await?;
+    assets::delete_folder(&pool, &id)
+        .await
+        .inspect_err(|e| tracing::error!(error = %e, "delete_folder failed"))
+        .map_err(AppError::from)
+}
+
+#[instrument(skip_all)]
+#[tauri::command]
+pub async fn move_folder(
+    id: String,
+    new_parent_id: Option<String>,
+    state: tauri::State<'_, DbState>,
+) -> Result<(), AppError> {
+    let pool = state.acquire_pool().await?;
+    assets::move_folder(&pool, &id, new_parent_id.as_deref())
+        .await
+        .inspect_err(|e| tracing::error!(error = %e, "move_folder failed"))
+        .map_err(AppError::from)
+}
+
+#[instrument(skip_all, fields(count = asset_ids.len()))]
+#[tauri::command]
+pub async fn add_assets_to_folder(
+    folder_id: String,
+    asset_ids: Vec<String>,
+    state: tauri::State<'_, DbState>,
+) -> Result<(), AppError> {
+    let pool = state.acquire_pool().await?;
+    assets::add_assets_to_folder(&pool, &folder_id, &asset_ids)
+        .await
+        .inspect_err(|e| tracing::error!(error = %e, "add_assets_to_folder failed"))
+        .map_err(AppError::from)
+}
+
+#[instrument(skip_all, fields(count = asset_ids.len()))]
+#[tauri::command]
+pub async fn remove_assets_from_folder(
+    folder_id: String,
+    asset_ids: Vec<String>,
+    state: tauri::State<'_, DbState>,
+) -> Result<(), AppError> {
+    let pool = state.acquire_pool().await?;
+    assets::remove_assets_from_folder(&pool, &folder_id, &asset_ids)
+        .await
+        .inspect_err(|e| tracing::error!(error = %e, "remove_assets_from_folder failed"))
+        .map_err(AppError::from)
 }
 
 #[instrument(skip_all, fields(count = ids.len()))]

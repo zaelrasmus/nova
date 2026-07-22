@@ -27,6 +27,17 @@ pub enum AssetType {
     Unknown,
 }
 
+/// What slice of the library the manifest should stream. `All` = everything,
+/// `Folder` = one folder's members (manual order), `Uncategorized` = assets with
+/// no folder membership. Sent from the frontend as `{ "kind": "folder", "id": … }`.
+#[derive(Deserialize, Debug, Clone)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ManifestFilter {
+    All,
+    Folder { id: String },
+    Uncategorized,
+}
+
 #[derive(Serialize, Clone, Debug, FromRow)]
 pub struct AssetLightRow {
     pub id: String,
@@ -75,14 +86,36 @@ pub struct AssetMetadata {
     pub thumb_path: String,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+/// How a folder sorts the assets shown when it's opened. Stored as TEXT; the
+/// auto variants map to the `idx_assets_*` sort indexes, `Manual` uses each
+/// membership row's `assets_folders.position`.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Type, PartialEq, Eq)]
+#[sqlx(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
+pub enum OrderBy {
+    ImportedDate,
+    Filename,
+    CreationDate,
+    Manual,
+}
+
+/// One asset↔folder membership row, built at import time from each asset's
+/// source parent directory. `position` seeds the manual order within the folder.
+struct FolderLink {
+    folder_id: String,
+    asset_id: String,
+    position: f64,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, FromRow)]
 pub struct Folder {
     pub id: String,
     pub name: String,
     pub parent_id: Option<String>,
-    pub order_by: String,     // TODO: Use an enum
-    pub is_ascending: String, // TODO: Use a bool
-    pub original_path: String,
+    /// Sibling ordering under the same parent (fractional rank).
+    pub position: f64,
+    pub order_by: OrderBy,
+    pub is_ascending: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -139,16 +172,237 @@ fn detect_asset_type(path: &Path) -> AssetType {
 }
 
 #[instrument(skip(pool))]
-pub async fn fetch_manifest(pool: &SqlitePool) -> Result<Vec<AssetLightRow>> {
-    let rows = sqlx::query_as::<_, AssetLightRow>(
-        "SELECT id, width, height, asset_type, thumb_hash, is_animated
-         FROM assets
-         ORDER BY imported_date DESC, id DESC",
+pub async fn fetch_manifest(
+    pool: &SqlitePool,
+    filter: &ManifestFilter,
+) -> Result<Vec<AssetLightRow>> {
+    let rows = match filter {
+        ManifestFilter::All => {
+            sqlx::query_as::<_, AssetLightRow>(
+                "SELECT id, width, height, asset_type, thumb_hash, is_animated
+                 FROM assets
+                 ORDER BY imported_date DESC, id DESC",
+            )
+            .fetch_all(pool)
+            .await
+        }
+        ManifestFilter::Folder { id } => {
+            // Manual order within a folder: assets_folders.position, then insertion.
+            sqlx::query_as::<_, AssetLightRow>(
+                "SELECT a.id, a.width, a.height, a.asset_type, a.thumb_hash, a.is_animated
+                 FROM assets a
+                 JOIN assets_folders af ON af.asset_id = a.id
+                 WHERE af.folder_id = ?
+                 ORDER BY af.position ASC, af.added_at ASC, a.id DESC",
+            )
+            .bind(id)
+            .fetch_all(pool)
+            .await
+        }
+        ManifestFilter::Uncategorized => {
+            sqlx::query_as::<_, AssetLightRow>(
+                "SELECT id, width, height, asset_type, thumb_hash, is_animated
+                 FROM assets
+                 WHERE id NOT IN (SELECT asset_id FROM assets_folders)
+                 ORDER BY imported_date DESC, id DESC",
+            )
+            .fetch_all(pool)
+            .await
+        }
+    }
+    .context("Failed to fetch asset manifest")?;
+    Ok(rows)
+}
+
+#[instrument(skip(pool))]
+pub async fn fetch_folders(pool: &SqlitePool) -> Result<Vec<Folder>> {
+    let folders = sqlx::query_as::<_, Folder>(
+        "SELECT id, name, parent_id, position, order_by, is_ascending
+         FROM folders
+         ORDER BY parent_id, position, name",
     )
     .fetch_all(pool)
     .await
-    .context("Failed to fetch asset manifest")?;
-    Ok(rows)
+    .context("Failed to fetch folders")?;
+    Ok(folders)
+}
+
+// ── Folder CRUD (app-exclusive; never touches the source filesystem) ──────────
+
+/// Next sibling position = MAX(position)+1 among folders sharing `parent_id`
+/// (NULL parent = root). `IS ?` handles the NULL comparison in one query.
+async fn next_folder_position(pool: &SqlitePool, parent_id: Option<&str>) -> Result<f64> {
+    let max = sqlx::query_scalar::<_, Option<f64>>(
+        "SELECT MAX(position) FROM folders WHERE parent_id IS ?",
+    )
+    .bind(parent_id)
+    .fetch_one(pool)
+    .await
+    .context("Failed to compute folder position")?;
+    Ok(max.map(|m| m + 1.0).unwrap_or(0.0))
+}
+
+#[instrument(skip(pool))]
+pub async fn create_folder(
+    pool: &SqlitePool,
+    name: &str,
+    parent_id: Option<&str>,
+) -> Result<Folder> {
+    let id = uuid::Uuid::new_v4().to_string();
+    let position = next_folder_position(pool, parent_id).await?;
+
+    sqlx::query(
+        "INSERT INTO folders (id, name, parent_id, position, order_by, is_ascending)
+         VALUES (?, ?, ?, ?, 'imported_date', 1)",
+    )
+    .bind(&id)
+    .bind(name)
+    .bind(parent_id)
+    .bind(position)
+    .execute(pool)
+    .await
+    .context("Failed to insert folder")?;
+
+    Ok(Folder {
+        id,
+        name: name.to_string(),
+        parent_id: parent_id.map(str::to_string),
+        position,
+        order_by: OrderBy::ImportedDate,
+        is_ascending: true,
+    })
+}
+
+#[instrument(skip(pool))]
+pub async fn rename_folder(pool: &SqlitePool, id: &str, name: &str) -> Result<()> {
+    let res = sqlx::query("UPDATE folders SET name = ? WHERE id = ?")
+        .bind(name)
+        .bind(id)
+        .execute(pool)
+        .await
+        .context("Failed to rename folder")?;
+    if res.rows_affected() == 0 {
+        anyhow::bail!("Folder not found");
+    }
+    Ok(())
+}
+
+/// Delete a folder. The self-FK and membership FKs are `ON DELETE CASCADE`, so
+/// this also removes every descendant folder and all membership rows — but never
+/// the assets themselves (an asset with no remaining folder becomes uncategorized).
+#[instrument(skip(pool))]
+pub async fn delete_folder(pool: &SqlitePool, id: &str) -> Result<()> {
+    sqlx::query("DELETE FROM folders WHERE id = ?")
+        .bind(id)
+        .execute(pool)
+        .await
+        .context("Failed to delete folder")?;
+    Ok(())
+}
+
+/// Reparent a folder (and append it to the end of the new parent's siblings).
+/// Rejects moving a folder into itself or one of its own descendants, which would
+/// orphan the subtree — checked by walking up from the target parent to the root.
+#[instrument(skip(pool))]
+pub async fn move_folder(
+    pool: &SqlitePool,
+    id: &str,
+    new_parent_id: Option<&str>,
+) -> Result<()> {
+    let mut cursor = new_parent_id.map(str::to_string);
+    while let Some(cur) = cursor {
+        if cur == id {
+            anyhow::bail!("Cannot move a folder into itself or a descendant");
+        }
+        cursor = sqlx::query_scalar::<_, Option<String>>(
+            "SELECT parent_id FROM folders WHERE id = ?",
+        )
+        .bind(&cur)
+        .fetch_optional(pool)
+        .await
+        .context("Failed to walk folder ancestry")?
+        .flatten();
+    }
+
+    let position = next_folder_position(pool, new_parent_id).await?;
+    let res = sqlx::query("UPDATE folders SET parent_id = ?, position = ? WHERE id = ?")
+        .bind(new_parent_id)
+        .bind(position)
+        .bind(id)
+        .execute(pool)
+        .await
+        .context("Failed to move folder")?;
+    if res.rows_affected() == 0 {
+        anyhow::bail!("Folder not found");
+    }
+    Ok(())
+}
+
+/// Add assets to a folder, appended after its existing members. `INSERT OR IGNORE`
+/// makes re-adding an already-present asset a no-op (keeps its current position).
+#[instrument(skip(pool, asset_ids), fields(count = asset_ids.len()))]
+pub async fn add_assets_to_folder(
+    pool: &SqlitePool,
+    folder_id: &str,
+    asset_ids: &[String],
+) -> Result<()> {
+    if asset_ids.is_empty() {
+        return Ok(());
+    }
+    let mut position = sqlx::query_scalar::<_, Option<f64>>(
+        "SELECT MAX(position) FROM assets_folders WHERE folder_id = ?",
+    )
+    .bind(folder_id)
+    .fetch_one(pool)
+    .await
+    .context("Failed to compute membership position")?
+    .map(|m| m + 1.0)
+    .unwrap_or(0.0);
+
+    let mut tx = pool
+        .begin()
+        .await
+        .context("Failed to begin membership transaction")?;
+    for id in asset_ids {
+        sqlx::query(
+            "INSERT OR IGNORE INTO assets_folders (folder_id, asset_id, position) VALUES (?, ?, ?)",
+        )
+        .bind(folder_id)
+        .bind(id)
+        .bind(position)
+        .execute(&mut *tx)
+        .await
+        .context("Failed to add asset to folder")?;
+        position += 1.0;
+    }
+    tx.commit()
+        .await
+        .context("Failed to commit membership transaction")?;
+    Ok(())
+}
+
+#[instrument(skip(pool, asset_ids), fields(count = asset_ids.len()))]
+pub async fn remove_assets_from_folder(
+    pool: &SqlitePool,
+    folder_id: &str,
+    asset_ids: &[String],
+) -> Result<()> {
+    if asset_ids.is_empty() {
+        return Ok(());
+    }
+    let mut qb = QueryBuilder::new("DELETE FROM assets_folders WHERE folder_id = ");
+    qb.push_bind(folder_id);
+    qb.push(" AND asset_id IN (");
+    let mut separated = qb.separated(", ");
+    for id in asset_ids {
+        separated.push_bind(id);
+    }
+    qb.push(")");
+    qb.build()
+        .execute(pool)
+        .await
+        .context("Failed to remove assets from folder")?;
+    Ok(())
 }
 
 #[instrument(skip(pool, ids), fields(count = ids.len()))]
@@ -179,9 +433,14 @@ pub async fn fetch_assets_by_ids(
         .await
         .context("Failed to fetch assets by ids")?;
 
-    // Derive the thumbnail path from the stored root. only when thumbnail actually exists.
-    // Otherwise, leave "" so the frontend falls back to full res
     for row in &mut rows {
+        // Resolve the stored relative `path` back to an absolute path the webview
+        // can load. (Joining an already-absolute path from an older library is a
+        // no-op — the absolute arm wins — so pre-T2.2 rows still resolve.)
+        row.dest_path = root.join(&row.dest_path).to_string_lossy().into_owned();
+
+        // Derive the thumbnail path from the root, only when the file actually
+        // exists. Otherwise leave "" so the frontend falls back to full res.
         if row.thumb_hash.is_some() {
             let candidate = root.join("thumbnails").join(format!("{}.webp", row.id));
             if candidate.exists() {
@@ -192,8 +451,14 @@ pub async fn fetch_assets_by_ids(
     Ok(rows)
 }
 
-#[instrument(skip(pool, assets), fields(count = assets.len()))]
-async fn persist_assets(pool: &SqlitePool, assets: &[AssetMetadata]) -> Result<()> {
+#[instrument(skip(pool, assets, folders, links),
+    fields(assets = assets.len(), folders = folders.len(), links = links.len()))]
+async fn persist_import(
+    pool: &SqlitePool,
+    assets: &[AssetMetadata],
+    folders: &[Folder],
+    links: &[FolderLink],
+) -> Result<()> {
     let start = std::time::Instant::now();
 
     // SQLite caps bound parameters at 32766. With 10 columns per row, keep each
@@ -204,6 +469,29 @@ async fn persist_assets(pool: &SqlitePool, assets: &[AssetMetadata]) -> Result<(
         .begin()
         .await
         .context("Failed to begin database transaction")?;
+
+    // 1. Folders first — the self-referencing FK needs parents before children.
+    //    WalkDir's pre-order scan already yields them in that order, and FK checks
+    //    are immediate, so insertion order is what makes this valid.
+    for chunk in folders.chunks(ROWS_PER_INSERT) {
+        let mut qb = QueryBuilder::new(
+            "INSERT INTO folders (id, name, parent_id, position, order_by, is_ascending) ",
+        );
+        qb.push_values(chunk, |mut b, f| {
+            b.push_bind(&f.id)
+                .push_bind(&f.name)
+                .push_bind(f.parent_id.as_deref())
+                .push_bind(f.position)
+                .push_bind(f.order_by)
+                .push_bind(f.is_ascending);
+        });
+        qb.build()
+            .execute(&mut *tx)
+            .await
+            .context("Failed to insert folder chunk")?;
+    }
+
+    // 2. Assets
 
     for chunk in assets.chunks(ROWS_PER_INSERT) {
         let mut qb = QueryBuilder::new(
@@ -233,6 +521,21 @@ async fn persist_assets(pool: &SqlitePool, assets: &[AssetMetadata]) -> Result<(
             .context("Failed to batch insert asset chunk")?;
     }
 
+    // 3. Menbership links last - each references a folder and asset inserted above
+    for chunk in links.chunks(ROWS_PER_INSERT) {
+        let mut qb =
+            QueryBuilder::new("INSERT INTO assets_folders (folder_id, asset_id, position) ");
+        qb.push_values(chunk, |mut b, l| {
+            b.push_bind(&l.folder_id)
+                .push_bind(&l.asset_id)
+                .push_bind(l.position);
+        });
+        qb.build()
+            .execute(&mut *tx)
+            .await
+            .context("Failed to insert membership chunk")?;
+    }
+
     tx.commit()
         .await
         .context("Failed to commit asset transaction")?;
@@ -248,14 +551,16 @@ async fn persist_assets(pool: &SqlitePool, assets: &[AssetMetadata]) -> Result<(
     }
 
     info!(
-        count = assets.len(),
+        assets = assets.len(),
+        folders = folders.len(),
+        links = links.len(),
         elapsed_ms = start.elapsed().as_millis(),
-        "Assets persisted to database"
+        "Import persisted to database"
     );
     Ok(())
 }
 
-fn build_asset_metadata(src: PathBuf, dest_dir: &Path) -> Option<AssetMetadata> {
+fn build_asset_metadata(src: PathBuf) -> Option<AssetMetadata> {
     let asset_type = detect_asset_type(&src);
     let meta = std::fs::metadata(&src)
         .inspect_err(|e| warn!(path = ?src, error = %e, "Could not read file metadata, skipping"))
@@ -273,7 +578,10 @@ fn build_asset_metadata(src: PathBuf, dest_dir: &Path) -> Option<AssetMetadata> 
 
     let ext = src.extension()?.to_str()?;
     let id = uuid::Uuid::new_v4().to_string();
-    let dest_path = dest_dir.join(format!("{}.{}", id, ext));
+    // Stored RELATIVE to the library root so a `.library` stays portable when the
+    // folder is moved or renamed. Forward slashes join correctly on every platform;
+    // the absolute path is derived at copy time and on read (fetch_assets_by_ids).
+    let dest_path = format!("assets/{}.{}", id, ext);
 
     // Import-time extraction is CHEAP metadata only (dimensions, animation flag).
     // The thumbnail + ThumbHash are produced later by the background pipeline, so
@@ -291,7 +599,7 @@ fn build_asset_metadata(src: PathBuf, dest_dir: &Path) -> Option<AssetMetadata> 
         asset_type,
         filename: src.file_name()?.to_string_lossy().into_owned(),
         extension: ext.to_string(),
-        dest_path: dest_path.to_string_lossy().into_owned(),
+        dest_path,
         source_path: src.to_string_lossy().into_owned(),
         width: visual.width,
         height: visual.height,
@@ -306,7 +614,11 @@ fn build_asset_metadata(src: PathBuf, dest_dir: &Path) -> Option<AssetMetadata> 
 }
 
 #[instrument(skip(reporter, assets), fields(total = assets.len()))]
-async fn copy_assets(reporter: Arc<dyn ProgressReporter>, assets: &[AssetMetadata]) -> Result<()> {
+async fn copy_assets(
+    reporter: Arc<dyn ProgressReporter>,
+    assets: &[AssetMetadata],
+    root: &Path,
+) -> Result<()> {
     let start = std::time::Instant::now();
     let semaphore = Arc::new(Semaphore::new(10));
     let completed = Arc::new(AtomicUsize::new(0));
@@ -321,7 +633,8 @@ async fn copy_assets(reporter: Arc<dyn ProgressReporter>, assets: &[AssetMetadat
             .context("Failed to acquire semaphore permit for file copy")?;
 
         let src = PathBuf::from(&asset.source_path);
-        let dst = PathBuf::from(&asset.dest_path);
+        // dest_path is relative to the library root; join to get the copy target.
+        let dst = root.join(&asset.dest_path);
         let reporter = Arc::clone(&reporter);
         let completed = Arc::clone(&completed);
         let failed = Arc::clone(&failed);
@@ -423,6 +736,7 @@ pub async fn import_assets(
     source_dir: PathBuf,
     pool: SqlitePool,
     library_root: PathBuf,
+    import_folders: bool,
 ) -> Result<ImportResult> {
     let pipeline_start = std::time::Instant::now();
 
@@ -441,7 +755,11 @@ pub async fn import_assets(
 
     // Stage 2: Walk directory tree.
     let scan_start = std::time::Instant::now();
-    let (folders, folder_id_by_path) = fs::scan_directories(&source_dir);
+    let (folders, folder_id_by_path) = if import_folders {
+        fs::scan_directories(&source_dir)
+    } else {
+        (Vec::new(), HashMap::new())
+    };
     let discovered_files = fs::collect_files(&source_dir);
     let file_count = discovered_files.len();
 
@@ -465,7 +783,7 @@ pub async fn import_assets(
     let staged_assets: Vec<AssetMetadata> = discovered_files
         .into_par_iter()
         .filter(|p| !matches!(detect_asset_type(p), AssetType::Unknown))
-        .filter_map(|src| build_asset_metadata(src, &assets_dir))
+        .filter_map(build_asset_metadata)
         .collect();
 
     info!(
@@ -473,6 +791,30 @@ pub async fn import_assets(
         elapsed_ms = metadata_start.elapsed().as_millis(),
         "Metadata stage complete"
     );
+
+    // Resolve each asset to the folder its source file lived in. `source_path` is
+    // retained on AssetMetadata for the copy stage, so no rescan is needed. Files
+    // directly under the import root have no scanned parent folder → they stay
+    // free. `folder_id_by_path` is empty when importing without structure, so this
+    // yields no links then.
+    let links: Vec<FolderLink> = {
+        let mut counters: HashMap<String, f64> = HashMap::new();
+        staged_assets
+            .iter()
+            .filter_map(|a| {
+                let parent = Path::new(&a.source_path).parent()?;
+                let folder_id = folder_id_by_path.get(parent)?;
+                let position = counters.entry(folder_id.clone()).or_insert(0.0);
+                let link = FolderLink {
+                    folder_id: folder_id.clone(),
+                    asset_id: a.id.clone(),
+                    position: *position,
+                };
+                *position += 1.0;
+                Some(link)
+            })
+            .collect()
+    };
 
     reporter.report(ImportProgress {
         stage: ImportStage::CopyingFiles,
@@ -482,7 +824,7 @@ pub async fn import_assets(
     });
 
     // Stage 4: Copy files with bounded concurrency (I/O-bound via Tokio).
-    copy_assets(reporter.clone(), &staged_assets).await?;
+    copy_assets(reporter.clone(), &staged_assets, &library_root).await?;
 
     // Stage 5: Persist all metadata atomically.
     reporter.report(ImportProgress {
@@ -492,7 +834,7 @@ pub async fn import_assets(
         message: "Saving to database...".into(),
     });
 
-    persist_assets(&pool, &staged_assets).await?;
+    persist_import(&pool, &staged_assets, &folders, &links).await?;
 
     info!(
         assets = staged_assets.len(),

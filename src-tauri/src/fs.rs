@@ -45,9 +45,9 @@ pub fn scan_directories(
             id: id.clone(),
             name: entry.file_name().to_string_lossy().into_owned(),
             parent_id,
-            order_by: "name".to_string(),
-            is_ascending: "1".to_string(),
-            original_path: path.to_string_lossy().into_owned(),
+            position: folders.len() as f64, // discovery order; siblings stay monotonic
+            order_by: crate::assets::OrderBy::ImportedDate,
+            is_ascending: true,
         });
 
         folder_id_by_path.insert(path, id);

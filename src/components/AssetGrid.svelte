@@ -23,9 +23,12 @@
 
     $effect(() => {
       if (libraryManager.state.activeLibrary) {
-        // Load the manifest. Thumbnails are generated on-view (below) as items
-        // scroll into the window — no eager pass over the whole library.
-        assetLibrary.load();
+        // Reset to the full view + refresh the folder tree on library change (a
+        // stale folder filter from a previous library would show nothing).
+        // Thumbnails are generated on-view (below) as items scroll into the
+        // window — no eager pass over the whole library.
+        assetLibrary.setFilter({ kind: "all" });
+        assetLibrary.loadFolders();
       }
     })
 

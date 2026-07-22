@@ -1,13 +1,14 @@
 CREATE TABLE IF NOT EXISTS folders (
    id TEXT PRIMARY KEY NOT NULL UNIQUE,
    name TEXT NOT NULL,
-   folder_parent_id TEXT,
+   parent_id TEXT,
+   position REAL NOT NULL DEFAULT 0,
    description TEXT,
-   order_by TEXT DEFAULT 'imported_date',
+   order_by TEXT NOT NULL DEFAULT 'imported_date',
    is_ascending INTEGER DEFAULT 1, -- 0 = false, 1 = true
 
 
-   FOREIGN KEY(folder_parent_id) REFERENCES folders(id) ON DELETE CASCADE
+   FOREIGN KEY(parent_id) REFERENCES folders(id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS assets (
@@ -47,6 +48,7 @@ CREATE TABLE IF NOT EXISTS assets_folders (
 -- Membership indexes
 CREATE INDEX IF NOT EXISTS idx_folder_contents ON assets_folders(folder_id, added_at);
 CREATE INDEX IF NOT EXISTS idx_folders_position ON assets_folders (folder_id, position); -- Serve a folder's assets already ordered by manual position
+CREATE INDEX IF NOT EXISTS idx_folders_tree ON folders(parent_id, position);
 
 
 -- ── Sort indexes: one composite (sortcol, id) per sort mode you expose.

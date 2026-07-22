@@ -12,6 +12,7 @@
     import { Alert, AlertDescription, AlertTitle } from "$components/ui/alert";
     import { Button, buttonVariants } from "$components/ui/button";
     import AssetGrid from "$components/AssetGrid.svelte";
+    import FolderTree from "$components/FolderTree.svelte";
     import { libraryManager, settings } from "../routes/settings.svelte";
 
     interface LibraryInfo {
@@ -52,6 +53,9 @@
 
     // Import progress state
     let isImporting = $state(false);
+    // Whether to recreate the source folder tree in-app on import. Off = every
+       // asset is imported "free" (uncategorized).
+       let importFolders = $state(true);
     let current = $state(0);
     let total = $state(0);
     let statusMessage = $state("Preparing...");
@@ -138,11 +142,14 @@
 
         const importPromise = invoke<ImportResult>("import_assets", {
             sourcePath: selectedSource,
+            importFolders,
         }).then(async (result) => {
-            // Import is now near-instant (no thumbnailing). Reloading the manifest
-            // re-runs the grid's on-view effect, which generates thumbnails for the
-            // visible window; the rest generate as the user scrolls.
-            await assetLibrary.reload();
+            // Import is now near-instant (no thumbnailing). Show the whole library
+            // and refresh the folder tree so newly created folders appear; the
+            // reload re-runs the grid's on-view effect, generating thumbnails for
+            // the visible window while the rest follow as the user scrolls.
+            await assetLibrary.setFilter({ kind: "all" });
+            await assetLibrary.loadFolders();
             return result; // pass through so toast.promise still receives it
         });
 
@@ -321,6 +328,11 @@
 
         <Button onclick={createLibrary}>Create a new library</Button>
 
+        <label class="flex items-center gap-2 text-sm text-neutral-300">
+                    <input type="checkbox" bind:checked={importFolders} disabled={isImporting} />
+                    Import folder structure
+                </label>
+
         <Button onclick={handleImport} disabled={isImporting}>
             {isImporting ? "🚀 Importing..." : "📥 Import Assets"}
         </Button>
@@ -411,8 +423,13 @@
         {/if}
 
         <!-- (h-[70vh] is pragmatic; long-term make <main> a h-screen flex flex-col and this flex-1 min-h-0. Any bounded height works.) -->
-        <div class="mt-8  h-[70vh]">
-            <AssetGrid />
+        <div class="mt-8 flex gap-4 h-[70vh]">
+            <div class="w-56 shrink-0 overflow-y-auto">
+                <FolderTree />
+            </div>
+            <div class="flex-1 min-w-0">
+                <AssetGrid />
+            </div>
         </div>
     </main>
 </QueryClientProvider>

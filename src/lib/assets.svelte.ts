@@ -24,6 +24,20 @@ export interface AssetMetadata extends AssetLightRow {
   thumb_path: string; // "" => no thumbnail; fallback to dest_path
 }
 
+export type ManifestFilter =
+  | { kind: "all" }
+  | { kind: "folder"; id: string }
+  | { kind: "uncategorized" };
+
+export interface Folder {
+  id: string;
+  name: string;
+  parent_id: string | null;
+  position: number;
+  order_by: string;
+  is_ascending: boolean;
+}
+
 // ThumbHash (base64) -> data URL, memoized (cards mount/unmount on scroll).
 const thumbUrlCache = new Map<string, string>();
 export function thumbHashUrl(hash: string | null): string | null {
@@ -49,6 +63,11 @@ class AssetLibrary {
   isLoading = $state(false);
   error = $state<string | null>(null);
 
+  /** The slice of the library currently shown (drives which folder is active). */
+  manifestFilter = $state<ManifestFilter>({ kind: "all" });
+  /** Flat folder list for the tree UI, refreshed on library switch + import. */
+  folders = $state<Folder[]>([]);
+
   /** Heavy rows keyed by id, hydrated per visible window. Reactive. */
   heavy = new SvelteMap<string, AssetMetadata>();
 
@@ -61,7 +80,8 @@ class AssetLibrary {
   #thumbRequested = new Set<string>();
 
   /** (Re)load the full manifest for the active library. */
-  async load(): Promise<void> {
+  async load(filter: ManifestFilter = this.manifestFilter): Promise<void> {
+    this.manifestFilter = filter;
     const token = ++this.#loadToken;
     this.isLoading = true;
     this.error = null;
@@ -84,7 +104,7 @@ class AssetLibrary {
         for (let i = 0; i < chunk.length; i++) this.#indexById.set(chunk[i].id, base + i);
         this.manifest = collected.slice(); // publish progressively as chunks arrive
       };
-      await invoke("stream_manifest", { onChunk: channel });
+      await invoke("stream_manifest", { filter, onChunk: channel });
     } catch (e) {
       if (token === this.#loadToken) {
         this.error = typeof e === "string" ? e : "Failed to load assets.";
@@ -96,6 +116,68 @@ class AssetLibrary {
 
   reload(): Promise<void> {
     return this.load();
+  }
+
+  /** Switch the visible slice (folder / all / uncategorized) and reload. */
+  setFilter(filter: ManifestFilter): Promise<void> {
+    return this.load(filter);
+  }
+
+  /** Refresh the folder tree for the active library. Non-fatal on failure. */
+  async loadFolders(): Promise<void> {
+    try {
+      this.folders = await invoke<Folder[]>("fetch_folders");
+    } catch (e) {
+      console.error("Failed to load folders:", e);
+      this.folders = [];
+    }
+  }
+
+  /** Create a folder (root when `parentId` is null) and refresh the tree. */
+  async createFolder(name: string, parentId: string | null = null): Promise<void> {
+    await invoke<Folder>("create_folder", { name, parentId });
+    await this.loadFolders();
+  }
+
+  async renameFolder(id: string, name: string): Promise<void> {
+    await invoke("rename_folder", { id, name });
+    await this.loadFolders();
+  }
+
+  /**
+   * Delete a folder (cascades to subfolders + memberships; assets are kept). If
+   * the active view was the deleted folder or one of its now-gone descendants,
+   * fall back to the full library.
+   */
+  async deleteFolder(id: string): Promise<void> {
+    await invoke("delete_folder", { id });
+    await this.loadFolders();
+    const active = this.manifestFilter;
+    if (active.kind === "folder" && !this.folders.some((f) => f.id === active.id)) {
+      await this.setFilter({ kind: "all" });
+    }
+  }
+
+  async moveFolder(id: string, newParentId: string | null): Promise<void> {
+    await invoke("move_folder", { id, newParentId });
+    await this.loadFolders();
+  }
+
+  /** Add assets to a folder; reload the manifest if the change affects the view. */
+  async addAssetsToFolder(folderId: string, assetIds: string[]): Promise<void> {
+    await invoke("add_assets_to_folder", { folderId, assetIds });
+    const active = this.manifestFilter;
+    if (active.kind === "uncategorized" || (active.kind === "folder" && active.id === folderId)) {
+      await this.reload();
+    }
+  }
+
+  async removeAssetsFromFolder(folderId: string, assetIds: string[]): Promise<void> {
+    await invoke("remove_assets_from_folder", { folderId, assetIds });
+    const active = this.manifestFilter;
+    if (active.kind === "folder" && active.id === folderId) {
+      await this.reload();
+    }
   }
 
   /**
