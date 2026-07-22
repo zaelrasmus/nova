@@ -138,19 +138,6 @@ fn detect_asset_type(path: &Path) -> AssetType {
     AssetType::Unknown
 }
 
-// #[instrument(skip(pool))]
-// async fn resolve_library_root(pool: &SqlitePool) -> Result<PathBuf> {
-//     let db_info: (i32, String, String) = sqlx::query_as("PRAGMA database_list")
-//         .fetch_one(pool)
-//         .await
-//         .context("Failed to read library path via PRAGMA database_list")?;
-
-//     PathBuf::from(db_info.2)
-//         .parent()
-//         .map(|p| p.to_path_buf())
-//         .context("Library database has an invalid path structure")
-// }
-
 #[instrument(skip(pool))]
 pub async fn fetch_manifest(pool: &SqlitePool) -> Result<Vec<AssetLightRow>> {
     let rows = sqlx::query_as::<_, AssetLightRow>(
@@ -196,11 +183,10 @@ pub async fn fetch_assets_by_ids(
     // Otherwise, leave "" so the frontend falls back to full res
     for row in &mut rows {
         if row.thumb_hash.is_some() {
-            row.thumb_path = root
-                .join("thumbnails")
-                .join(format!("{}.webp", row.id))
-                .to_string_lossy()
-                .into_owned();
+            let candidate = root.join("thumbnails").join(format!("{}.webp", row.id));
+            if candidate.exists() {
+                row.thumb_path = candidate.to_string_lossy().into_owned();
+            }
         }
     }
     Ok(rows)
@@ -312,7 +298,7 @@ fn build_asset_metadata(src: PathBuf, dest_dir: &Path) -> Option<AssetMetadata> 
         imported_date: Utc::now().to_rfc3339(),
         creation_date: created.to_rfc3339(),
         modified_date: modified.to_rfc3339(),
-        thumb_hash: None,   // generated later by generate_pending_thumbnails
+        thumb_hash: None, // generated later by generate_pending_thumbnails
         thumb_config: None,
         is_animated: visual.is_animated,
         thumb_path: String::new(),
@@ -542,6 +528,7 @@ struct ThumbUpdate {
     id: String,
     thumb_hash: String,
     thumb_config: String,
+    wrote_file: bool,
 }
 
 /// A completed thumbnail, ready for the UI to patch into its row in place: the
@@ -561,6 +548,34 @@ pub trait ThumbProgress: Send + Sync {
     fn report(&self, done: usize, total: usize, ready: &[ThumbReady]);
 }
 
+/// Clear the entire thumbnail cache so it regenerates from scratch: delete the
+/// on-disk WebP files and NULL the per-row thumb columns. Used by "Rebuild
+/// thumbnails" (e.g. after changing the quality mode). Wiping the directory
+/// matters for correctness — otherwise a re-encode could leave a stale file, and
+/// an image that now SKIPs (small enough) would keep an orphaned WebP that
+/// `fetch_assets_by_ids`'s `.exists()` check would still serve. Callers run the
+/// generation pass afterward.
+#[instrument(skip(pool, root))]
+pub async fn reset_thumbnails(pool: &SqlitePool, root: &Path) -> Result<()> {
+    let thumbs_dir = root.join("thumbnails");
+    if thumbs_dir.exists() {
+        if let Err(e) = tokio::fs::remove_dir_all(&thumbs_dir).await {
+            warn!(dir = ?thumbs_dir, error = %e, "Failed to clear thumbnails dir (non-fatal)");
+        }
+    }
+    fs::ensure_dir(&thumbs_dir).await?;
+
+    sqlx::query(
+        "UPDATE assets SET thumb_hash = NULL, thumb_config = NULL WHERE asset_type = 'image'",
+    )
+    .execute(pool)
+    .await
+    .context("Failed to reset thumbnail columns")?;
+
+    info!("Thumbnail cache cleared for rebuild");
+    Ok(())
+}
+
 /// Generate thumbnails for every image whose `thumb_hash` is still NULL. Used by
 /// an explicit "generate all" action; on-view generation uses the by-ids variant.
 /// Idempotent and resumable — `thumb_hash IS NULL` is the only "pending" marker.
@@ -568,7 +583,7 @@ pub trait ThumbProgress: Send + Sync {
 pub async fn generate_pending_thumbnails(
     pool: &SqlitePool,
     root: &Path,
-    mode: thumbnail::ThumbMode,
+    config: thumbnail::ThumbConfig,
     progress: Arc<dyn ThumbProgress>,
 ) -> Result<usize> {
     let pending: Vec<PendingThumb> = sqlx::query_as::<_, PendingThumb>(
@@ -580,7 +595,7 @@ pub async fn generate_pending_thumbnails(
     .await
     .context("Failed to query pending thumbnails")?;
 
-    run_generation(pool, root, mode, pending, progress).await
+    run_generation(pool, root, config, pending, progress).await
 }
 
 /// Generate thumbnails only for the given ids that are still missing one — the
@@ -589,7 +604,7 @@ pub async fn generate_pending_thumbnails(
 pub async fn generate_thumbnails_for_ids(
     pool: &SqlitePool,
     root: &Path,
-    mode: thumbnail::ThumbMode,
+    config: thumbnail::ThumbConfig,
     ids: &[String],
     progress: Arc<dyn ThumbProgress>,
 ) -> Result<usize> {
@@ -613,7 +628,7 @@ pub async fn generate_thumbnails_for_ids(
         .await
         .context("Failed to query pending thumbnails by id")?;
 
-    run_generation(pool, root, mode, pending, progress).await
+    run_generation(pool, root, config, pending, progress).await
 }
 
 /// Shared chunked generator: decode/resize/encode on the blocking pool (Rayon
@@ -622,7 +637,7 @@ pub async fn generate_thumbnails_for_ids(
 async fn run_generation(
     pool: &SqlitePool,
     root: &Path,
-    mode: thumbnail::ThumbMode,
+    config: thumbnail::ThumbConfig,
     pending: Vec<PendingThumb>,
     progress: Arc<dyn ThumbProgress>,
 ) -> Result<usize> {
@@ -654,11 +669,12 @@ async fn run_generation(
                 .filter_map(|p| {
                     let src = job_assets.join(format!("{}.{}", p.id, p.extension));
                     let dest = job_thumbs.join(format!("{}.webp", p.id));
-                    match thumbnail::generate(&src, &dest, mode) {
+                    match thumbnail::generate(&src, &dest, config) {
                         Ok(t) => Some(ThumbUpdate {
                             id: p.id,
                             thumb_hash: t.thumb_hash,
                             thumb_config: t.thumb_config,
+                            wrote_file: t.wrote_file,
                         }),
                         Err(e) => {
                             warn!(id = %p.id, error = %e, "Thumbnail generation failed; leaving row NULL");
@@ -678,10 +694,16 @@ async fn run_generation(
             .map(|u| ThumbReady {
                 id: u.id.clone(),
                 thumb_hash: u.thumb_hash.clone(),
-                thumb_path: thumbs_dir
-                    .join(format!("{}.webp", u.id))
-                    .to_string_lossy()
-                    .into_owned(),
+                // Empty when no file was written (source small enough)
+                // the UI fallsback to the original
+                thumb_path: if u.wrote_file {
+                    thumbs_dir
+                        .join(format!("{}.webp", u.id))
+                        .to_string_lossy()
+                        .into_owned()
+                } else {
+                    String::new()
+                },
             })
             .collect();
         done += chunk_len;

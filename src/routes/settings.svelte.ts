@@ -9,6 +9,8 @@ export interface AppPreferences {
   fontSize: "sm" | "md" | "lg";
   navItemVisibility: Record<string, boolean>;
   thumbnailQuality: "auto" | "lossy" | "lossless";
+  /** WebP lossy quality (0-100). Applies to Lossy mode and Auto's lossy branch. */
+  thumbnailLossyQuality: number;
   animateGifsInGrid: boolean;
   // Add new fields here. They will be filled from DEFAULT_PREFERENCES on first
   // load so existing installations are never broken by a new field.
@@ -32,6 +34,7 @@ const DEFAULT_PREFERENCES: AppPreferences = {
     Trash: true,
   },
   thumbnailQuality: "auto",
+  thumbnailLossyQuality: 82,
   animateGifsInGrid: false,
 };
 

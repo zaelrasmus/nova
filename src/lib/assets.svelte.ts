@@ -99,19 +99,35 @@ class AssetLibrary {
   }
 
   /**
+   * Rebuild every thumbnail in the active library with `mode` (clears the cache,
+   * then regenerates). Resolves with the count once done; rows are patched in
+   * place by the `thumbnail-progress` listener as batches complete, so no reload
+   * is needed. Note: because regenerated files keep the same `id.webp` path, the
+   * webview may show the cached OLD image until restart — the on-disk file (and
+   * its size) is updated immediately.
+   */
+  rebuildThumbnails(mode: string, quality: number): Promise<number> {
+    return invoke<number>("rebuild_thumbnails", { thumbMode: mode, quality });
+  }
+
+  /**
    * On-view thumbnail generation: request thumbnails for the given ids (the
    * caller passes only images still missing one). De-dupes in-flight ids so
    * scrolling doesn't re-request; the backend also filters `WHERE thumb_hash IS
    * NULL`, so this is idempotent. The backend emits `thumbnail-progress` as
    * batches complete and `applyThumbnails` patches them in. Non-fatal on failure.
    */
-  async ensureThumbnails(ids: string[], mode: string): Promise<void> {
+  async ensureThumbnails(ids: string[], mode: string, quality: number): Promise<void> {
     const need = ids.filter((id) => !this.#thumbRequested.has(id));
     if (!need.length) return;
 
     need.forEach((id) => this.#thumbRequested.add(id));
     try {
-      await invoke<number>("generate_thumbnails_for_ids", { ids: need, thumbMode: mode });
+      await invoke<number>("generate_thumbnails_for_ids", {
+        ids: need,
+        thumbMode: mode,
+        quality,
+      });
     } catch (e) {
       console.error("Thumbnail generation request failed:", e);
     } finally {

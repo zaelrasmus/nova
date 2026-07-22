@@ -87,7 +87,11 @@
                 .filter((r) => r.asset_type === "image" && r.thumb_hash === null)
                 .map((r) => r.id);
             if (needIds.length) {
-                assetLibrary.ensureThumbnails(needIds, settings.preferences.thumbnailQuality);
+                assetLibrary.ensureThumbnails(
+                    needIds,
+                    settings.preferences.thumbnailQuality,
+                    settings.preferences.thumbnailLossyQuality,
+                );
             }
         }, 100);
     }

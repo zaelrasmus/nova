@@ -19,12 +19,16 @@
     // Animated original when the toggle is on and the asset is animated;
     // otherwise the static WebP thumbnail. No thumbnail => generic per-type card.
     const previewSrc = $derived(
-        animate && isAnimated && heavy?.dest_path
-            ? convertFileSrc(heavy.dest_path)
-            : heavy?.thumb_path
-              ? convertFileSrc(heavy.thumb_path)
-              : null,
-    );
+            animate && isAnimated && heavy?.dest_path
+                ? convertFileSrc(heavy.dest_path)
+                : heavy?.thumb_path
+                  ? convertFileSrc(heavy.thumb_path)
+                  // Generation done (thumbHash set) but no thumbnail file was written
+                  // because the source is already small — show the original directly.
+                  : thumbHash && assetType === "image" && heavy?.dest_path
+                    ? convertFileSrc(heavy.dest_path)
+                    : null,
+        );
 
     function fadeOnLoad(node: HTMLImageElement) {
             node.style.opacity = "0";

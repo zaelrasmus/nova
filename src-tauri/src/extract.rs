@@ -6,9 +6,6 @@ use std::path::Path;
 /// The cheap, import-time visual metadata of an asset. Defaults to "no visual",
 /// so a type without a renderer (or a failed read) still yields a valid asset.
 ///
-/// Thumbnails and ThumbHash placeholders are NOT produced here — they are
-/// generated later by the background thumbnail pipeline so import never blocks
-/// on decode/encode. See `assets::generate_pending_thumbnails`.
 #[derive(Default)]
 pub struct ExtractedVisual {
     pub width: u32,

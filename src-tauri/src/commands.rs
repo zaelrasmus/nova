@@ -32,18 +32,6 @@ impl ProgressReporter for TauriProgressReporter {
             // Non-fatal: the window may have been closed mid-import
             warn!(error = %e, "Failed to emit import-progress event");
         }
-
-        // let mut last = self.last_emit.lock().unwrap();
-        // let stage_finished = progress.current == progress.total && progress.total > 0;
-        // let throttle_passed = last.elapsed().as_millis() >= 16;
-
-        // if throttle_passed || stage_finished {
-        //     if let Err(e) = self.window.emit("import-progress", &progress) {
-        //         // Non-fatal: the window may have been closed mid-import.
-        //         warn!(error = %e, "Failed to emit import-progress event");
-        //     }
-        //     *last = std::time::Instant::now();
-        // }
     }
 }
 
@@ -173,6 +161,7 @@ impl assets::ThumbProgress for ThumbProgressEmitter {
 pub async fn generate_thumbnails(
     window: tauri::Window,
     thumb_mode: String,
+    quality: f32,
     state: tauri::State<'_, DbState>,
 ) -> Result<usize, AppError> {
     let handle = state.acquire().await?;
@@ -186,12 +175,47 @@ pub async fn generate_thumbnails(
         }
     };
 
-    let mode = crate::thumbnail::ThumbMode::from_setting(&thumb_mode);
+    let config = crate::thumbnail::ThumbConfig::from_setting(&thumb_mode, quality);
     let reporter = Arc::new(ThumbProgressEmitter { window });
 
-    assets::generate_pending_thumbnails(&handle.pool, &handle.root, mode, reporter)
+    assets::generate_pending_thumbnails(&handle.pool, &handle.root, config, reporter)
         .await
         .inspect_err(|e| tracing::error!(error = %e, "generate_thumbnails failed"))
+        .map_err(AppError::from)
+}
+
+/// Rebuild ALL thumbnails from scratch: clear the cache (files + DB columns),
+/// then regenerate with `thumb_mode`. Used to apply a changed quality setting to
+/// an existing library. Guarded like `generate_thumbnails` — if a run is already
+/// active this is a no-op. Resolves once every thumbnail has been regenerated.
+#[instrument(skip_all)]
+#[tauri::command]
+pub async fn rebuild_thumbnails(
+    window: tauri::Window,
+    thumb_mode: String,
+    quality: f32,
+    state: tauri::State<'_, DbState>,
+) -> Result<usize, AppError> {
+    let handle = state.acquire().await?;
+
+    let _guard = match state.thumb_gen.try_lock() {
+        Ok(g) => g,
+        Err(_) => {
+            info!("Thumbnail generation already running; ignoring rebuild request");
+            return Ok(0);
+        }
+    };
+
+    assets::reset_thumbnails(&handle.pool, &handle.root)
+        .await
+        .inspect_err(|e| tracing::error!(error = %e, "reset_thumbnails failed"))?;
+
+    let config = crate::thumbnail::ThumbConfig::from_setting(&thumb_mode, quality);
+    let reporter = Arc::new(ThumbProgressEmitter { window });
+
+    assets::generate_pending_thumbnails(&handle.pool, &handle.root, config, reporter)
+        .await
+        .inspect_err(|e| tracing::error!(error = %e, "rebuild_thumbnails failed"))
         .map_err(AppError::from)
 }
 
@@ -205,13 +229,14 @@ pub async fn generate_thumbnails_for_ids(
     window: tauri::Window,
     ids: Vec<String>,
     thumb_mode: String,
+    quality: f32,
     state: tauri::State<'_, DbState>,
 ) -> Result<usize, AppError> {
     let handle = state.acquire().await?;
-    let mode = crate::thumbnail::ThumbMode::from_setting(&thumb_mode);
+    let config = crate::thumbnail::ThumbConfig::from_setting(&thumb_mode, quality);
     let reporter = Arc::new(ThumbProgressEmitter { window });
 
-    assets::generate_thumbnails_for_ids(&handle.pool, &handle.root, mode, &ids, reporter)
+    assets::generate_thumbnails_for_ids(&handle.pool, &handle.root, config, &ids, reporter)
         .await
         .inspect_err(|e| tracing::error!(error = %e, "generate_thumbnails_for_ids failed"))
         .map_err(AppError::from)

@@ -33,7 +33,7 @@ impl DbState {
         let lock = self.inner.read().await;
         lock.as_ref().cloned().ok_or(AppError::NoLibrary)
     }
-    /// Convenience for ccallers that only need the pool
+    /// Convenience for callers that only need the pool
     pub async fn acquire_pool(&self) -> Result<SqlitePool, AppError> {
         Ok(self.acquire().await?.pool)
     }
