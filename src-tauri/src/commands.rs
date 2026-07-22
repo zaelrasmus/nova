@@ -5,7 +5,7 @@ use crate::db::DbState;
 use crate::error::AppError;
 use crate::library::{self, LibraryInfo};
 use std::sync::Arc;
-use tauri::{AppHandle, Emitter, Runtime};
+use tauri::{AppHandle, Emitter, Manager, Runtime};
 use tauri_plugin_fs::FsExt;
 use tracing::{info, instrument, warn};
 
@@ -51,6 +51,16 @@ pub async fn connect_library<R: Runtime>(
         tracing::error!(error = %e, path = %library_path, "Failed to allow directory on connect");
         AppError::Io(std::io::Error::new(std::io::ErrorKind::PermissionDenied, e.to_string(),))
     })?;
+
+    // Scope the asset protocol to this library so the webview can load its
+    // thumbnails/originals — the static scope is empty, granted per-library here.
+    // (Additive for the session: switching libraries doesn't revoke prior grants.)
+    app.asset_protocol_scope()
+        .allow_directory(&library_path, true)
+        .map_err(|e| {
+            tracing::error!(error = %e, path = %library_path, "Failed to allow asset scope on connect");
+            AppError::Io(std::io::Error::new(std::io::ErrorKind::PermissionDenied, e.to_string()))
+        })?;
 
     info!(library_path = %library_path, "Library connected");
     Ok("Library connected successfully".into())
@@ -100,6 +110,17 @@ pub async fn create_library<R: Runtime>(
         .allow_directory(&library_root, true)
         .map_err(|e| {
             tracing::error!(error = %e, path = ?library_root, "Failed to grant fs scope");
+            AppError::Io(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                e.to_string(),
+            ))
+        })?;
+
+    // Scope the asset protocol to the new library (see connect_library).
+    app.asset_protocol_scope()
+        .allow_directory(&library_root, true)
+        .map_err(|e| {
+            tracing::error!(error = %e, path = ?library_root, "Failed to grant asset scope");
             AppError::Io(std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
                 e.to_string(),
