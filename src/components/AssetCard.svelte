@@ -73,7 +73,7 @@
 
 <!-- Image whose thumbnail is still being generated in the background. -->
 {#snippet pendingImage()}
-    <div class="w-full h-full bg-neutral-800/60 animate-pulse"></div>
+    <div class="skeleton-shimmer h-full w-full"></div>
 {/snippet}
 
 <!-- Generic card for types without a preview yet. -->

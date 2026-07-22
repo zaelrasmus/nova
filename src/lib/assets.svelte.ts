@@ -94,18 +94,21 @@ class AssetLibrary {
   /** Ids with an in-flight on-view thumbnail request, to avoid re-requesting. */
   #thumbRequested = new Set<string>();
   /**
-   * On-view generation queue. Fast scrolling would otherwise fire many
-   * overlapping `generate_thumbnails_for_ids` calls, each its own Rayon fan-out
-   * on the backend → CPU oversubscription (N1). We drain one batch at a time via
-   * `#thumbFlushing`, and REPLACE this set on every request so it only ever holds
-   * the window currently on screen — windows scrolled past are dropped rather than
-   * queued ahead of the view (they regenerate if scrolled back).
+   * On-view generation queue (front = highest priority). Each request pushes the
+   * current window to the FRONT so what's on screen generates first, while windows
+   * scrolled past stay queued behind it — keeping the pipeline full. Drained by
+   * `#pumpThumbnails` with up to `#THUMB_CONCURRENCY` batches in flight, which
+   * keeps the CPU busy across IPC/DB round-trips without letting a fast scroll
+   * flood SQLite with concurrent writers.
    */
-  #thumbQueue = new Set<string>();
-  #thumbFlushing = false;
+  #thumbQueue: string[] = [];
+  #thumbInFlight = 0;
   #thumbMode = "auto";
   #thumbQuality = 80;
   #thumbProgressHideTimer: ReturnType<typeof setTimeout> | undefined;
+  /** Max concurrent generation batches, and ids per batch. */
+  static #THUMB_CONCURRENCY = 3;
+  static #THUMB_BATCH = 32;
 
   /** (Re)load the full manifest for the active library. */
   async load(filter: ManifestFilter = this.manifestFilter): Promise<void> {
@@ -117,7 +120,7 @@ class AssetLibrary {
     this.heavy.clear();
     this.#pending.clear();
     this.#thumbRequested.clear();
-    this.#thumbQueue.clear();
+    this.#thumbQueue = [];
     this.#indexById.clear();
 
     try {
@@ -226,45 +229,44 @@ class AssetLibrary {
 
   /**
    * On-view thumbnail generation: request thumbnails for the given ids (the
-   * caller passes the current visible window, images still missing one). Drained
-   * one batch at a time so fast scrolling never runs overlapping backend fan-outs
-   * (N1). The pending set is REPLACED with the latest window each call, so a fast
-   * scroll drops passed-over windows instead of queuing them ahead of the view —
-   * the on-screen window is always generated next and gets the whole CPU. Ids
-   * already in flight are excluded; the backend also filters `WHERE thumb_hash IS
-   * NULL`, so this stays idempotent. `thumbnail-progress` patches rows in via
+   * caller passes the current visible window, images still missing one). The
+   * window is pushed to the FRONT of the queue (so it generates first), then the
+   * queue is drained by `#pumpThumbnails` with up to `#THUMB_CONCURRENCY` batches
+   * in flight — full throughput without oversubscribing SQLite. Ids already queued
+   * or in flight are skipped; the backend also filters `WHERE thumb_hash IS NULL`,
+   * so this stays idempotent. `thumbnail-progress` patches rows in via
    * `applyThumbnails`. Non-fatal on failure.
    */
-  async ensureThumbnails(ids: string[], mode: string, quality: number): Promise<void> {
+  ensureThumbnails(ids: string[], mode: string, quality: number): void {
     this.#thumbMode = mode;
     this.#thumbQuality = quality;
-    // Replace (don't accumulate): only the current window's still-needed,
-    // not-in-flight ids stay pending.
-    this.#thumbQueue = new Set(ids.filter((id) => !this.#thumbRequested.has(id)));
-    if (this.#thumbFlushing || this.#thumbQueue.size === 0) return;
+    // Current window to the front; dedup against what's already queued/in flight.
+    const queued = new Set(this.#thumbQueue);
+    const fresh = ids.filter((id) => !this.#thumbRequested.has(id) && !queued.has(id));
+    if (fresh.length) this.#thumbQueue = [...fresh, ...this.#thumbQueue];
+    this.#pumpThumbnails();
+  }
 
-    this.#thumbFlushing = true;
-    try {
-      while (this.#thumbQueue.size > 0) {
-        const token = this.#loadToken;
-        const batch = [...this.#thumbQueue];
-        this.#thumbQueue.clear();
-        batch.forEach((id) => this.#thumbRequested.add(id));
-        try {
-          if (token !== this.#loadToken) break; // library switched before dispatch
-          await invoke<number>("generate_thumbnails_for_ids", {
-            ids: batch,
-            settings: { mode: this.#thumbMode, quality: this.#thumbQuality },
-          });
-          if (token !== this.#loadToken) break; // switched mid-request; stop draining
-        } catch (e) {
-          console.error("Thumbnail generation request failed:", e);
-        } finally {
+  /** Drain the generation queue, keeping up to `#THUMB_CONCURRENCY` in flight. */
+  #pumpThumbnails(): void {
+    const MAX = AssetLibrary.#THUMB_CONCURRENCY;
+    const SIZE = AssetLibrary.#THUMB_BATCH;
+    while (this.#thumbInFlight < MAX && this.#thumbQueue.length > 0) {
+      const token = this.#loadToken;
+      const batch = this.#thumbQueue.splice(0, SIZE);
+      batch.forEach((id) => this.#thumbRequested.add(id));
+      this.#thumbInFlight++;
+      invoke<number>("generate_thumbnails_for_ids", {
+        ids: batch,
+        settings: { mode: this.#thumbMode, quality: this.#thumbQuality },
+      })
+        .catch((e) => console.error("Thumbnail generation request failed:", e))
+        .finally(() => {
           batch.forEach((id) => this.#thumbRequested.delete(id));
-        }
-      }
-    } finally {
-      this.#thumbFlushing = false;
+          this.#thumbInFlight--;
+          // Keep draining, unless a library switch superseded this run.
+          if (token === this.#loadToken) this.#pumpThumbnails();
+        });
     }
   }
 

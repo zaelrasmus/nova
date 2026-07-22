@@ -80,37 +80,52 @@
     // getVirtualItems() re-notifies the store, re-running the effect faster than
     // the debounce, so the timer is cleared forever and this never runs). Instead
     // we trigger off the scroll DOM event and off manifest changes.
-    let hydrateTimer: ReturnType<typeof setTimeout>;
-    function scheduleHydrate() {
-        clearTimeout(hydrateTimer);
-        hydrateTimer = setTimeout(() => {
-            const rows = get(virtualizer)
-                .getVirtualItems()
-                .map((item) => assets[item.index])
-                .filter((r): r is AssetLightRow => !!r);
-            if (!rows.length) return;
-            assetLibrary.ensure(rows.map((r) => r.id)); // hydrate heavy rows for the window
-            // Only images still missing a thumbnail need generation.
-            const needIds = rows
-                .filter((r) => r.asset_type === "image" && r.thumb_hash === null)
-                .map((r) => r.id);
-            if (needIds.length) {
-                assetLibrary.ensureThumbnails(
-                    needIds,
-                    settings.preferences.thumbnailQuality,
-                    settings.preferences.thumbnailLossyQuality,
-                );
-            }
-        }, 100);
+    function runHydrate() {
+        const rows = get(virtualizer)
+            .getVirtualItems()
+            .map((item) => assets[item.index])
+            .filter((r): r is AssetLightRow => !!r);
+        if (!rows.length) return;
+        assetLibrary.ensure(rows.map((r) => r.id)); // hydrate heavy rows for the window
+        // Only images still missing a thumbnail need generation.
+        const needIds = rows
+            .filter((r) => r.asset_type === "image" && r.thumb_hash === null)
+            .map((r) => r.id);
+        if (needIds.length) {
+            assetLibrary.ensureThumbnails(
+                needIds,
+                settings.preferences.thumbnailQuality,
+                settings.preferences.thumbnailLossyQuality,
+            );
+        }
     }
 
-    // Scroll-driven: a plain DOM listener, no reactive virtualizer read.
+    let hydrateTimer: ReturnType<typeof setTimeout>;
+    function scheduleHydrate(delay = 100) {
+        clearTimeout(hydrateTimer);
+        hydrateTimer = setTimeout(runHydrate, delay);
+    }
+
+    // Scroll-driven: a plain DOM listener, no reactive virtualizer read. We fire on
+    // `scrollend` (fires the instant momentum settles) so a window fills with zero
+    // wait when you stop — a debounce could only *guess* at the stop and always add
+    // that lag. Nothing generates mid-scroll (placeholders only, no wasted decode).
+    // Fall back to a short debounce on webviews without `scrollend`.
     $effect(() => {
         const el = scrollEl;
         if (!el) return;
-        const onScroll = () => scheduleHydrate();
-        el.addEventListener("scroll", onScroll, { passive: true });
-        return () => el.removeEventListener("scroll", onScroll);
+        const hasScrollEnd = "onscrollend" in window;
+        const onScrollEnd = () => runHydrate();
+        const onScroll = () => scheduleHydrate(100);
+        if (hasScrollEnd) {
+            el.addEventListener("scrollend", onScrollEnd, { passive: true });
+        } else {
+            el.addEventListener("scroll", onScroll, { passive: true });
+        }
+        return () => {
+            el.removeEventListener("scrollend", onScrollEnd);
+            el.removeEventListener("scroll", onScroll);
+        };
     });
 
     // Manifest/layout-driven: hydrate the initial window after load/import and
