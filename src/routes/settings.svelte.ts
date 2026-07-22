@@ -11,6 +11,8 @@ export interface AppPreferences {
   thumbnailQuality: "auto" | "lossy" | "lossless";
   /** WebP lossy quality (0-100). Applies to Lossy mode and Auto's lossy branch. */
   thumbnailLossyQuality: number;
+  /** Masonry column count in the grid (2-8). Persisted so it survives restart. */
+  gridColumns: number;
   animateGifsInGrid: boolean;
   // Add new fields here. They will be filled from DEFAULT_PREFERENCES on first
   // load so existing installations are never broken by a new field.
@@ -35,6 +37,7 @@ const DEFAULT_PREFERENCES: AppPreferences = {
   },
   thumbnailQuality: "auto",
   thumbnailLossyQuality: 80,
+  gridColumns: 4,
   animateGifsInGrid: false,
 };
 

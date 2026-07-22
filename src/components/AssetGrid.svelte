@@ -8,8 +8,13 @@
     // Manifest = layout source of truth (id, width, height, asset_type).
     const assets = $derived(assetLibrary.manifest);
 
-    // User-controlled. The slider writes here
-    let numColumns = $state(4);
+    // User-controlled column count, persisted in preferences. Local mirror so the
+    // slider drags smoothly; we persist on release (onchange). A $effect re-syncs
+    // it if settings hydrate from disk after this component mounts.
+    let numColumns = $state(settings.preferences.gridColumns);
+    $effect(() => {
+        numColumns = settings.preferences.gridColumns;
+    });
 
     // Scroll container - passed to the virtualizer's getScrollElement
     let scrollEl = $state<HTMLDivElement | null>(null);
@@ -150,6 +155,7 @@
             <div class="flex items-center gap-2">
                 <span class="text-xs text-neutral-500">Columns</span>
                 <input type="range" min="2" max="8" step="1" bind:value={numColumns}
+                    onchange={() => settings.set("gridColumns", numColumns)}
                     class="w-24 accent-neutral-400" />
                 <span class="text-xs text-neutral-400 w-3 text-center">{numColumns}</span>
             </div>

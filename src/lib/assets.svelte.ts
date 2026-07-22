@@ -76,6 +76,13 @@ class AssetLibrary {
    */
   thumbVersion = $state(0);
 
+  /**
+   * Background thumbnail-generation progress for the UI indicator; null when
+   * idle. Only multi-chunk runs (Rebuild / large pending) are surfaced — on-view
+   * batches are single-chunk and finish before a bar would help.
+   */
+  thumbProgress = $state<{ current: number; total: number } | null>(null);
+
   /** Heavy rows keyed by id, hydrated per visible window. Reactive. */
   heavy = new SvelteMap<string, AssetMetadata>();
 
@@ -98,6 +105,7 @@ class AssetLibrary {
   #thumbFlushing = false;
   #thumbMode = "auto";
   #thumbQuality = 80;
+  #thumbProgressHideTimer: ReturnType<typeof setTimeout> | undefined;
 
   /** (Re)load the full manifest for the active library. */
   async load(filter: ManifestFilter = this.manifestFilter): Promise<void> {
@@ -114,16 +122,16 @@ class AssetLibrary {
 
     try {
       const channel = new Channel<AssetLightRow[]>();
-      const collected: AssetLightRow[] = [];
       channel.onmessage = (chunk) => {
         if (token !== this.#loadToken) return; // a newer load superseded this one
         // Build the id->index map incrementally, in lock-step with the manifest.
         // (Channel messages can arrive AFTER the invoke promise resolves, so a
         // one-shot rebuild after `await` would run on an empty manifest.)
-        const base = collected.length;
-        collected.push(...chunk);
+        const base = this.manifest.length;
         for (let i = 0; i < chunk.length; i++) this.#indexById.set(chunk[i].id, base + i);
-        this.manifest = collected.slice(); // publish progressively as chunks arrive
+        // Push in place (reactive under $state) — O(chunk), not the O(n) full-array
+        // copy `slice()` did per chunk (which was O(n²) over a large library).
+        this.manifest.push(...chunk);
       };
       await invoke("stream_manifest", { filter, onChunk: channel });
     } catch (e) {
@@ -267,6 +275,22 @@ class AssetLibrary {
    * `thumb_path` so the real thumbnail loads immediately (no re-fetch needed).
    * Uncached rows pick up `thumb_path` on their next hydration.
    */
+  /**
+   * Feed a `thumbnail-progress` event to the UI indicator. Ignores small
+   * single-chunk (≤64) runs — those are on-view batches that finish instantly —
+   * and auto-hides shortly after completion (a fresh batch cancels the hide).
+   */
+  reportThumbProgress(current: number, total: number): void {
+    if (total <= 64) return; // on-view batch; not worth a progress bar
+    clearTimeout(this.#thumbProgressHideTimer);
+    this.thumbProgress = { current, total };
+    if (current >= total) {
+      this.#thumbProgressHideTimer = setTimeout(() => {
+        this.thumbProgress = null;
+      }, 800);
+    }
+  }
+
   applyThumbnails(ready: { id: string; thumb_hash: string; thumb_path: string }[]): void {
     for (const r of ready) {
       const idx = this.#indexById.get(r.id);

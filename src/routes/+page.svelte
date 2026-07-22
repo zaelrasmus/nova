@@ -203,6 +203,7 @@
             ready: { id: string; thumb_hash: string; thumb_path: string }[];
         }>("thumbnail-progress", (event) => {
             assetLibrary.applyThumbnails(event.payload.ready);
+            assetLibrary.reportThumbProgress(event.payload.current, event.payload.total);
         });
         return () => {
             unlisten.then((fn) => fn());
@@ -431,5 +432,29 @@
                 <AssetGrid />
             </div>
         </div>
+
+        <!-- Background thumbnail generation (Rebuild / large runs). -->
+        {#if assetLibrary.thumbProgress}
+            <div
+                class="fixed bottom-4 right-4 z-50 flex items-center gap-3 rounded-lg border border-neutral-700
+                       bg-neutral-900/95 px-4 py-2.5 text-neutral-200 shadow-xl"
+            >
+                <span class="h-2 w-2 shrink-0 animate-pulse rounded-full bg-blue-500"></span>
+                <div class="flex flex-col gap-1">
+                    <span class="text-xs">
+                        Generating thumbnails… {assetLibrary.thumbProgress.current}/{assetLibrary
+                            .thumbProgress.total}
+                    </span>
+                    <div class="h-1 w-40 overflow-hidden rounded-full bg-neutral-800">
+                        <div
+                            class="h-full bg-blue-500 transition-all"
+                            style="width: {(assetLibrary.thumbProgress.current /
+                                assetLibrary.thumbProgress.total) *
+                                100}%"
+                        ></div>
+                    </div>
+                </div>
+            </div>
+        {/if}
     </main>
 </QueryClientProvider>
