@@ -68,6 +68,14 @@ class AssetLibrary {
   /** Flat folder list for the tree UI, refreshed on library switch + import. */
   folders = $state<Folder[]>([]);
 
+  /**
+   * Cache-buster for regenerated thumbnails. A rebuild reuses the same
+   * `id.webp` path with new bytes, so the webview would serve the stale cached
+   * image; bumping this after a rebuild is appended to thumbnail URLs (see
+   * AssetCard) to force a refetch. No effect on freshly generated thumbnails.
+   */
+  thumbVersion = $state(0);
+
   /** Heavy rows keyed by id, hydrated per visible window. Reactive. */
   heavy = new SvelteMap<string, AssetMetadata>();
 
@@ -78,6 +86,18 @@ class AssetLibrary {
   #indexById = new Map<string, number>();
   /** Ids with an in-flight on-view thumbnail request, to avoid re-requesting. */
   #thumbRequested = new Set<string>();
+  /**
+   * On-view generation queue. Fast scrolling would otherwise fire many
+   * overlapping `generate_thumbnails_for_ids` calls, each its own Rayon fan-out
+   * on the backend → CPU oversubscription (N1). We drain one batch at a time via
+   * `#thumbFlushing`, and REPLACE this set on every request so it only ever holds
+   * the window currently on screen — windows scrolled past are dropped rather than
+   * queued ahead of the view (they regenerate if scrolled back).
+   */
+  #thumbQueue = new Set<string>();
+  #thumbFlushing = false;
+  #thumbMode = "auto";
+  #thumbQuality = 82;
 
   /** (Re)load the full manifest for the active library. */
   async load(filter: ManifestFilter = this.manifestFilter): Promise<void> {
@@ -89,6 +109,7 @@ class AssetLibrary {
     this.heavy.clear();
     this.#pending.clear();
     this.#thumbRequested.clear();
+    this.#thumbQueue.clear();
     this.#indexById.clear();
 
     try {
@@ -184,36 +205,59 @@ class AssetLibrary {
    * Rebuild every thumbnail in the active library with `mode` (clears the cache,
    * then regenerates). Resolves with the count once done; rows are patched in
    * place by the `thumbnail-progress` listener as batches complete, so no reload
-   * is needed. Note: because regenerated files keep the same `id.webp` path, the
-   * webview may show the cached OLD image until restart — the on-disk file (and
-   * its size) is updated immediately.
+   * is needed. Regenerated files keep the same `id.webp` path, so `thumbVersion`
+   * is bumped afterward to bust the webview's image cache (see AssetCard).
    */
-  rebuildThumbnails(mode: string, quality: number): Promise<number> {
-    return invoke<number>("rebuild_thumbnails", { thumbMode: mode, quality });
+  async rebuildThumbnails(mode: string, quality: number): Promise<number> {
+    const count = await invoke<number>("rebuild_thumbnails", { thumbMode: mode, quality });
+    // Files were rewritten in place under the same id.webp paths — bump the
+    // version so on-screen thumbnails refetch instead of showing the cache.
+    this.thumbVersion++;
+    return count;
   }
 
   /**
    * On-view thumbnail generation: request thumbnails for the given ids (the
-   * caller passes only images still missing one). De-dupes in-flight ids so
-   * scrolling doesn't re-request; the backend also filters `WHERE thumb_hash IS
-   * NULL`, so this is idempotent. The backend emits `thumbnail-progress` as
-   * batches complete and `applyThumbnails` patches them in. Non-fatal on failure.
+   * caller passes the current visible window, images still missing one). Drained
+   * one batch at a time so fast scrolling never runs overlapping backend fan-outs
+   * (N1). The pending set is REPLACED with the latest window each call, so a fast
+   * scroll drops passed-over windows instead of queuing them ahead of the view —
+   * the on-screen window is always generated next and gets the whole CPU. Ids
+   * already in flight are excluded; the backend also filters `WHERE thumb_hash IS
+   * NULL`, so this stays idempotent. `thumbnail-progress` patches rows in via
+   * `applyThumbnails`. Non-fatal on failure.
    */
   async ensureThumbnails(ids: string[], mode: string, quality: number): Promise<void> {
-    const need = ids.filter((id) => !this.#thumbRequested.has(id));
-    if (!need.length) return;
+    this.#thumbMode = mode;
+    this.#thumbQuality = quality;
+    // Replace (don't accumulate): only the current window's still-needed,
+    // not-in-flight ids stay pending.
+    this.#thumbQueue = new Set(ids.filter((id) => !this.#thumbRequested.has(id)));
+    if (this.#thumbFlushing || this.#thumbQueue.size === 0) return;
 
-    need.forEach((id) => this.#thumbRequested.add(id));
+    this.#thumbFlushing = true;
     try {
-      await invoke<number>("generate_thumbnails_for_ids", {
-        ids: need,
-        thumbMode: mode,
-        quality,
-      });
-    } catch (e) {
-      console.error("Thumbnail generation request failed:", e);
+      while (this.#thumbQueue.size > 0) {
+        const token = this.#loadToken;
+        const batch = [...this.#thumbQueue];
+        this.#thumbQueue.clear();
+        batch.forEach((id) => this.#thumbRequested.add(id));
+        try {
+          if (token !== this.#loadToken) break; // library switched before dispatch
+          await invoke<number>("generate_thumbnails_for_ids", {
+            ids: batch,
+            thumbMode: this.#thumbMode,
+            quality: this.#thumbQuality,
+          });
+          if (token !== this.#loadToken) break; // switched mid-request; stop draining
+        } catch (e) {
+          console.error("Thumbnail generation request failed:", e);
+        } finally {
+          batch.forEach((id) => this.#thumbRequested.delete(id));
+        }
+      }
     } finally {
-      need.forEach((id) => this.#thumbRequested.delete(id));
+      this.#thumbFlushing = false;
     }
   }
 
@@ -237,11 +281,15 @@ class AssetLibrary {
 
   /** Hydrate heavy rows for the given ids (visible window + overscan). */
     async ensure(ids: string[]): Promise<void> {
+      const token = this.#loadToken;
       const missing = ids.filter((id) => !this.heavy.has(id) && !this.#pending.has(id));
       if (missing.length) {
         missing.forEach((id) => this.#pending.add(id));
         try {
           const rows = await invoke<AssetMetadata[]>("fetch_assets_by_ids", { ids: missing });
+          // A library switch may have superseded this request; dropping the stale
+          // rows avoids polluting the new library's cache (T1.2).
+          if (token !== this.#loadToken) return;
           for (const row of rows) this.heavy.set(row.id, row);
         } catch (e) {
           console.error("Asset hydration failed:", e);
@@ -249,7 +297,7 @@ class AssetLibrary {
           missing.forEach((id) => this.#pending.delete(id));
         }
       }
-      this.#evict(ids);
+      if (token === this.#loadToken) this.#evict(ids);
     }
 
     #evict(keep: string[]): void {

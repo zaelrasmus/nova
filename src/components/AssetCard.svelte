@@ -1,6 +1,6 @@
 <script lang="ts">
     import { convertFileSrc } from "@tauri-apps/api/core";
-    import { thumbHashUrl } from "$lib/assets.svelte";
+    import { assetLibrary, thumbHashUrl } from "$lib/assets.svelte";
     import type { AssetMetadata } from "$lib/assets.svelte";
 
     interface Props {
@@ -22,7 +22,9 @@
             animate && isAnimated && heavy?.dest_path
                 ? convertFileSrc(heavy.dest_path)
                 : heavy?.thumb_path
-                  ? convertFileSrc(heavy.thumb_path)
+                  // A rebuild reuses this id.webp path with new bytes, so append the
+                  // version to force the webview to refetch instead of caching.
+                  ? `${convertFileSrc(heavy.thumb_path)}?v=${assetLibrary.thumbVersion}`
                   // Generation done (thumbHash set) but no thumbnail file was written
                   // because the source is already small — show the original directly.
                   : thumbHash && assetType === "image" && heavy?.dest_path

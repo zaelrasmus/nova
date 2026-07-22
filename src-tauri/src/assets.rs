@@ -7,7 +7,7 @@ use rayon::prelude::{IntoParallelIterator, ParallelIterator};
 use serde::{Deserialize, Serialize};
 use sqlx::{sqlite::SqlitePool, FromRow, QueryBuilder, Type};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicUsize, Ordering},
@@ -613,16 +613,18 @@ fn build_asset_metadata(src: PathBuf) -> Option<AssetMetadata> {
     })
 }
 
+/// Copy every staged original into the library, returning the ids whose copy
+/// FAILED so the caller can drop them (never persist a row pointing at a missing
+/// file). Individual failures are non-fatal; only a task panic aborts.
 #[instrument(skip(reporter, assets), fields(total = assets.len()))]
 async fn copy_assets(
     reporter: Arc<dyn ProgressReporter>,
     assets: &[AssetMetadata],
     root: &Path,
-) -> Result<()> {
+) -> Result<HashSet<String>> {
     let start = std::time::Instant::now();
     let semaphore = Arc::new(Semaphore::new(10));
     let completed = Arc::new(AtomicUsize::new(0));
-    let failed = Arc::new(AtomicUsize::new(0));
     let total = assets.len();
     let mut handles = Vec::with_capacity(total);
 
@@ -637,8 +639,8 @@ async fn copy_assets(
         let dst = root.join(&asset.dest_path);
         let reporter = Arc::clone(&reporter);
         let completed = Arc::clone(&completed);
-        let failed = Arc::clone(&failed);
         let filename = asset.filename.clone();
+        let id = asset.id.clone();
 
         handles.push(tokio::spawn(async move {
             let _permit = permit;
@@ -654,35 +656,48 @@ async fn copy_assets(
                         total,
                         message: format!("Importing: {}", filename),
                     });
+                    None
                 }
                 Err(e) => {
-                    failed.fetch_add(1, Ordering::SeqCst);
                     warn!(src = ?src, error = %e, "Failed to copy file, skipping");
+                    Some(id)
                 }
             }
         }));
     }
 
+    let mut failed = HashSet::new();
     for handle in handles {
-        handle.await.context("File copy task panicked")?;
+        if let Some(id) = handle.await.context("File copy task panicked")? {
+            failed.insert(id);
+        }
     }
 
-    let failed_count = failed.load(Ordering::SeqCst);
-    if failed_count > 0 {
-        warn!(
-            failed = failed_count,
-            total, "Import completed with copy failures"
-        );
+    if !failed.is_empty() {
+        warn!(failed = failed.len(), total, "Import had copy failures");
     }
 
     info!(
         total,
-        failed = failed_count,
+        failed = failed.len(),
         elapsed_ms = start.elapsed().as_millis(),
         "File copy stage complete"
     );
 
-    Ok(())
+    Ok(failed)
+}
+
+/// Best-effort removal of copied originals after a failed persist, so a failed
+/// import leaves nothing orphaned in `assets/`. Missing files are ignored.
+async fn cleanup_orphans(root: &Path, assets: &[AssetMetadata]) {
+    for a in assets {
+        let path = root.join(&a.dest_path);
+        match tokio::fs::remove_file(&path).await {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => warn!(path = ?path, error = %e, "Failed to remove orphaned file"),
+        }
+    }
 }
 
 #[instrument(skip(pool))]
@@ -780,7 +795,7 @@ pub async fn import_assets(
     // Stage 3: Build metadata in parallel (CPU-bound via Rayon).
     let metadata_start = std::time::Instant::now();
 
-    let staged_assets: Vec<AssetMetadata> = discovered_files
+    let mut staged_assets: Vec<AssetMetadata> = discovered_files
         .into_par_iter()
         .filter(|p| !matches!(detect_asset_type(p), AssetType::Unknown))
         .filter_map(build_asset_metadata)
@@ -792,11 +807,27 @@ pub async fn import_assets(
         "Metadata stage complete"
     );
 
-    // Resolve each asset to the folder its source file lived in. `source_path` is
-    // retained on AssetMetadata for the copy stage, so no rescan is needed. Files
+    reporter.report(ImportProgress {
+        stage: ImportStage::CopyingFiles,
+        current: 0,
+        total: staged_assets.len(),
+        message: "Copying files...".into(),
+    });
+
+    // Stage 4: Copy files with bounded concurrency (I/O-bound via Tokio). Drop any
+    // asset whose file failed to copy so we never persist a row pointing at a
+    // missing file (T1.3).
+    let failed = copy_assets(reporter.clone(), &staged_assets, &library_root).await?;
+    if !failed.is_empty() {
+        warn!(dropped = failed.len(), "Dropping assets whose file copy failed");
+        staged_assets.retain(|a| !failed.contains(&a.id));
+    }
+
+    // Resolve each surviving asset to the folder its source file lived in.
+    // `source_path` is retained on AssetMetadata, so no rescan is needed. Files
     // directly under the import root have no scanned parent folder → they stay
-    // free. `folder_id_by_path` is empty when importing without structure, so this
-    // yields no links then.
+    // free; `folder_id_by_path` is empty when importing without structure. Built
+    // after the copy so a link never references a dropped asset.
     let links: Vec<FolderLink> = {
         let mut counters: HashMap<String, f64> = HashMap::new();
         staged_assets
@@ -816,17 +847,8 @@ pub async fn import_assets(
             .collect()
     };
 
-    reporter.report(ImportProgress {
-        stage: ImportStage::CopyingFiles,
-        current: 0,
-        total: staged_assets.len(),
-        message: "Copying files...".into(),
-    });
-
-    // Stage 4: Copy files with bounded concurrency (I/O-bound via Tokio).
-    copy_assets(reporter.clone(), &staged_assets, &library_root).await?;
-
-    // Stage 5: Persist all metadata atomically.
+    // Stage 5: Persist all metadata atomically. If it fails, remove the originals
+    // we just copied so a failed import leaves nothing orphaned on disk (T1.3).
     reporter.report(ImportProgress {
         stage: ImportStage::Finalizing,
         current: 0,
@@ -834,7 +856,10 @@ pub async fn import_assets(
         message: "Saving to database...".into(),
     });
 
-    persist_import(&pool, &staged_assets, &folders, &links).await?;
+    if let Err(e) = persist_import(&pool, &staged_assets, &folders, &links).await {
+        cleanup_orphans(&library_root, &staged_assets).await;
+        return Err(e);
+    }
 
     info!(
         assets = staged_assets.len(),
