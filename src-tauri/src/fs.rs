@@ -46,7 +46,7 @@ pub fn scan_directories(
             name: entry.file_name().to_string_lossy().into_owned(),
             parent_id,
             position: folders.len() as f64, // discovery order; siblings stay monotonic
-            order_by: crate::assets::OrderBy::ImportedDate,
+            order_by: crate::assets::OrderBy::Manual,
             is_ascending: true,
         });
 

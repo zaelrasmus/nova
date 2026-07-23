@@ -27,16 +27,46 @@ pub enum AssetType {
     Unknown,
 }
 
-/// What slice of the library the manifest should stream. `All` = everything,
-/// `Folder` = one folder's members (manual order), `Uncategorized` = assets with
-/// no folder membership. Sent from the frontend as `{ "kind": "folder", "id": … }`.
+/// What slice of the library the manifest covers. `All` = everything, `Folder` =
+/// one folder's members, `Uncategorized` = assets with no folder membership.
+/// Sent from the frontend as `{ "kind": "folder", "id": … }`.
+///
+/// A scope is a *place*, not a filter: it decides which rows exist, and it owns
+/// the persisted sort for that place. Phase 2's real filters (type, orientation,
+/// ranges) become a third field on `ManifestQuery` — they narrow a scope, they
+/// never replace one.
 #[derive(Deserialize, Debug, Clone)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum ManifestFilter {
+pub enum Scope {
     All,
     Folder { id: String },
     Uncategorized,
 }
+
+/// A sort criterion plus direction, persisted per scope (see `resolve_sort`).
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Sort {
+    pub order_by: OrderBy,
+    pub is_ascending: bool,
+}
+
+/// Everything the manifest needs, as ONE object, compiled into ONE statement.
+/// Keeping scope and sort (and later, filters) together is what prevents a SQL
+/// pass and a JS pass that can disagree about what the view contains.
+#[derive(Deserialize, Debug, Clone)]
+pub struct ManifestQuery {
+    pub scope: Scope,
+    /// Explicit override; `None` falls back to the scope's persisted sort.
+    #[serde(default)]
+    pub sort: Option<Sort>,
+}
+
+/// Newest-first — matches the behaviour from before sorting existed, and is the
+/// fallback when a scope has no persisted row (deleted folder, un-seeded view).
+const DEFAULT_SORT: Sort = Sort {
+    order_by: OrderBy::ImportedDate,
+    is_ascending: false,
+};
 
 #[derive(Serialize, Clone, Debug, FromRow)]
 pub struct AssetLightRow {
@@ -65,6 +95,10 @@ pub struct AssetMetadata {
     pub width: u32,
     pub height: u32,
 
+    /// Bytes on disk. `i64` because SQLite integers are signed — sqlx has no
+    /// `Encode` for `u64`.
+    pub file_size: i64,
+
     pub imported_date: String,
     #[sqlx(rename = "creation_date")]
     pub creation_date: String,
@@ -86,17 +120,41 @@ pub struct AssetMetadata {
     pub thumb_path: String,
 }
 
-/// How a folder sorts the assets shown when it's opened. Stored as TEXT; the
-/// auto variants map to the `idx_assets_*` sort indexes, `Manual` uses each
-/// membership row's `assets_folders.position`.
+/// How a view sorts its assets. Stored as TEXT; each auto variant maps to an
+/// `idx_assets_*` index. `Manual` is scope-dependent — inside a folder it means
+/// the membership row's position, everywhere else the asset's own global
+/// `manual_position`.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, Type, PartialEq, Eq)]
 #[sqlx(rename_all = "snake_case")]
 #[serde(rename_all = "snake_case")]
 pub enum OrderBy {
     ImportedDate,
-    Filename,
     CreationDate,
+    ModifiedDate,
+    Filename,
+    FileSize,
+    Resolution,
     Manual,
+}
+
+impl OrderBy {
+    /// The SQL expression to ORDER BY. Every arm is a compile-time constant, so
+    /// nothing user-supplied is ever interpolated into the statement — the only
+    /// bound value in a manifest query is the folder id.
+    fn sql_expr(self, in_folder: bool) -> &'static str {
+        match self {
+            OrderBy::ImportedDate => "a.imported_date",
+            OrderBy::CreationDate => "a.creation_date",
+            OrderBy::ModifiedDate => "a.modified_date",
+            // NOCASE must match idx_assets_filename's collation or the index is
+            // skipped. (Binary collation would also sort "Zebra" before "apple".)
+            OrderBy::Filename => "a.filename COLLATE NOCASE",
+            OrderBy::FileSize => "a.file_size",
+            OrderBy::Resolution => "a.pixel_count",
+            OrderBy::Manual if in_folder => "af.position",
+            OrderBy::Manual => "a.manual_position",
+        }
+    }
 }
 
 /// One asset↔folder membership row, built at import time from each asset's
@@ -171,47 +229,137 @@ fn detect_asset_type(path: &Path) -> AssetType {
     AssetType::Unknown
 }
 
+/// Compose the manifest statement from scope + sort. Split out from execution so
+/// the shape stays readable, and so Phase 2 has one obvious place to append
+/// WHERE clauses.
+fn build_manifest_sql(scope: &Scope, sort: Sort) -> String {
+    let in_folder = matches!(scope, Scope::Folder { .. });
+    let dir = if sort.is_ascending { "ASC" } else { "DESC" };
+
+    let (from, predicate) = match scope {
+        Scope::All => ("FROM assets a", ""),
+        Scope::Folder { .. } => (
+            "FROM assets a JOIN assets_folders af ON af.asset_id = a.id",
+            "WHERE af.folder_id = ?",
+        ),
+        Scope::Uncategorized => (
+            "FROM assets a",
+            "WHERE a.id NOT IN (SELECT asset_id FROM assets_folders)",
+        ),
+    };
+
+    // The `a.id` tie-break runs in the SAME direction as the sort column so the
+    // composite (col, id) indexes stay usable scanning either way.
+    format!(
+        "SELECT a.id, a.width, a.height, a.asset_type, a.thumb_hash, a.is_animated \
+         {from} {predicate} ORDER BY {expr} {dir}, a.id {dir}",
+        expr = sort.order_by.sql_expr(in_folder),
+    )
+}
+
 #[instrument(skip(pool))]
 pub async fn fetch_manifest(
     pool: &SqlitePool,
-    filter: &ManifestFilter,
+    query: &ManifestQuery,
 ) -> Result<Vec<AssetLightRow>> {
-    let rows = match filter {
-        ManifestFilter::All => {
-            sqlx::query_as::<_, AssetLightRow>(
-                "SELECT id, width, height, asset_type, thumb_hash, is_animated
-                 FROM assets
-                 ORDER BY imported_date DESC, id DESC",
-            )
-            .fetch_all(pool)
-            .await
+    let sort = match query.sort {
+        Some(s) => s,
+        None => resolve_sort(pool, &query.scope).await?,
+    };
+
+    let sql = build_manifest_sql(&query.scope, sort);
+    let mut stmt = sqlx::query_as::<_, AssetLightRow>(&sql);
+    if let Scope::Folder { id } = &query.scope {
+        stmt = stmt.bind(id.as_str());
+    }
+
+    stmt.fetch_all(pool)
+        .await
+        .context("Failed to fetch asset manifest")
+}
+
+// ── Persisted sort ────────────────────────────────────────────────────────────
+
+const FOLDER_SORT_SQL: &str = "SELECT order_by, is_ascending FROM folders WHERE id = ?";
+const VIEW_SORT_SQL: &str = "SELECT order_by, is_ascending FROM view_settings WHERE view_key = ?";
+
+/// The persisted sort for a scope. Folders keep theirs on their own row (the FK
+/// cascade cleans it up on delete); the two fixed views keep theirs in
+/// `view_settings`.
+///
+/// These two functions are the ONLY place that distinction exists — every caller
+/// downstream just receives a `Sort`. That's the uniformity worth having; making
+/// the *storage* uniform (sentinel folders) would have cost a guard in every
+/// membership query instead.
+#[instrument(skip(pool))]
+pub async fn resolve_sort(pool: &SqlitePool, scope: &Scope) -> Result<Sort> {
+    let row: Option<(OrderBy, bool)> = match scope {
+        Scope::Folder { id } => {
+            sqlx::query_as(FOLDER_SORT_SQL)
+                .bind(id.as_str())
+                .fetch_optional(pool)
+                .await
         }
-        ManifestFilter::Folder { id } => {
-            // Manual order within a folder: assets_folders.position, then insertion.
-            sqlx::query_as::<_, AssetLightRow>(
-                "SELECT a.id, a.width, a.height, a.asset_type, a.thumb_hash, a.is_animated
-                 FROM assets a
-                 JOIN assets_folders af ON af.asset_id = a.id
-                 WHERE af.folder_id = ?
-                 ORDER BY af.position ASC, af.added_at ASC, a.id DESC",
-            )
-            .bind(id)
-            .fetch_all(pool)
-            .await
+        Scope::All => {
+            sqlx::query_as(VIEW_SORT_SQL)
+                .bind("all")
+                .fetch_optional(pool)
+                .await
         }
-        ManifestFilter::Uncategorized => {
-            sqlx::query_as::<_, AssetLightRow>(
-                "SELECT id, width, height, asset_type, thumb_hash, is_animated
-                 FROM assets
-                 WHERE id NOT IN (SELECT asset_id FROM assets_folders)
-                 ORDER BY imported_date DESC, id DESC",
+        Scope::Uncategorized => {
+            sqlx::query_as(VIEW_SORT_SQL)
+                .bind("uncategorized")
+                .fetch_optional(pool)
+                .await
+        }
+    }
+    .context("Failed to read persisted sort")?;
+
+    // A missing row is not an error — the user still gets a usable view.
+    Ok(row
+        .map(|(order_by, is_ascending)| Sort {
+            order_by,
+            is_ascending,
+        })
+        .unwrap_or(DEFAULT_SORT))
+}
+
+#[instrument(skip(pool))]
+pub async fn set_sort(pool: &SqlitePool, scope: &Scope, sort: Sort) -> Result<()> {
+    let res = match scope {
+        Scope::Folder { id } => {
+            sqlx::query("UPDATE folders SET order_by = ?, is_ascending = ? WHERE id = ?")
+                .bind(sort.order_by)
+                .bind(sort.is_ascending)
+                .bind(id.as_str())
+                .execute(pool)
+                .await
+        }
+        // Upsert, so the fixed views keep working even if the seed rows are gone.
+        _ => {
+            let key = if matches!(scope, Scope::All) {
+                "all"
+            } else {
+                "uncategorized"
+            };
+            sqlx::query(
+                "INSERT INTO view_settings (view_key, order_by, is_ascending) VALUES (?, ?, ?) \
+                 ON CONFLICT(view_key) DO UPDATE \
+                 SET order_by = excluded.order_by, is_ascending = excluded.is_ascending",
             )
-            .fetch_all(pool)
+            .bind(key)
+            .bind(sort.order_by)
+            .bind(sort.is_ascending)
+            .execute(pool)
             .await
         }
     }
-    .context("Failed to fetch asset manifest")?;
-    Ok(rows)
+    .context("Failed to persist sort")?;
+
+    if res.rows_affected() == 0 {
+        anyhow::bail!("Folder not found");
+    }
+    Ok(())
 }
 
 #[instrument(skip(pool))]
@@ -253,7 +401,7 @@ pub async fn create_folder(
 
     sqlx::query(
         "INSERT INTO folders (id, name, parent_id, position, order_by, is_ascending)
-         VALUES (?, ?, ?, ?, 'imported_date', 1)",
+         VALUES (?, ?, ?, ?, 'manual', 1)",
     )
     .bind(&id)
     .bind(name)
@@ -268,7 +416,7 @@ pub async fn create_folder(
         name: name.to_string(),
         parent_id: parent_id.map(str::to_string),
         position,
-        order_by: OrderBy::ImportedDate,
+        order_by: OrderBy::Manual,
         is_ascending: true,
     })
 }
@@ -304,24 +452,19 @@ pub async fn delete_folder(pool: &SqlitePool, id: &str) -> Result<()> {
 /// Rejects moving a folder into itself or one of its own descendants, which would
 /// orphan the subtree — checked by walking up from the target parent to the root.
 #[instrument(skip(pool))]
-pub async fn move_folder(
-    pool: &SqlitePool,
-    id: &str,
-    new_parent_id: Option<&str>,
-) -> Result<()> {
+pub async fn move_folder(pool: &SqlitePool, id: &str, new_parent_id: Option<&str>) -> Result<()> {
     let mut cursor = new_parent_id.map(str::to_string);
     while let Some(cur) = cursor {
         if cur == id {
             anyhow::bail!("Cannot move a folder into itself or a descendant");
         }
-        cursor = sqlx::query_scalar::<_, Option<String>>(
-            "SELECT parent_id FROM folders WHERE id = ?",
-        )
-        .bind(&cur)
-        .fetch_optional(pool)
-        .await
-        .context("Failed to walk folder ancestry")?
-        .flatten();
+        cursor =
+            sqlx::query_scalar::<_, Option<String>>("SELECT parent_id FROM folders WHERE id = ?")
+                .bind(&cur)
+                .fetch_optional(pool)
+                .await
+                .context("Failed to walk folder ancestry")?
+                .flatten();
     }
 
     let position = next_folder_position(pool, new_parent_id).await?;
@@ -417,7 +560,7 @@ pub async fn fetch_assets_by_ids(
     // Window sizes stay small (visible + overscan), well under SQLite's
     // 32766 bind-parameter limit, so no chunking needed.
     let mut qb = QueryBuilder::new(
-        "SELECT id, asset_type, filename, extension, path, width, height, \
+        "SELECT id, asset_type, filename, extension, path, width, height, file_size, \
          imported_date, creation_date, modified_date, thumb_hash, is_animated \
          FROM assets WHERE id IN (",
     );
@@ -461,9 +604,9 @@ async fn persist_import(
 ) -> Result<()> {
     let start = std::time::Instant::now();
 
-    // SQLite caps bound parameters at 32766. With 10 columns per row, keep each
-    // multi-row INSERT well under that (10 * 2000 = 20000 params per statement)
-    const ROWS_PER_INSERT: usize = 2000;
+    // SQLite caps bound parameters at 32766. With 15 columns per row, keep each
+    // multi-row INSERT well under that (15 * 1500 = 22500 params per statement)
+    const ROWS_PER_INSERT: usize = 1500;
 
     let mut tx = pool
         .begin()
@@ -491,12 +634,24 @@ async fn persist_import(
             .context("Failed to insert folder chunk")?;
     }
 
-    // 2. Assets
+    // 2. Assets. Global manual order continues after whatever is already in the
+    //    library, so "manual" means import order until drag-to-reorder lands.
+    let manual_base =
+        sqlx::query_scalar::<_, Option<f64>>("SELECT MAX(manual_position) FROM assets")
+            .fetch_one(&mut *tx)
+            .await
+            .context("Failed to compute manual position base")?
+            .map(|m| m + 1.0)
+            .unwrap_or(0.0);
 
-    for chunk in assets.chunks(ROWS_PER_INSERT) {
+    for (chunk_idx, chunk) in assets.chunks(ROWS_PER_INSERT).enumerate() {
+        let base = manual_base + (chunk_idx * ROWS_PER_INSERT) as f64;
+        let mut offset = 0.0f64;
+
         let mut qb = QueryBuilder::new(
             "INSERT INTO assets (id, asset_type, filename, extension, path, \
-                width, height, imported_date, creation_date, modified_date, thumb_hash, thumb_config, is_animated) ",
+                   width, height, file_size, manual_position, imported_date, creation_date, \
+                   modified_date, thumb_hash, thumb_config, is_animated) ",
         );
 
         qb.push_values(chunk, |mut b, asset| {
@@ -507,12 +662,15 @@ async fn persist_import(
                 .push_bind(&asset.dest_path)
                 .push_bind(asset.width)
                 .push_bind(asset.height)
+                .push_bind(asset.file_size)
+                .push_bind(base + offset)
                 .push_bind(&asset.imported_date)
                 .push_bind(&asset.creation_date)
                 .push_bind(&asset.modified_date)
                 .push_bind(asset.thumb_hash.as_deref())
                 .push_bind(asset.thumb_config.as_deref())
                 .push_bind(asset.is_animated);
+            offset += 1.0;
         });
 
         qb.build()
@@ -603,6 +761,7 @@ fn build_asset_metadata(src: PathBuf) -> Option<AssetMetadata> {
         source_path: src.to_string_lossy().into_owned(),
         width: visual.width,
         height: visual.height,
+        file_size: meta.len() as i64,
         imported_date: Utc::now().to_rfc3339(),
         creation_date: created.to_rfc3339(),
         modified_date: modified.to_rfc3339(),
@@ -774,7 +933,10 @@ pub async fn import_assets(
     // missing file (T1.3).
     let failed = copy_assets(reporter.clone(), &staged_assets, &library_root).await?;
     if !failed.is_empty() {
-        warn!(dropped = failed.len(), "Dropping assets whose file copy failed");
+        warn!(
+            dropped = failed.len(),
+            "Dropping assets whose file copy failed"
+        );
         staged_assets.retain(|a| !failed.contains(&a.id));
     }
 

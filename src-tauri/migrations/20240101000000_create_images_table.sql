@@ -4,8 +4,8 @@ CREATE TABLE IF NOT EXISTS folders (
    parent_id TEXT,
    position REAL NOT NULL DEFAULT 0,
    description TEXT,
-   order_by TEXT NOT NULL DEFAULT 'imported_date',
-   is_ascending INTEGER DEFAULT 1, -- 0 = false, 1 = true
+   order_by TEXT NOT NULL DEFAULT 'manual',
+   is_ascending INTEGER NOT NULL DEFAULT 1, -- 0 = false, 1 = true
 
 
    FOREIGN KEY(parent_id) REFERENCES folders(id) ON DELETE CASCADE
@@ -18,9 +18,12 @@ CREATE TABLE IF NOT EXISTS assets (
 
     width INTEGER NOT NULL DEFAULT 0,
     height INTEGER NOT NULL DEFAULT 0,
+    pixel_count INTEGER GENERATED ALWAYS AS (width * height) VIRTUAL,
 
+    manual_position REAL NOT NULL DEFAULT 0,
 
     filename TEXT NOT NULL,
+    file_size INTEGER NOT NULL DEFAULT 0,
     extension TEXT NOT NULL,
     imported_date TEXT NOT NULL,
     modified_date TEXT NOT NULL,
@@ -43,7 +46,15 @@ CREATE TABLE IF NOT EXISTS assets_folders (
     FOREIGN KEY (asset_id) REFERENCES assets(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS view_settings (
+    view_key TEXT PRIMARY KEY NOT NULL,
+    order_by TEXT NOT NULL DEFAULT 'imported_date',
+    is_ascending INTEGER NOT NULL DEFAULT 0
 
+);
+
+INSERT OR IGNORE INTO view_settings (view_key, order_by, is_ascending) VALUES ('all', 'imported_date', 0),
+     ('uncategorized', 'imported_date', 0);
 
 -- Membership indexes
 CREATE INDEX IF NOT EXISTS idx_folder_contents ON assets_folders(folder_id, added_at);
@@ -51,10 +62,15 @@ CREATE INDEX IF NOT EXISTS idx_folders_position ON assets_folders (folder_id, po
 CREATE INDEX IF NOT EXISTS idx_folders_tree ON folders(parent_id, position);
 
 
--- ── Sort indexes: one composite (sortcol, id) per sort mode you expose.
--- The trailing id makes the keyset cursor unique so deep pages stay O(log n).
--- SQLite can scan an index backwards, so one index per column serves both
--- ascending and descending (is_ascending) without a second index.
+-- Sort indexes: one composite (sortcol, id) per exposed sort mode. The trailing
+-- id matches the query's tie-breaker so deep scans stay ordered by the index.
+-- SQLite scans an index backwards, so one index serves both directions.
 CREATE INDEX IF NOT EXISTS idx_assets_imported ON assets (imported_date, id);
-CREATE INDEX IF NOT EXISTS idx_assets_filename ON assets (filename,      id);
 CREATE INDEX IF NOT EXISTS idx_assets_created  ON assets (creation_date, id);
+CREATE INDEX IF NOT EXISTS idx_assets_modified ON assets (modified_date, id);
+CREATE INDEX IF NOT EXISTS idx_assets_size     ON assets (file_size, id);
+CREATE INDEX IF NOT EXISTS idx_assets_pixels   ON assets (pixel_count, id);
+CREATE INDEX IF NOT EXISTS idx_assets_manual   ON assets (manual_position, id);
+-- COLLATE NOCASE must match the ORDER BY's collation or SQLite silently ignores
+-- this index and full-sorts instead.
+CREATE INDEX IF NOT EXISTS idx_assets_filename ON assets (filename COLLATE NOCASE, id);

@@ -211,12 +211,12 @@ pub async fn generate_thumbnails_for_ids(
 #[instrument(skip_all)]
 #[tauri::command]
 pub async fn stream_manifest(
-    filter: assets::ManifestFilter,
+    query: assets::ManifestQuery,
     on_chunk: tauri::ipc::Channel<Vec<AssetLightRow>>,
     state: tauri::State<'_, DbState>,
 ) -> Result<(), AppError> {
     let pool = state.acquire_pool().await?;
-    let rows = assets::fetch_manifest(&pool, &filter).await?;
+    let rows = assets::fetch_manifest(&pool, &query).await?;
 
     // Chunk so first paint starts before the whole manifest is deserialized.
     for chunk in rows.chunks(5000) {
@@ -225,6 +225,36 @@ pub async fn stream_manifest(
             .map_err(|e| AppError::Internal(e.into()))?;
     }
     Ok(())
+}
+
+/// The persisted sort for a scope. The frontend reads this when switching views
+/// so the sort control always reflects what the query actually did, rather than
+/// guessing and correcting (which flickers).
+#[instrument(skip_all)]
+#[tauri::command]
+pub async fn fetch_sort(
+    scope: assets::Scope,
+    state: tauri::State<'_, DbState>,
+) -> Result<assets::Sort, AppError> {
+    let pool = state.acquire_pool().await?;
+    assets::resolve_sort(&pool, &scope)
+        .await
+        .inspect_err(|e| tracing::error!(error = %e, "fetch_sort failed"))
+        .map_err(AppError::from)
+}
+
+#[instrument(skip_all)]
+#[tauri::command]
+pub async fn set_sort(
+    scope: assets::Scope,
+    sort: assets::Sort,
+    state: tauri::State<'_, DbState>,
+) -> Result<(), AppError> {
+    let pool = state.acquire_pool().await?;
+    assets::set_sort(&pool, &scope, sort)
+        .await
+        .inspect_err(|e| tracing::error!(error = %e, "set_sort failed"))
+        .map_err(AppError::from)
 }
 
 #[instrument(skip_all)]
@@ -269,10 +299,7 @@ pub async fn rename_folder(
 
 #[instrument(skip_all)]
 #[tauri::command]
-pub async fn delete_folder(
-    id: String,
-    state: tauri::State<'_, DbState>,
-) -> Result<(), AppError> {
+pub async fn delete_folder(id: String, state: tauri::State<'_, DbState>) -> Result<(), AppError> {
     let pool = state.acquire_pool().await?;
     assets::delete_folder(&pool, &id)
         .await

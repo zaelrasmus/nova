@@ -17,6 +17,7 @@ export interface AssetMetadata extends AssetLightRow {
   filename: string;
   extension: string;
   dest_path: string;
+  file_size: number;
   imported_date: string;
   creation_date: string;
   modified_date: string;
@@ -24,17 +25,46 @@ export interface AssetMetadata extends AssetLightRow {
   thumb_path: string; // "" => no thumbnail; fallback to dest_path
 }
 
-export type ManifestFilter =
+/** Which slice of the library is shown. A scope is a place, not a filter. */
+export type ManifestScope =
   | { kind: "all" }
   | { kind: "folder"; id: string }
   | { kind: "uncategorized" };
+
+export type OrderBy =
+  | "imported_date"
+  | "creation_date"
+  | "modified_date"
+  | "filename"
+  | "file_size"
+  | "resolution"
+  | "manual";
+
+export interface Sort {
+  order_by: OrderBy;
+  is_ascending: boolean;
+}
+
+/** Mirrors Rust's DEFAULT_SORT — newest first. */
+export const DEFAULT_SORT: Sort = { order_by: "imported_date", is_ascending: false };
+
+/** Sort dropdown options, in display order. */
+export const ORDER_BY_LABELS: { value: OrderBy; label: string }[] = [
+  { value: "imported_date", label: "Date added" },
+  { value: "creation_date", label: "Date created" },
+  { value: "modified_date", label: "Date modified" },
+  { value: "filename", label: "Name" },
+  { value: "file_size", label: "File size" },
+  { value: "resolution", label: "Resolution" },
+  { value: "manual", label: "Manual" },
+];
 
 export interface Folder {
   id: string;
   name: string;
   parent_id: string | null;
   position: number;
-  order_by: string;
+  order_by: OrderBy;
   is_ascending: boolean;
 }
 
@@ -64,7 +94,9 @@ class AssetLibrary {
   error = $state<string | null>(null);
 
   /** The slice of the library currently shown (drives which folder is active). */
-  manifestFilter = $state<ManifestFilter>({ kind: "all" });
+  scope = $state<ManifestScope>({ kind: "all" });
+  /** The sort the CURRENT manifest was built with — always what the query did. */
+  sort = $state<Sort>({ ...DEFAULT_SORT });
   /** Flat folder list for the tree UI, refreshed on library switch + import. */
   folders = $state<Folder[]>([]);
 
@@ -86,8 +118,16 @@ class AssetLibrary {
   /** Heavy rows keyed by id, hydrated per visible window. Reactive. */
   heavy = new SvelteMap<string, AssetMetadata>();
 
+  /** Ids with an in-flight heavy-row hydration request, to avoid re-requesting. */
   #pending = new Set<string>();
+  /** Bumped per manifest load (scope/sort change) — guards manifest streaming. */
   #loadToken = 0;
+  /**
+   * Bumped ONLY on a library switch — guards the heavy-row and thumbnail caches.
+   * Separate from #loadToken because a sort change reorders the same library:
+   * cached rows stay valid, so re-sorting must not throw away hydration work.
+   */
+  #libraryToken = 0;
 
   /** id -> manifest index, for O(1) row patching (rebuilt on each load). */
   #indexById = new Map<string, number>();
@@ -110,18 +150,26 @@ class AssetLibrary {
   static #THUMB_CONCURRENCY = 3;
   static #THUMB_BATCH = 32;
 
-  /** (Re)load the full manifest for the active library. */
-  async load(filter: ManifestFilter = this.manifestFilter): Promise<void> {
-    this.manifestFilter = filter;
+  /**
+   * (Re)load the manifest for `scope` with `sort`. Both are stored so the UI can
+   * always show what the current view actually did.
+   *
+   * The heavy-row cache is deliberately NOT cleared here: a scope or sort change
+   * reorders or narrows the same library, and rows are keyed by id, so every
+   * cached row stays valid. Only a library switch invalidates them —
+   * `clearCaches()`.
+   */
+  async load(scope: ManifestScope = this.scope, sort: Sort = this.sort): Promise<void> {
+    this.scope = scope;
+    this.sort = sort;
     const token = ++this.#loadToken;
     this.isLoading = true;
     this.error = null;
     this.manifest = [];
-    this.heavy.clear();
-    this.#pending.clear();
-    this.#thumbRequested.clear();
-    this.#thumbQueue = [];
     this.#indexById.clear();
+    // Queued windows describe the OLD order, so drop them; the grid re-requests
+    // its visible window as soon as the new manifest paints.
+    this.#thumbQueue = [];
 
     try {
       const channel = new Channel<AssetLightRow[]>();
@@ -136,7 +184,7 @@ class AssetLibrary {
         // copy `slice()` did per chunk (which was O(n²) over a large library).
         this.manifest.push(...chunk);
       };
-      await invoke("stream_manifest", { filter, onChunk: channel });
+      await invoke("stream_manifest", { query: { scope, sort }, onChunk: channel });
     } catch (e) {
       if (token === this.#loadToken) {
         this.error = typeof e === "string" ? e : "Failed to load assets.";
@@ -150,9 +198,48 @@ class AssetLibrary {
     return this.load();
   }
 
-  /** Switch the visible slice (folder / all / uncategorized) and reload. */
-  setFilter(filter: ManifestFilter): Promise<void> {
-    return this.load(filter);
+  /**
+   * Drop every cached row. Valid ONLY on a library switch — asset ids are
+   * library-scoped, so carrying them over would mix two libraries' data.
+   * Bumping `#libraryToken` also invalidates in-flight hydration + thumbnail work.
+   */
+  clearCaches(): void {
+    this.#libraryToken++;
+    this.heavy.clear();
+    this.#pending.clear();
+    this.#thumbRequested.clear();
+    this.#thumbQueue = [];
+  }
+
+  /**
+   * Switch the visible slice. Reads that scope's persisted sort first, so the
+   * sort control never lies about what the query did — one extra round trip, and
+   * the alternative (render a guess, then correct it) flickers.
+   */
+  async setScope(scope: ManifestScope): Promise<void> {
+    let sort: Sort;
+    try {
+      sort = await invoke<Sort>("fetch_sort", { scope });
+    } catch (e) {
+      console.error("Failed to read persisted sort; keeping the current one:", e);
+      // Read AFTER the await on purpose: a synchronous `this.sort` read here would
+      // become a dependency of any $effect that calls setScope, and load() writes
+      // `sort` — that pair is an effect loop. Post-await reads aren't tracked.
+      sort = this.sort;
+    }
+    await this.load(scope, sort);
+  }
+
+  /** Change the sort for the CURRENT scope, persist it, and reload. */
+  async setSort(sort: Sort): Promise<void> {
+    const scope = this.scope;
+    try {
+      await invoke("set_sort", { scope, sort });
+    } catch (e) {
+      // Non-fatal: apply it for this session even if persistence failed.
+      console.error("Failed to persist sort:", e);
+    }
+    await this.load(scope, sort);
   }
 
   /** Refresh the folder tree for the active library. Non-fatal on failure. */
@@ -184,9 +271,9 @@ class AssetLibrary {
   async deleteFolder(id: string): Promise<void> {
     await invoke("delete_folder", { id });
     await this.loadFolders();
-    const active = this.manifestFilter;
+    const active = this.scope;
     if (active.kind === "folder" && !this.folders.some((f) => f.id === active.id)) {
-      await this.setFilter({ kind: "all" });
+      await this.setScope({ kind: "all" });
     }
   }
 
@@ -198,7 +285,7 @@ class AssetLibrary {
   /** Add assets to a folder; reload the manifest if the change affects the view. */
   async addAssetsToFolder(folderId: string, assetIds: string[]): Promise<void> {
     await invoke("add_assets_to_folder", { folderId, assetIds });
-    const active = this.manifestFilter;
+    const active = this.scope;
     if (active.kind === "uncategorized" || (active.kind === "folder" && active.id === folderId)) {
       await this.reload();
     }
@@ -206,7 +293,7 @@ class AssetLibrary {
 
   async removeAssetsFromFolder(folderId: string, assetIds: string[]): Promise<void> {
     await invoke("remove_assets_from_folder", { folderId, assetIds });
-    const active = this.manifestFilter;
+    const active = this.scope;
     if (active.kind === "folder" && active.id === folderId) {
       await this.reload();
     }
@@ -252,7 +339,9 @@ class AssetLibrary {
     const MAX = AssetLibrary.#THUMB_CONCURRENCY;
     const SIZE = AssetLibrary.#THUMB_BATCH;
     while (this.#thumbInFlight < MAX && this.#thumbQueue.length > 0) {
-      const token = this.#loadToken;
+      // Guarded by the LIBRARY token: a sort change reorders the same assets, so
+      // generation in flight is still wanted and must keep draining.
+      const token = this.#libraryToken;
       const batch = this.#thumbQueue.splice(0, SIZE);
       batch.forEach((id) => this.#thumbRequested.add(id));
       this.#thumbInFlight++;
@@ -265,7 +354,7 @@ class AssetLibrary {
           batch.forEach((id) => this.#thumbRequested.delete(id));
           this.#thumbInFlight--;
           // Keep draining, unless a library switch superseded this run.
-          if (token === this.#loadToken) this.#pumpThumbnails();
+          if (token === this.#libraryToken) this.#pumpThumbnails();
         });
     }
   }
@@ -306,7 +395,8 @@ class AssetLibrary {
 
   /** Hydrate heavy rows for the given ids (visible window + overscan). */
     async ensure(ids: string[]): Promise<void> {
-      const token = this.#loadToken;
+      // Library token, not load token: heavy rows survive a scope/sort change.
+      const token = this.#libraryToken;
       const missing = ids.filter((id) => !this.heavy.has(id) && !this.#pending.has(id));
       if (missing.length) {
         missing.forEach((id) => this.#pending.add(id));
@@ -314,7 +404,7 @@ class AssetLibrary {
           const rows = await invoke<AssetMetadata[]>("fetch_assets_by_ids", { ids: missing });
           // A library switch may have superseded this request; dropping the stale
           // rows avoids polluting the new library's cache (T1.2).
-          if (token !== this.#loadToken) return;
+          if (token !== this.#libraryToken) return;
           for (const row of rows) this.heavy.set(row.id, row);
         } catch (e) {
           console.error("Asset hydration failed:", e);
@@ -322,7 +412,7 @@ class AssetLibrary {
           missing.forEach((id) => this.#pending.delete(id));
         }
       }
-      if (token === this.#loadToken) this.#evict(ids);
+      if (token === this.#libraryToken) this.#evict(ids);
     }
 
     #evict(keep: string[]): void {

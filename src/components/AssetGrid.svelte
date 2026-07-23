@@ -1,6 +1,9 @@
 <script lang="ts">
+    import { untrack } from "svelte";
     import { createVirtualizer } from "@tanstack/svelte-virtual";
-    import AssetCard from "./AssetCard.svelte";    import {get} from "svelte/store";
+    import AssetCard from "./AssetCard.svelte";
+    import SortControl from "./SortControl.svelte";
+    import {get} from "svelte/store";
     import { libraryManager, settings } from "../routes/settings.svelte";
     import { assetLibrary, type AssetLightRow } from "$lib/assets.svelte";
 
@@ -27,14 +30,23 @@
 
 
     $effect(() => {
-      if (libraryManager.state.activeLibrary) {
-        // Reset to the full view + refresh the folder tree on library change (a
-        // stale folder filter from a previous library would show nothing).
+      if (!libraryManager.state.activeLibrary) return;
+      // The active library is the ONLY dependency here. `untrack` is load-bearing:
+      // these calls both read and write assetLibrary state (setScope reads the
+      // current sort, then load() writes it), so tracking them would invalidate
+      // this effect from inside its own body and re-run it forever — which showed
+      // up as the grid flickering between "Loading assets..." and "No assets yet"
+      // while every manifest load cancelled the one before it.
+      untrack(() => {
+        // New library: drop every cached row (asset ids are library-scoped, so
+        // carrying them over would mix two libraries), reset to the full view, and
+        // refresh the folder tree — a stale folder scope would show nothing.
         // Thumbnails are generated on-view (below) as items scroll into the
         // window — no eager pass over the whole library.
-        assetLibrary.setFilter({ kind: "all" });
+        assetLibrary.clearCaches();
+        assetLibrary.setScope({ kind: "all" });
         assetLibrary.loadFolders();
-      }
+      });
     })
 
     $effect(() => {
@@ -154,6 +166,7 @@
     <div class="flex items-center justify-between px-4 py-2 border-b border-neutral-800 bg-white shrink-0">
         <span class="text-xs text-neutral-400">{assets.length} assets</span>
         <div class="flex items-center gap-3">
+            <SortControl />
             <button
                 type="button"
                 onclick={() =>

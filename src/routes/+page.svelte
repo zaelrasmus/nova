@@ -148,7 +148,7 @@
             // and refresh the folder tree so newly created folders appear; the
             // reload re-runs the grid's on-view effect, generating thumbnails for
             // the visible window while the rest follow as the user scrolls.
-            await assetLibrary.setFilter({ kind: "all" });
+            await assetLibrary.setScope({ kind: "all" });
             await assetLibrary.loadFolders();
             return result; // pass through so toast.promise still receives it
         });

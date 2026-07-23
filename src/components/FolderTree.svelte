@@ -1,9 +1,9 @@
 <script lang="ts">
-    import { assetLibrary, type Folder, type ManifestFilter } from "$lib/assets.svelte";
+    import { assetLibrary, type Folder, type ManifestScope } from "$lib/assets.svelte";
     import { toast } from "svelte-sonner";
 
     const folders = $derived(assetLibrary.folders);
-    const active = $derived(assetLibrary.manifestFilter);
+    const active = $derived(assetLibrary.scope);
 
     // parent_id -> children[], preserving the backend's position order.
     const childrenByParent = $derived.by(() => {
@@ -16,7 +16,7 @@
         return map;
     });
 
-    const select = (filter: ManifestFilter) => assetLibrary.setFilter(filter);
+    const select = (scope: ManifestScope) => assetLibrary.setScope(scope);
     const isFolder = (id: string) => active.kind === "folder" && active.id === id;
 
     async function newFolder(parentId: string | null) {
