@@ -95,6 +95,10 @@ pub struct ThumbOutput {
     pub thumb_config: String,
     /// False when the source was already small enough. Its unnecesary to generate a thumbnail in this case.
     pub wrote_file: bool,
+    /// Dominant colors, extracted from the same decode. Riding along here is the
+    /// whole reason color analysis is affordable: a separate pass would have to
+    /// decode every image again, and decode is the expensive part.
+    pub palette: Vec<crate::color::PaletteEntry>,
 }
 
 /// Decode `src` once, write a WebP thumbnail to `dest`, and return the
@@ -120,6 +124,7 @@ pub fn generate(src: &Path, dest: &Path, config: ThumbConfig) -> Result<ThumbOut
             thumb_hash: thumb_hash_base64(&img),
             thumb_config: config.config_tag(),
             wrote_file: false,
+            palette: crate::color::extract_palette(&img),
         });
     }
 
@@ -179,6 +184,9 @@ pub fn generate(src: &Path, dest: &Path, config: ThumbConfig) -> Result<ThumbOut
         thumb_hash,
         thumb_config: config.config_tag(),
         wrote_file: true,
+        // Sampled from the downscaled thumb, not the original — ~100x fewer pixels
+        // for a palette that's indistinguishable at this granularity.
+        palette: crate::color::extract_palette(&thumb),
     })
 }
 

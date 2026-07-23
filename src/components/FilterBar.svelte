@@ -16,6 +16,7 @@
         type DateField,
         type SizeUnit,
     } from "$lib/assets.svelte";
+    import ColorFilterControl from "./ColorFilterControl.svelte";
 
     const filters = $derived(assetLibrary.filters);
     const active = $derived(assetLibrary.hasFilters);
@@ -277,6 +278,8 @@
             {/each}
         </select>
     </div>
+
+    <ColorFilterControl {fieldClass} {labelClass} />
 
     {#if active}
         <button

@@ -98,12 +98,27 @@ export interface SizeRange {
   max: number | null;
 }
 
+/**
+ * Match assets containing a color close to (r, g, b). Tests every palette entry,
+ * not just the most dominant — see ColorFilter in assets.rs.
+ */
+export interface ColorFilter {
+  r: number;
+  g: number;
+  b: number;
+  /** Max perceptual distance (ΔE) still counted a match. Inverse of "Accuracy". */
+  tolerance: number;
+  /** Min share of the image (0.0–1.0) the matching color must cover. */
+  min_coverage: number;
+}
+
 /** Ephemeral narrowing of the current scope. Dimensions AND together. */
 export interface FilterSet {
   asset_types: AssetTypeFilter[];
   shape: Shape | null;
   date: DateFilter | null;
   size: SizeRange | null;
+  color: ColorFilter | null;
 }
 
 /** A fresh empty set — a function, so no two call sites share one object. */
@@ -112,7 +127,64 @@ export const emptyFilters = (): FilterSet => ({
   shape: null,
   date: null,
   size: null,
+  color: null,
 });
+
+/**
+ * Accuracy slider (0–100) -> ΔE tolerance. Inverted: more accuracy means less
+ * tolerance. The range is grounded in real colorimetry — ~2 ΔE is a
+ * just-noticeable difference, ~10 a clearly different shade, ~40 a different
+ * color family — so neither end of the slider is useless.
+ */
+export const TOLERANCE_MIN = 2;
+export const TOLERANCE_MAX = 40;
+export const accuracyToTolerance = (accuracy: number): number =>
+  TOLERANCE_MAX - ((TOLERANCE_MAX - TOLERANCE_MIN) * accuracy) / 100;
+export const toleranceToAccuracy = (tolerance: number): number =>
+  ((TOLERANCE_MAX - tolerance) * 100) / (TOLERANCE_MAX - TOLERANCE_MIN);
+
+/**
+ * Fixed minimum coverage: a color must cover at least this share of an image to
+ * count, so a handful of stray pixels doesn't make a photo "red".
+ *
+ * Exposed as a full filter dimension in the backend but pinned here, because one
+ * knob (Accuracy) is what makes this feature approachable. Uncomment the coverage
+ * control in FilterBar to drive it by hand while testing.
+ */
+export const DEFAULT_MIN_COVERAGE = 0.05;
+
+/** Preset swatches, mirroring the picker's neutral + chromatic rows. */
+export const COLOR_PRESETS = [
+  "#000000",
+  "#FFFFFF",
+  "#9E9E9E",
+  "#8D6E63",
+  "#F48FB1",
+  "#E53935",
+  "#FB8C00",
+  "#FDD835",
+  "#43A047",
+  "#00ACC1",
+  "#1E88E5",
+  "#8E24AA",
+];
+
+/** "#RRGGBB" -> channel triple. Returns null for anything malformed. */
+export function hexToRgb(hex: string): { r: number; g: number; b: number } | null {
+  const m = /^#?([0-9a-f]{6})$/i.exec(hex.trim());
+  if (!m) return null;
+  const n = parseInt(m[1], 16);
+  return { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255 };
+}
+
+export const rgbToHex = (c: { r: number; g: number; b: number }): string =>
+  "#" + [c.r, c.g, c.b].map((v) => v.toString(16).padStart(2, "0")).join("");
+
+/** How much of the library has a color palette. */
+export interface ColorCoverage {
+  analyzed: number;
+  total: number;
+}
 
 export const DATE_FIELD_LABELS: { value: DateField; label: string }[] = [
   { value: "imported_date", label: "Date added" },
@@ -308,6 +380,12 @@ class AssetLibrary {
   folders = $state<Folder[]>([]);
   /** Named filter combinations for this library, refreshed on library switch. */
   savedFilters = $state<SavedFilter[]>([]);
+  /**
+   * How many images have a color palette; null until first read. Surfaced in the
+   * UI because a color filter cannot match an un-analyzed asset, and a filter
+   * that quietly under-reports is worse than one that admits what it can't see.
+   */
+  colorCoverage = $state<ColorCoverage | null>(null);
 
   /**
    * Cache-buster for regenerated thumbnails. A rebuild reuses the same
@@ -451,7 +529,13 @@ class AssetLibrary {
   /** Whether any filter dimension is active — drives the "Clear" affordance. */
   get hasFilters(): boolean {
     const f = this.filters;
-    return f.asset_types.length > 0 || f.shape !== null || f.date !== null || f.size !== null;
+    return (
+      f.asset_types.length > 0 ||
+      f.shape !== null ||
+      f.date !== null ||
+      f.size !== null ||
+      f.color !== null
+    );
   }
 
   /** Replace the whole filter set and reload. Filters are never persisted. */
@@ -491,6 +575,31 @@ class AssetLibrary {
   setSizeRange(size: SizeRange | null): Promise<void> {
     const normalised = size && size.min === null && size.max === null ? null : size;
     return this.setFilters({ ...this.filters, size: normalised });
+  }
+
+  /** Constrain by dominant color; `null` clears the dimension. */
+  setColorFilter(color: ColorFilter | null): Promise<void> {
+    return this.setFilters({ ...this.filters, color });
+  }
+
+  /**
+   * Refresh how many images have been color-analyzed. Cheap (two COUNTs), and
+   * re-read after an analysis run so the notice reflects reality.
+   */
+  async loadColorCoverage(): Promise<void> {
+    try {
+      this.colorCoverage = await invoke<ColorCoverage>("color_coverage");
+    } catch (e) {
+      console.error("Failed to read color coverage:", e);
+      this.colorCoverage = null;
+    }
+  }
+
+  /** Backfill palettes for un-analyzed images. Resolves with the count done. */
+  async analyzeColors(): Promise<number> {
+    const count = await invoke<number>("analyze_colors");
+    await this.loadColorCoverage();
+    return count;
   }
 
   // ── Saved filters ──────────────────────────────────────────────────────────

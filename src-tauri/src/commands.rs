@@ -257,6 +257,48 @@ pub async fn set_sort(
         .map_err(AppError::from)
 }
 
+// ── Color analysis ────────────────────────────────────────────────────────────
+
+/// How many images have a color palette. Drives the "color data: N of M" notice,
+/// so a color filter never quietly under-reports on an unanalyzed library.
+#[instrument(skip_all)]
+#[tauri::command]
+pub async fn color_coverage(
+    state: tauri::State<'_, DbState>,
+) -> Result<assets::ColorCoverage, AppError> {
+    let pool = state.acquire_pool().await?;
+    assets::color_coverage(&pool)
+        .await
+        .inspect_err(|e| tracing::error!(error = %e, "color_coverage failed"))
+        .map_err(AppError::from)
+}
+
+/// Backfill palettes for images that don't have one. Shares the thumbnail
+/// generation lock: both passes decode images, and running them together would
+/// just contend for the same cores.
+#[instrument(skip_all)]
+#[tauri::command]
+pub async fn analyze_colors(
+    window: tauri::Window,
+    state: tauri::State<'_, DbState>,
+) -> Result<usize, AppError> {
+    let handle = state.acquire().await?;
+
+    let _guard = match state.thumb_gen.try_lock() {
+        Ok(g) => g,
+        Err(_) => {
+            info!("Generation already running; ignoring analyze request");
+            return Ok(0);
+        }
+    };
+
+    let reporter = Arc::new(ThumbProgressEmitter { window });
+    assets::analyze_colors(&handle.pool, &handle.root, reporter)
+        .await
+        .inspect_err(|e| tracing::error!(error = %e, "analyze_colors failed"))
+        .map_err(AppError::from)
+}
+
 // ── Saved filters ─────────────────────────────────────────────────────────────
 
 #[instrument(skip_all)]

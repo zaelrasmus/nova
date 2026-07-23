@@ -173,6 +173,30 @@ pub struct FilterSet {
     /// Byte-size range; `None` = no size filtering.
     #[serde(default)]
     pub size: Option<SizeRange>,
+    /// Dominant-color proximity; `None` = no color filtering.
+    #[serde(default)]
+    pub color: Option<ColorFilter>,
+}
+
+/// Match assets containing a color close to `(r, g, b)`.
+///
+/// Tests every palette entry, not just the most dominant one — that's the point
+/// of storing a palette (see `asset_colors`).
+#[derive(Serialize, Deserialize, Debug, Clone, Copy)]
+pub struct ColorFilter {
+    /// Target color as sRGB 0–255, straight from the picker or hex field.
+    /// Converted to LAB here so the color science lives in exactly one place.
+    pub r: u8,
+    pub g: u8,
+    pub b: u8,
+    /// Largest perceptual distance (ΔE) still counted as a match. Roughly: 2 is
+    /// a just-noticeable difference, 10 a clearly different shade, 25+ a
+    /// different color family. The UI's "Accuracy" slider is the INVERSE of this
+    /// — more accuracy means less tolerance.
+    pub tolerance: f64,
+    /// Smallest share of the image (0.0–1.0) the matching entry must cover, so a
+    /// stray handful of pixels doesn't make an image "red".
+    pub min_coverage: f64,
 }
 
 /// Which date column a `DateFilter` applies to.
@@ -511,6 +535,38 @@ fn build_manifest_query<'a>(
             conjunct(&mut qb, &mut written);
             qb.push("a.file_size <= ").push_bind(max);
         }
+    }
+
+    if let Some(c) = filters.color {
+        conjunct(&mut qb, &mut written);
+        let target = crate::color::srgb_to_lab(c.r, c.g, c.b);
+        // Squared distance vs squared tolerance: no sqrt, so the whole predicate
+        // is multiply-and-add and needs no SQLite math extension. The lightness
+        // weight is computed from the TARGET's chroma (see color::lightness_weight)
+        // so "red" matches dark and pale reds, while a grey search still
+        // distinguishes grey from black and white.
+        let l_weight = crate::color::lightness_weight(target) as f64;
+        let tol_sq = c.tolerance.max(0.0).powi(2);
+
+        qb.push("EXISTS (SELECT 1 FROM asset_colors c WHERE c.asset_id = a.id AND c.ratio >= ")
+            .push_bind(c.min_coverage)
+            .push(" AND ")
+            .push_bind(l_weight)
+            .push(" * (c.l - ")
+            .push_bind(target.l as f64)
+            .push(") * (c.l - ")
+            .push_bind(target.l as f64)
+            .push(") + (c.a - ")
+            .push_bind(target.a as f64)
+            .push(") * (c.a - ")
+            .push_bind(target.a as f64)
+            .push(") + (c.b - ")
+            .push_bind(target.b as f64)
+            .push(") * (c.b - ")
+            .push_bind(target.b as f64)
+            .push(") <= ")
+            .push_bind(tol_sq)
+            .push(")");
     }
 
     // 3. Sort. The `a.id` tie-break runs in the SAME direction as the sort column
@@ -1427,6 +1483,7 @@ struct ThumbUpdate {
     thumb_hash: String,
     thumb_config: String,
     wrote_file: bool,
+    palette: Vec<crate::color::PaletteEntry>,
 }
 
 /// A completed thumbnail, ready for the UI to patch into its row in place: the
@@ -1573,6 +1630,7 @@ async fn run_generation(
                             thumb_hash: t.thumb_hash,
                             thumb_config: t.thumb_config,
                             wrote_file: t.wrote_file,
+                            palette: t.palette,
                         }),
                         Err(e) => {
                             warn!(id = %p.id, error = %e, "Thumbnail generation failed; leaving row NULL");
@@ -1623,6 +1681,153 @@ async fn run_generation(
     Ok(total)
 }
 
+// ── Color analysis ────────────────────────────────────────────────────────────
+
+/// How much of the library has a color palette. An asset with no `asset_colors`
+/// rows simply hasn't been analyzed, and a color filter cannot match it — so the
+/// UI reports this instead of silently under-reporting results.
+#[derive(Serialize, Debug, Clone)]
+pub struct ColorCoverage {
+    pub analyzed: i64,
+    pub total: i64,
+}
+
+#[instrument(skip(pool))]
+pub async fn color_coverage(pool: &SqlitePool) -> Result<ColorCoverage> {
+    let total: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM assets WHERE asset_type = 'image'")
+            .fetch_one(pool)
+            .await
+            .context("Failed to count images")?;
+    let analyzed: i64 = sqlx::query_scalar(
+        "SELECT COUNT(DISTINCT asset_id) FROM asset_colors c \
+         JOIN assets a ON a.id = c.asset_id WHERE a.asset_type = 'image'",
+    )
+    .fetch_one(pool)
+    .await
+    .context("Failed to count analyzed images")?;
+    Ok(ColorCoverage { analyzed, total })
+}
+
+/// Overwrite one asset's palette inside an existing transaction.
+async fn replace_palette(
+    tx: &mut sqlx::Transaction<'_, Sqlite>,
+    asset_id: &str,
+    palette: &[crate::color::PaletteEntry],
+) -> Result<()> {
+    sqlx::query("DELETE FROM asset_colors WHERE asset_id = ?")
+        .bind(asset_id)
+        .execute(&mut **tx)
+        .await
+        .context("Failed to clear existing palette")?;
+
+    for entry in palette {
+        sqlx::query("INSERT INTO asset_colors (asset_id, l, a, b, ratio) VALUES (?, ?, ?, ?, ?)")
+            .bind(asset_id)
+            .bind(entry.lab.l as f64)
+            .bind(entry.lab.a as f64)
+            .bind(entry.lab.b as f64)
+            .bind(entry.ratio as f64)
+            .execute(&mut **tx)
+            .await
+            .context("Failed to insert palette entry")?;
+    }
+    Ok(())
+}
+
+#[derive(FromRow, Clone)]
+struct PendingColor {
+    id: String,
+    extension: String,
+}
+
+/// Backfill palettes for images that don't have one yet.
+///
+/// Reads the generated THUMBNAIL where one exists — a ~320px WebP decodes in a
+/// fraction of the time the original would, which is what makes analyzing an
+/// existing library practical. Falls back to the original for assets whose source
+/// was small enough that no thumbnail file was written.
+#[instrument(skip(pool, root, progress))]
+pub async fn analyze_colors(
+    pool: &SqlitePool,
+    root: &Path,
+    progress: Arc<dyn ThumbProgress>,
+) -> Result<usize> {
+    let pending: Vec<PendingColor> = sqlx::query_as::<_, PendingColor>(
+        "SELECT id, extension FROM assets \
+         WHERE asset_type = 'image' AND id NOT IN (SELECT asset_id FROM asset_colors) \
+         ORDER BY imported_date DESC, id DESC",
+    )
+    .fetch_all(pool)
+    .await
+    .context("Failed to query images pending color analysis")?;
+
+    let total = pending.len();
+    if total == 0 {
+        return Ok(0);
+    }
+
+    let assets_dir = root.join("assets");
+    let thumbs_dir = root.join("thumbnails");
+    info!(total, "Color analysis started");
+    let start = std::time::Instant::now();
+
+    const CHUNK: usize = 64;
+    let mut done = 0usize;
+
+    for chunk in pending.chunks(CHUNK) {
+        let chunk = chunk.to_vec();
+        let chunk_len = chunk.len();
+        let job_assets = assets_dir.clone();
+        let job_thumbs = thumbs_dir.clone();
+
+        let results: Vec<(String, Vec<crate::color::PaletteEntry>)> =
+            tokio::task::spawn_blocking(move || {
+                chunk
+                    .into_par_iter()
+                    .filter_map(|p| {
+                        let thumb = job_thumbs.join(format!("{}.webp", p.id));
+                        let src = if thumb.exists() {
+                            thumb
+                        } else {
+                            job_assets.join(format!("{}.{}", p.id, p.extension))
+                        };
+                        match image::open(&src) {
+                            Ok(img) => Some((p.id, crate::color::extract_palette(&img))),
+                            Err(e) => {
+                                warn!(id = %p.id, error = %e, "Color analysis failed; leaving unanalyzed");
+                                None
+                            }
+                        }
+                    })
+                    .collect()
+            })
+            .await
+            .context("Color analysis task panicked")?;
+
+        let mut tx = pool
+            .begin()
+            .await
+            .context("Failed to begin color analysis transaction")?;
+        for (id, palette) in &results {
+            replace_palette(&mut tx, id, palette).await?;
+        }
+        tx.commit()
+            .await
+            .context("Failed to commit color analysis")?;
+
+        done += chunk_len;
+        progress.report(done, total, &[]);
+    }
+
+    info!(
+        total,
+        elapsed_ms = start.elapsed().as_millis(),
+        "Color analysis complete"
+    );
+    Ok(total)
+}
+
 #[instrument(skip(pool, updates), fields(count = updates.len()))]
 async fn update_thumbnails(pool: &SqlitePool, updates: &[ThumbUpdate]) -> Result<()> {
     if updates.is_empty() {
@@ -1641,6 +1846,10 @@ async fn update_thumbnails(pool: &SqlitePool, updates: &[ThumbUpdate]) -> Result
             .execute(&mut *tx)
             .await
             .context("Failed to update thumbnail row")?;
+
+        // Replace rather than append: a rebuild re-extracts, and duplicated
+        // palette rows would skew every coverage ratio.
+        replace_palette(&mut tx, &u.id, &u.palette).await?;
     }
 
     tx.commit()

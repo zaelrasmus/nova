@@ -88,6 +88,31 @@ CREATE TABLE IF NOT EXISTS saved_filters (
 
 CREATE INDEX IF NOT EXISTS idx_saved_filters_order ON saved_filters (position, name);
 
+-- Dominant colors per asset, in CIELAB, with the share of the image each covers.
+--
+-- A palette rather than one dominant color: an image that is 60% sky and 30%
+-- sunset has a single dominant color (blue) and would be unfindable by searching
+-- orange, even though a third of it is orange. Matching tests EVERY entry.
+--
+-- Populated during thumbnail generation (the pixels are already decoded there,
+-- so it's nearly free) and backfilled by the "Analyze colors" pass. An asset with
+-- no rows here simply hasn't been analyzed yet — the UI reports that count rather
+-- than letting a color filter quietly under-report.
+CREATE TABLE IF NOT EXISTS asset_colors (
+    asset_id TEXT NOT NULL,
+    l REAL NOT NULL,
+    a REAL NOT NULL,
+    b REAL NOT NULL,
+    -- Share of the sampled pixels, 0.0-1.0.
+    ratio REAL NOT NULL,
+
+    FOREIGN KEY (asset_id) REFERENCES assets(id) ON DELETE CASCADE
+);
+
+-- Distance matching is an expression over three columns, so no index can serve
+-- it; this one exists for the asset_id lookup inside the EXISTS subquery.
+CREATE INDEX IF NOT EXISTS idx_asset_colors ON asset_colors (asset_id);
+
 -- Membership indexes
 CREATE INDEX IF NOT EXISTS idx_folder_contents ON assets_folders(folder_id, added_at);
 CREATE INDEX IF NOT EXISTS idx_folders_position ON assets_folders (folder_id, position); -- Serve a folder's assets already ordered by manual position

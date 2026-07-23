@@ -1,4 +1,5 @@
 mod assets;
+mod color;
 mod commands;
 mod db;
 mod error;
@@ -44,6 +45,8 @@ pub fn run() {
             commands::rebuild_thumbnails,
             commands::fetch_sort,
             commands::set_sort,
+            commands::color_coverage,
+            commands::analyze_colors,
             commands::fetch_saved_filters,
             commands::create_saved_filter,
             commands::rename_saved_filter,
