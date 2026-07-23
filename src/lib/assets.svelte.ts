@@ -59,6 +59,38 @@ export const ORDER_BY_LABELS: { value: OrderBy; label: string }[] = [
   { value: "manual", label: "Manual" },
 ];
 
+/**
+ * Types offered as a filter. Deliberately NOT the full AssetType union: import
+ * drops `unknown` rows entirely, so offering it would be a filter that can only
+ * ever return nothing.
+ */
+export type AssetTypeFilter = "image" | "video" | "audio";
+
+/** Note: `landscape` is a superset of `ultrawide` — see Orientation in assets.rs. */
+export type Orientation = "landscape" | "portrait" | "square" | "ultrawide";
+
+/** Ephemeral narrowing of the current scope. Dimensions AND together. */
+export interface FilterSet {
+  asset_types: AssetTypeFilter[];
+  orientation: Orientation | null;
+}
+
+/** A fresh empty set — a function, so no two call sites share one object. */
+export const emptyFilters = (): FilterSet => ({ asset_types: [], orientation: null });
+
+export const ASSET_TYPE_LABELS: { value: AssetTypeFilter; label: string }[] = [
+  { value: "image", label: "Images" },
+  { value: "video", label: "Videos" },
+  { value: "audio", label: "Audio" },
+];
+
+export const ORIENTATION_LABELS: { value: Orientation; label: string }[] = [
+  { value: "landscape", label: "Landscape" },
+  { value: "portrait", label: "Portrait" },
+  { value: "square", label: "Square" },
+  { value: "ultrawide", label: "Ultrawide" },
+];
+
 export interface Folder {
   id: string;
   name: string;
@@ -97,6 +129,13 @@ class AssetLibrary {
   scope = $state<ManifestScope>({ kind: "all" });
   /** The sort the CURRENT manifest was built with — always what the query did. */
   sort = $state<Sort>({ ...DEFAULT_SORT });
+  /**
+   * Ephemeral narrowing of the current scope. Never persisted (see FilterSet in
+   * assets.rs), but DOES survive switching folders within a session — filtering
+   * to images and then browsing folders is a normal workflow. That persistence
+   * is exactly why the UI must keep an always-visible clear affordance.
+   */
+  filters = $state<FilterSet>(emptyFilters());
   /** Flat folder list for the tree UI, refreshed on library switch + import. */
   folders = $state<Folder[]>([]);
 
@@ -159,9 +198,14 @@ class AssetLibrary {
    * cached row stays valid. Only a library switch invalidates them —
    * `clearCaches()`.
    */
-  async load(scope: ManifestScope = this.scope, sort: Sort = this.sort): Promise<void> {
+  async load(
+    scope: ManifestScope = this.scope,
+    sort: Sort = this.sort,
+    filters: FilterSet = this.filters,
+  ): Promise<void> {
     this.scope = scope;
     this.sort = sort;
+    this.filters = filters;
     const token = ++this.#loadToken;
     this.isLoading = true;
     this.error = null;
@@ -184,7 +228,7 @@ class AssetLibrary {
         // copy `slice()` did per chunk (which was O(n²) over a large library).
         this.manifest.push(...chunk);
       };
-      await invoke("stream_manifest", { query: { scope, sort }, onChunk: channel });
+      await invoke("stream_manifest", { query: { scope, filters, sort }, onChunk: channel });
     } catch (e) {
       if (token === this.#loadToken) {
         this.error = typeof e === "string" ? e : "Failed to load assets.";
@@ -209,6 +253,10 @@ class AssetLibrary {
     this.#pending.clear();
     this.#thumbRequested.clear();
     this.#thumbQueue = [];
+    // Session view state rather than a cache, but it resets with the library for
+    // the same reason filters aren't persisted: landing in a fresh library that
+    // silently shows a subset reads as "my import didn't work".
+    this.filters = emptyFilters();
   }
 
   /**
@@ -228,6 +276,33 @@ class AssetLibrary {
       sort = this.sort;
     }
     await this.load(scope, sort);
+  }
+
+  /** Whether any filter dimension is active — drives the "Clear" affordance. */
+  get hasFilters(): boolean {
+    return this.filters.asset_types.length > 0 || this.filters.orientation !== null;
+  }
+
+  /** Replace the whole filter set and reload. Filters are never persisted. */
+  setFilters(filters: FilterSet): Promise<void> {
+    return this.load(this.scope, this.sort, filters);
+  }
+
+  clearFilters(): Promise<void> {
+    return this.setFilters(emptyFilters());
+  }
+
+  /** Add/remove one type. Types within the dimension OR together. */
+  toggleAssetType(type: AssetTypeFilter): Promise<void> {
+    const current = this.filters.asset_types;
+    const asset_types = current.includes(type)
+      ? current.filter((t) => t !== type)
+      : [...current, type];
+    return this.setFilters({ ...this.filters, asset_types });
+  }
+
+  setOrientation(orientation: Orientation | null): Promise<void> {
+    return this.setFilters({ ...this.filters, orientation });
   }
 
   /** Change the sort for the CURRENT scope, persist it, and reload. */

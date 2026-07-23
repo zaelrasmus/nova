@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use rayon::prelude::{IntoParallelIterator, ParallelIterator};
 use serde::{Deserialize, Serialize};
-use sqlx::{sqlite::SqlitePool, FromRow, QueryBuilder, Type};
+use sqlx::{sqlite::SqlitePool, FromRow, QueryBuilder, Sqlite, Type};
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
@@ -32,8 +32,7 @@ pub enum AssetType {
 /// Sent from the frontend as `{ "kind": "folder", "id": … }`.
 ///
 /// A scope is a *place*, not a filter: it decides which rows exist, and it owns
-/// the persisted sort for that place. Phase 2's real filters (type, orientation,
-/// ranges) become a third field on `ManifestQuery` — they narrow a scope, they
+/// the persisted sort for that place. Filters (`FilterSet`) narrow a scope; they
 /// never replace one.
 #[derive(Deserialize, Debug, Clone)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -50,12 +49,65 @@ pub struct Sort {
     pub is_ascending: bool,
 }
 
+/// Shape of an asset, derived from its stored dimensions. Note that `Landscape`
+/// is a SUPERSET of `Ultrawide` — an ultrawide image is also landscape. That
+/// overlap is deliberate and documented rather than papered over, so the counts
+/// behave the way the geometry says they should.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Orientation {
+    Landscape,
+    Portrait,
+    Square,
+    Ultrawide,
+}
+
+impl Orientation {
+    /// The comparison this orientation makes. Callers must AND this with the
+    /// non-zero dimension guard (see `DIMENSIONED`).
+    ///
+    /// Ratios use integer multiplication, not float division: no divide-by-zero
+    /// and no float equality anywhere in the predicate.
+    fn sql_predicate(self) -> &'static str {
+        match self {
+            Orientation::Landscape => "a.width > a.height",
+            Orientation::Portrait => "a.height > a.width",
+            Orientation::Square => "a.width = a.height",
+            Orientation::Ultrawide => "a.width >= a.height * 2",
+        }
+    }
+}
+
+/// Guard that must precede every orientation predicate. `width`/`height` default
+/// to 0, so audio (and anything whose dimensions failed to extract) is 0×0 —
+/// without this, `width = height` would report every audio file as "square".
+/// Excluding them is also the correct answer: a sound file has no orientation.
+const DIMENSIONED: &str = "a.width > 0 AND a.height > 0";
+
+/// Ephemeral, multi-dimensional narrowing of a scope. Deliberately NOT persisted:
+/// a filter that survives a restart is the classic "my library is empty, the app
+/// is broken" bug. Saved filter sets are an explicit, named feature (Phase 4).
+///
+/// Every dimension is optional and they AND together. An empty `FilterSet` adds
+/// no SQL at all, so the unfiltered path stays exactly as fast as before.
+#[derive(Deserialize, Debug, Clone, Default)]
+pub struct FilterSet {
+    /// Types to include. Empty = no constraint. Multiple types OR together.
+    #[serde(default)]
+    pub asset_types: Vec<AssetType>,
+    /// Shape constraint; `None` = any.
+    #[serde(default)]
+    pub orientation: Option<Orientation>,
+}
+
 /// Everything the manifest needs, as ONE object, compiled into ONE statement.
-/// Keeping scope and sort (and later, filters) together is what prevents a SQL
-/// pass and a JS pass that can disagree about what the view contains.
+/// Keeping scope, filters and sort together is what prevents a SQL pass and a JS
+/// pass that can disagree about what the view contains.
 #[derive(Deserialize, Debug, Clone)]
 pub struct ManifestQuery {
     pub scope: Scope,
+    #[serde(default)]
+    pub filters: FilterSet,
     /// Explicit override; `None` falls back to the scope's persisted sort.
     #[serde(default)]
     pub sort: Option<Sort>,
@@ -229,32 +281,77 @@ fn detect_asset_type(path: &Path) -> AssetType {
     AssetType::Unknown
 }
 
-/// Compose the manifest statement from scope + sort. Split out from execution so
-/// the shape stays readable, and so Phase 2 has one obvious place to append
-/// WHERE clauses.
-fn build_manifest_sql(scope: &Scope, sort: Sort) -> String {
+/// Open the next WHERE conjunct: emits ` WHERE ` for the first one and ` AND `
+/// for every one after. Each predicate block below stays independent and can be
+/// added, removed or reordered without touching its neighbours.
+fn conjunct(qb: &mut QueryBuilder<'_, Sqlite>, written: &mut usize) {
+    qb.push(if *written == 0 { " WHERE " } else { " AND " });
+    *written += 1;
+}
+
+/// Compose the manifest statement from scope + filters + sort. Split out from
+/// execution so the shape stays readable in one screen.
+///
+/// Only enum variants and booleans reach the SQL text; every user-supplied value
+/// (folder id, asset types) is a bound parameter.
+fn build_manifest_query<'a>(
+    scope: &'a Scope,
+    filters: &'a FilterSet,
+    sort: Sort,
+) -> QueryBuilder<'a, Sqlite> {
     let in_folder = matches!(scope, Scope::Folder { .. });
-    let dir = if sort.is_ascending { "ASC" } else { "DESC" };
 
-    let (from, predicate) = match scope {
-        Scope::All => ("FROM assets a", ""),
-        Scope::Folder { .. } => (
-            "FROM assets a JOIN assets_folders af ON af.asset_id = a.id",
-            "WHERE af.folder_id = ?",
-        ),
-        Scope::Uncategorized => (
-            "FROM assets a",
-            "WHERE a.id NOT IN (SELECT asset_id FROM assets_folders)",
-        ),
-    };
+    let mut qb = QueryBuilder::new(
+        "SELECT a.id, a.width, a.height, a.asset_type, a.thumb_hash, a.is_animated FROM assets a",
+    );
+    if in_folder {
+        qb.push(" JOIN assets_folders af ON af.asset_id = a.id");
+    }
 
-    // The `a.id` tie-break runs in the SAME direction as the sort column so the
-    // composite (col, id) indexes stay usable scanning either way.
-    format!(
-        "SELECT a.id, a.width, a.height, a.asset_type, a.thumb_hash, a.is_animated \
-         {from} {predicate} ORDER BY {expr} {dir}, a.id {dir}",
-        expr = sort.order_by.sql_expr(in_folder),
-    )
+    let mut written = 0usize;
+
+    // 1. Scope — which rows exist at all.
+    match scope {
+        Scope::All => {}
+        Scope::Folder { id } => {
+            conjunct(&mut qb, &mut written);
+            qb.push("af.folder_id = ").push_bind(id.as_str());
+        }
+        Scope::Uncategorized => {
+            conjunct(&mut qb, &mut written);
+            qb.push("a.id NOT IN (SELECT asset_id FROM assets_folders)");
+        }
+    }
+
+    // 2. Filters — narrowing within that scope. Dimensions AND together; values
+    //    within one dimension OR together.
+    if !filters.asset_types.is_empty() {
+        conjunct(&mut qb, &mut written);
+        qb.push("a.asset_type IN (");
+        let mut list = qb.separated(", ");
+        for t in &filters.asset_types {
+            list.push_bind(*t);
+        }
+        qb.push(")");
+    }
+
+    if let Some(orientation) = filters.orientation {
+        conjunct(&mut qb, &mut written);
+        qb.push(DIMENSIONED)
+            .push(" AND ")
+            .push(orientation.sql_predicate());
+    }
+
+    // 3. Sort. The `a.id` tie-break runs in the SAME direction as the sort column
+    //    so the composite (col, id) indexes stay usable scanning either way.
+    let dir = if sort.is_ascending { " ASC" } else { " DESC" };
+    qb.push(" ORDER BY ")
+        .push(sort.order_by.sql_expr(in_folder))
+        .push(dir)
+        .push(", a.id")
+        .push(dir);
+
+    qb
 }
 
 #[instrument(skip(pool))]
@@ -267,13 +364,9 @@ pub async fn fetch_manifest(
         None => resolve_sort(pool, &query.scope).await?,
     };
 
-    let sql = build_manifest_sql(&query.scope, sort);
-    let mut stmt = sqlx::query_as::<_, AssetLightRow>(&sql);
-    if let Scope::Folder { id } = &query.scope {
-        stmt = stmt.bind(id.as_str());
-    }
-
-    stmt.fetch_all(pool)
+    build_manifest_query(&query.scope, &query.filters, sort)
+        .build_query_as::<AssetLightRow>()
+        .fetch_all(pool)
         .await
         .context("Failed to fetch asset manifest")
 }

@@ -3,6 +3,7 @@
     import { createVirtualizer } from "@tanstack/svelte-virtual";
     import AssetCard from "./AssetCard.svelte";
     import SortControl from "./SortControl.svelte";
+    import FilterBar from "./FilterBar.svelte";
     import {get} from "svelte/store";
     import { libraryManager, settings } from "../routes/settings.svelte";
     import { assetLibrary, type AssetLightRow } from "$lib/assets.svelte";
@@ -164,7 +165,11 @@
 
 <div class="flex flex-col h-full">
     <div class="flex items-center justify-between px-4 py-2 border-b border-neutral-800 bg-white shrink-0">
-        <span class="text-xs text-neutral-400">{assets.length} assets</span>
+        <!-- Say "of N" when filtered, so a narrowed view never looks like a small
+             library. `manifest` is the filtered set, so N comes from the store. -->
+        <span class="text-xs text-neutral-400">
+            {assets.length} assets{assetLibrary.hasFilters ? " (filtered)" : ""}
+        </span>
         <div class="flex items-center gap-3">
             <SortControl />
             <button
@@ -190,10 +195,27 @@
         </div>
     </div>
 
+    <div class="shrink-0">
+        <FilterBar />
+    </div>
+
     {#if assetLibrary.isLoading && assets.length === 0}
             <div class="flex items-center justify-center h-32 text-sm text-neutral-500">Loading assets...</div>
         {:else if assetLibrary.error}
             <div class="flex items-center justify-center h-32 text-sm text-red-400">{assetLibrary.error}</div>
+        {:else if assets.length === 0 && assetLibrary.hasFilters}
+            <!-- Distinguish "narrowed to nothing" from "nothing imported" — the
+                 fix for one is a click, for the other it's an import. -->
+            <div class="flex flex-col items-center justify-center gap-2 h-32 text-sm text-neutral-500">
+                <span>No assets match these filters.</span>
+                <button
+                    type="button"
+                    onclick={() => assetLibrary.clearFilters()}
+                    class="rounded px-2 py-0.5 text-xs font-medium text-blue-700 hover:bg-blue-100"
+                >
+                    ✕ Clear filters
+                </button>
+            </div>
         {:else if assets.length === 0}
             <div class="flex items-center justify-center h-32 text-sm text-neutral-500">No assets in this library yet.</div>
         {:else}
