@@ -47,6 +47,7 @@
         assetLibrary.clearCaches();
         assetLibrary.setScope({ kind: "all" });
         assetLibrary.loadFolders();
+        assetLibrary.loadSavedFilters();
       });
     })
 

@@ -2,7 +2,7 @@ use crate::extract;
 use crate::fs;
 use crate::thumbnail;
 use anyhow::{Context, Result};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, SecondsFormat, Utc};
 use rayon::prelude::{IntoParallelIterator, ParallelIterator};
 use serde::{Deserialize, Serialize};
 use sqlx::{sqlite::SqlitePool, FromRow, QueryBuilder, Sqlite, Type};
@@ -126,6 +126,23 @@ impl Shape {
     }
 }
 
+/// The one timestamp format for every date column: fixed width, always UTC `Z`,
+/// always 3 fractional digits — `2026-07-23T12:34:56.123Z`.
+///
+/// Fixed width is the whole point. chrono's default `to_rfc3339()` emits
+/// variable-length fractional seconds and a `+00:00` offset, which happens to
+/// sort correctly only because ASCII puts `+` before `.` before digits. That
+/// invariant is invisible in the code and one differently-formatted writer away
+/// from breaking silently: a `Z` row would sort after EVERY `+00:00` row
+/// regardless of its actual date. This format also matches what
+/// `assets_folders.added_at` already writes, so the whole DB is one shape.
+///
+/// Changing this again means every existing row must be rewritten — mixed
+/// formats in one column is exactly the failure described above.
+fn stamp(dt: DateTime<Utc>) -> String {
+    dt.to_rfc3339_opts(SecondsFormat::Millis, true)
+}
+
 /// Guard that must precede every shape predicate. `width`/`height` default to 0,
 /// so audio (and anything whose dimensions failed to extract) is 0×0 — without
 /// this, `width = height` would report every audio file as "square". Excluding
@@ -138,7 +155,11 @@ const DIMENSIONED: &str = "a.width > 0 AND a.height > 0";
 ///
 /// Every dimension is optional and they AND together. An empty `FilterSet` adds
 /// no SQL at all, so the unfiltered path stays exactly as fast as before.
-#[derive(Deserialize, Debug, Clone, Default)]
+///
+/// `Serialize` is load-bearing, not incidental: this type IS the stored form of
+/// a saved filter (`saved_filters.query_json`), which is why there's no separate
+/// hand-written schema for persisted filters to drift out of sync with.
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct FilterSet {
     /// Types to include. Empty = no constraint. Multiple types OR together.
     #[serde(default)]
@@ -146,6 +167,74 @@ pub struct FilterSet {
     /// Shape constraint; `None` = any.
     #[serde(default)]
     pub shape: Option<Shape>,
+    /// Calendar-day range over one date column; `None` = no date filtering.
+    #[serde(default)]
+    pub date: Option<DateFilter>,
+    /// Byte-size range; `None` = no size filtering.
+    #[serde(default)]
+    pub size: Option<SizeRange>,
+}
+
+/// Which date column a `DateFilter` applies to.
+///
+/// The shared `Date` postfix is deliberate: these names and their serde values
+/// mirror `OrderBy::ImportedDate` / `CreationDate` / `ModifiedDate`, so the same
+/// column is called the same thing whether you're sorting or filtering by it.
+/// Trimming them to `Imported`/`Creation`/`Modified` would break that symmetry
+/// for a style rule.
+#[allow(clippy::enum_variant_names)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DateField {
+    ImportedDate,
+    CreationDate,
+    ModifiedDate,
+}
+
+impl DateField {
+    fn column(self) -> &'static str {
+        match self {
+            DateField::ImportedDate => "a.imported_date",
+            DateField::CreationDate => "a.creation_date",
+            DateField::ModifiedDate => "a.modified_date",
+        }
+    }
+}
+
+/// A half-open instant range over one date column: `[from, until)`.
+///
+/// The frontend sends absolute timestamps rather than calendar days, because
+/// only the client knows the user's timezone. It converts the picked LOCAL days
+/// into instants, and `until` is local midnight of the day AFTER the end date —
+/// so an inclusive-looking "Jan 1 → Jan 31" still contains everything stamped
+/// during the 31st. Interpreting days as UTC here instead would mean a user west
+/// of Greenwich clicking "Today" gets nothing they imported that evening.
+///
+/// JS `toISOString()` emits exactly the shape `stamp()` writes, so this stays a
+/// plain lexicographic comparison against an indexed column.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct DateFilter {
+    pub field: DateField,
+    #[serde(default)]
+    pub from: Option<String>,
+    #[serde(default)]
+    pub until: Option<String>,
+}
+
+/// Inclusive byte range; either end may be open.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy)]
+pub struct SizeRange {
+    #[serde(default)]
+    pub min: Option<i64>,
+    #[serde(default)]
+    pub max: Option<i64>,
+}
+
+/// Whether a bound is a real timestamp. Lexicographic comparison against a
+/// garbage string wouldn't error, it would just return a nonsense slice — so an
+/// unparseable bound is rejected at the boundary instead.
+fn valid_stamp(s: &str) -> bool {
+    DateTime::parse_from_rfc3339(s).is_ok()
 }
 
 /// Everything the manifest needs, as ONE object, compiled into ONE statement.
@@ -389,6 +478,41 @@ fn build_manifest_query<'a>(
         shape.push_predicate(&mut qb);
     }
 
+    if let Some(date) = &filters.date {
+        let col = date.field.column();
+        // An invalid bound matches nothing rather than being dropped: silently
+        // widening the result set is the dangerous direction (you'd see MORE than
+        // you asked for and have no signal). Same policy as a malformed ratio.
+        if let Some(from) = date.from.as_deref() {
+            conjunct(&mut qb, &mut written);
+            if valid_stamp(from) {
+                qb.push(col).push(" >= ").push_bind(from);
+            } else {
+                qb.push("0");
+            }
+        }
+        if let Some(until) = date.until.as_deref() {
+            conjunct(&mut qb, &mut written);
+            // Half-open: `until` is the instant AFTER the last included day.
+            if valid_stamp(until) {
+                qb.push(col).push(" < ").push_bind(until);
+            } else {
+                qb.push("0");
+            }
+        }
+    }
+
+    if let Some(size) = filters.size {
+        if let Some(min) = size.min {
+            conjunct(&mut qb, &mut written);
+            qb.push("a.file_size >= ").push_bind(min);
+        }
+        if let Some(max) = size.max {
+            conjunct(&mut qb, &mut written);
+            qb.push("a.file_size <= ").push_bind(max);
+        }
+    }
+
     // 3. Sort. The `a.id` tie-break runs in the SAME direction as the sort column
     //    so the composite (col, id) indexes stay usable scanning either way.
     let dir = if sort.is_ascending { " ASC" } else { " DESC" };
@@ -513,6 +637,156 @@ pub async fn fetch_folders(pool: &SqlitePool) -> Result<Vec<Folder>> {
     .await
     .context("Failed to fetch folders")?;
     Ok(folders)
+}
+
+// ── Saved filters ─────────────────────────────────────────────────────────────
+//
+// A saved filter is a LENS, not a place: applying one narrows whatever scope
+// you're already in, so it has no parent, no sort and no position in the tree.
+// (A smart folder would be the opposite — a scope that owns its own sort — and
+// belongs in its own table beside `folders`, not here.)
+
+/// Bump when `FilterSet`'s serialized shape changes incompatibly, and migrate
+/// stored documents deliberately at the same time.
+const SAVED_FILTER_VERSION: i64 = 1;
+
+/// A named, reusable `FilterSet` as the frontend sees it — the JSON document is
+/// already parsed, so callers never touch the stored representation.
+#[derive(Serialize, Debug, Clone)]
+pub struct SavedFilter {
+    pub id: String,
+    pub name: String,
+    pub position: f64,
+    pub filters: FilterSet,
+}
+
+/// Storage shape, with `query_json` still a string.
+#[derive(FromRow)]
+struct SavedFilterRow {
+    id: String,
+    name: String,
+    position: f64,
+    version: i64,
+    query_json: String,
+}
+
+#[instrument(skip(pool))]
+pub async fn fetch_saved_filters(pool: &SqlitePool) -> Result<Vec<SavedFilter>> {
+    let rows = sqlx::query_as::<_, SavedFilterRow>(
+        "SELECT id, name, position, version, query_json FROM saved_filters \
+         ORDER BY position, name",
+    )
+    .fetch_all(pool)
+    .await
+    .context("Failed to fetch saved filters")?;
+
+    // An unreadable row is skipped, never fatal: one filter written by a newer
+    // build (or corrupted) must not take the user's whole list down with it.
+    Ok(rows
+        .into_iter()
+        .filter_map(|r| {
+            if r.version > SAVED_FILTER_VERSION {
+                warn!(id = %r.id, version = r.version, "Saved filter is from a newer version; skipping");
+                return None;
+            }
+            match serde_json::from_str::<FilterSet>(&r.query_json) {
+                Ok(filters) => Some(SavedFilter {
+                    id: r.id,
+                    name: r.name,
+                    position: r.position,
+                    filters,
+                }),
+                Err(e) => {
+                    warn!(id = %r.id, error = %e, "Saved filter has unreadable query_json; skipping");
+                    None
+                }
+            }
+        })
+        .collect())
+}
+
+#[instrument(skip(pool, filters))]
+pub async fn create_saved_filter(
+    pool: &SqlitePool,
+    name: &str,
+    filters: &FilterSet,
+) -> Result<SavedFilter> {
+    let id = uuid::Uuid::new_v4().to_string();
+    let query_json = serde_json::to_string(filters).context("Failed to serialize filter set")?;
+    let position = sqlx::query_scalar::<_, Option<f64>>("SELECT MAX(position) FROM saved_filters")
+        .fetch_one(pool)
+        .await
+        .context("Failed to compute saved filter position")?
+        .map(|m| m + 1.0)
+        .unwrap_or(0.0);
+
+    sqlx::query(
+        "INSERT INTO saved_filters (id, name, position, version, query_json, created_at) \
+         VALUES (?, ?, ?, ?, ?, ?)",
+    )
+    .bind(&id)
+    .bind(name)
+    .bind(position)
+    .bind(SAVED_FILTER_VERSION)
+    .bind(&query_json)
+    .bind(stamp(Utc::now()))
+    .execute(pool)
+    .await
+    .context("Failed to insert saved filter")?;
+
+    Ok(SavedFilter {
+        id,
+        name: name.to_string(),
+        position,
+        filters: filters.clone(),
+    })
+}
+
+#[instrument(skip(pool))]
+pub async fn rename_saved_filter(pool: &SqlitePool, id: &str, name: &str) -> Result<()> {
+    let res = sqlx::query("UPDATE saved_filters SET name = ? WHERE id = ?")
+        .bind(name)
+        .bind(id)
+        .execute(pool)
+        .await
+        .context("Failed to rename saved filter")?;
+    if res.rows_affected() == 0 {
+        anyhow::bail!("Saved filter not found");
+    }
+    Ok(())
+}
+
+/// Overwrite a saved filter's definition with `filters` ("update to current").
+/// Also rewrites `version`, so a document saved by an older build is brought
+/// forward rather than left behind at its original version.
+#[instrument(skip(pool, filters))]
+pub async fn update_saved_filter(
+    pool: &SqlitePool,
+    id: &str,
+    filters: &FilterSet,
+) -> Result<()> {
+    let query_json = serde_json::to_string(filters).context("Failed to serialize filter set")?;
+    let res = sqlx::query("UPDATE saved_filters SET query_json = ?, version = ? WHERE id = ?")
+        .bind(&query_json)
+        .bind(SAVED_FILTER_VERSION)
+        .bind(id)
+        .execute(pool)
+        .await
+        .context("Failed to update saved filter")?;
+    if res.rows_affected() == 0 {
+        anyhow::bail!("Saved filter not found");
+    }
+    Ok(())
+}
+
+#[instrument(skip(pool))]
+pub async fn delete_saved_filter(pool: &SqlitePool, id: &str) -> Result<()> {
+    sqlx::query("DELETE FROM saved_filters WHERE id = ?")
+        .bind(id)
+        .execute(pool)
+        .await
+        .context("Failed to delete saved filter")?;
+    Ok(())
 }
 
 // ── Folder CRUD (app-exclusive; never touches the source filesystem) ──────────
@@ -902,9 +1176,9 @@ fn build_asset_metadata(src: PathBuf) -> Option<AssetMetadata> {
         width: visual.width,
         height: visual.height,
         file_size: meta.len() as i64,
-        imported_date: Utc::now().to_rfc3339(),
-        creation_date: created.to_rfc3339(),
-        modified_date: modified.to_rfc3339(),
+        imported_date: stamp(Utc::now()),
+        creation_date: stamp(created),
+        modified_date: stamp(modified),
         thumb_hash: None, // generated later by generate_pending_thumbnails
         thumb_config: None,
         is_animated: visual.is_animated,

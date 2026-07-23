@@ -44,6 +44,11 @@ pub fn run() {
             commands::rebuild_thumbnails,
             commands::fetch_sort,
             commands::set_sort,
+            commands::fetch_saved_filters,
+            commands::create_saved_filter,
+            commands::rename_saved_filter,
+            commands::update_saved_filter,
+            commands::delete_saved_filter,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

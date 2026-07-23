@@ -13,6 +13,7 @@
     import { Button, buttonVariants } from "$components/ui/button";
     import AssetGrid from "$components/AssetGrid.svelte";
     import FolderTree from "$components/FolderTree.svelte";
+    import SavedFilters from "$components/SavedFilters.svelte";
     import { libraryManager, settings } from "../routes/settings.svelte";
 
     interface LibraryInfo {
@@ -425,8 +426,9 @@
 
         <!-- (h-[70vh] is pragmatic; long-term make <main> a h-screen flex flex-col and this flex-1 min-h-0. Any bounded height works.) -->
         <div class="mt-8 flex gap-4 h-[70vh]">
-            <div class="w-56 shrink-0 overflow-y-auto">
+            <div class="flex w-56 shrink-0 flex-col gap-3 overflow-y-auto">
                 <FolderTree />
+                <SavedFilters />
             </div>
             <div class="flex-1 min-w-0">
                 <AssetGrid />

@@ -257,6 +257,75 @@ pub async fn set_sort(
         .map_err(AppError::from)
 }
 
+// ── Saved filters ─────────────────────────────────────────────────────────────
+
+#[instrument(skip_all)]
+#[tauri::command]
+pub async fn fetch_saved_filters(
+    state: tauri::State<'_, DbState>,
+) -> Result<Vec<assets::SavedFilter>, AppError> {
+    let pool = state.acquire_pool().await?;
+    assets::fetch_saved_filters(&pool)
+        .await
+        .inspect_err(|e| tracing::error!(error = %e, "fetch_saved_filters failed"))
+        .map_err(AppError::from)
+}
+
+#[instrument(skip_all, fields(name = %name))]
+#[tauri::command]
+pub async fn create_saved_filter(
+    name: String,
+    filters: assets::FilterSet,
+    state: tauri::State<'_, DbState>,
+) -> Result<assets::SavedFilter, AppError> {
+    let pool = state.acquire_pool().await?;
+    assets::create_saved_filter(&pool, &name, &filters)
+        .await
+        .inspect_err(|e| tracing::error!(error = %e, "create_saved_filter failed"))
+        .map_err(AppError::from)
+}
+
+#[instrument(skip_all)]
+#[tauri::command]
+pub async fn rename_saved_filter(
+    id: String,
+    name: String,
+    state: tauri::State<'_, DbState>,
+) -> Result<(), AppError> {
+    let pool = state.acquire_pool().await?;
+    assets::rename_saved_filter(&pool, &id, &name)
+        .await
+        .inspect_err(|e| tracing::error!(error = %e, "rename_saved_filter failed"))
+        .map_err(AppError::from)
+}
+
+#[instrument(skip_all)]
+#[tauri::command]
+pub async fn update_saved_filter(
+    id: String,
+    filters: assets::FilterSet,
+    state: tauri::State<'_, DbState>,
+) -> Result<(), AppError> {
+    let pool = state.acquire_pool().await?;
+    assets::update_saved_filter(&pool, &id, &filters)
+        .await
+        .inspect_err(|e| tracing::error!(error = %e, "update_saved_filter failed"))
+        .map_err(AppError::from)
+}
+
+#[instrument(skip_all)]
+#[tauri::command]
+pub async fn delete_saved_filter(
+    id: String,
+    state: tauri::State<'_, DbState>,
+) -> Result<(), AppError> {
+    let pool = state.acquire_pool().await?;
+    assets::delete_saved_filter(&pool, &id)
+        .await
+        .inspect_err(|e| tracing::error!(error = %e, "delete_saved_filter failed"))
+        .map_err(AppError::from)
+}
+
 #[instrument(skip_all)]
 #[tauri::command]
 pub async fn fetch_folders(

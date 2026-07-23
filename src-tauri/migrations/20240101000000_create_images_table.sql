@@ -56,6 +56,38 @@ CREATE TABLE IF NOT EXISTS view_settings (
 INSERT OR IGNORE INTO view_settings (view_key, order_by, is_ascending) VALUES ('all', 'imported_date', 0),
      ('uncategorized', 'imported_date', 0);
 
+-- Named, reusable filter combinations. A saved filter is a LENS (it narrows
+-- whatever scope you're in), not a place — it has no parent, no sort and no
+-- position in the folder tree. A smart folder, when that lands, is the opposite:
+-- a scope that owns its own sort and sits in the tree, so it gets its own table.
+--
+-- One table with a JSON document rather than a filters/filter_conditions pair.
+-- The Rust `FilterSet` already IS the filter language and round-trips through
+-- serde for free, so it stays the single source of truth; the normalized form
+-- would need a hand-written encode/decode/validate layer kept in sync with it by
+-- discipline alone, and its `value TEXT` column is untyped either way. SQLite's
+-- json_each() covers querying across saved filters if that's ever needed.
+CREATE TABLE IF NOT EXISTS saved_filters (
+    id TEXT PRIMARY KEY NOT NULL,
+    name TEXT NOT NULL,
+
+    -- List ordering (fractional rank, same idea as folders.position). No reorder
+    -- command yet; the column exists so adding one later needs no migration.
+    position REAL NOT NULL DEFAULT 0,
+
+    -- Schema version of query_json. When the filter language changes (tags), old
+    -- documents get migrated deliberately instead of silently mis-parsed, and a
+    -- row written by a NEWER build is skipped rather than misread.
+    version INTEGER NOT NULL DEFAULT 1,
+
+    -- Serialized FilterSet.
+    query_json TEXT NOT NULL,
+
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_saved_filters_order ON saved_filters (position, name);
+
 -- Membership indexes
 CREATE INDEX IF NOT EXISTS idx_folder_contents ON assets_folders(folder_id, added_at);
 CREATE INDEX IF NOT EXISTS idx_folders_position ON assets_folders (folder_id, position); -- Serve a folder's assets already ordered by manual position

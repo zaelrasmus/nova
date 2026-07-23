@@ -78,14 +78,115 @@ export type Shape =
   | { kind: "panoramic_vertical" }
   | { kind: "ratio"; num: number; den: number; tolerance: number };
 
+/** Which date column a date range applies to. Mirrors OrderBy's naming. */
+export type DateField = "imported_date" | "creation_date" | "modified_date";
+
+/**
+ * Half-open instant range over one date column: `[from, until)`. Both bounds are
+ * absolute UTC timestamps, produced from LOCAL calendar days by the helpers
+ * below — the client is the only place that knows the user's timezone.
+ */
+export interface DateFilter {
+  field: DateField;
+  from: string | null;
+  until: string | null;
+}
+
+/** Inclusive byte range; either end may be null. */
+export interface SizeRange {
+  min: number | null;
+  max: number | null;
+}
+
 /** Ephemeral narrowing of the current scope. Dimensions AND together. */
 export interface FilterSet {
   asset_types: AssetTypeFilter[];
   shape: Shape | null;
+  date: DateFilter | null;
+  size: SizeRange | null;
 }
 
 /** A fresh empty set — a function, so no two call sites share one object. */
-export const emptyFilters = (): FilterSet => ({ asset_types: [], shape: null });
+export const emptyFilters = (): FilterSet => ({
+  asset_types: [],
+  shape: null,
+  date: null,
+  size: null,
+});
+
+export const DATE_FIELD_LABELS: { value: DateField; label: string }[] = [
+  { value: "imported_date", label: "Date added" },
+  { value: "creation_date", label: "Date created" },
+  { value: "modified_date", label: "Date modified" },
+];
+
+/** Size inputs carry a unit; the wire format is always bytes. */
+export const SIZE_UNITS = [
+  { value: "KB", bytes: 1024 },
+  { value: "MB", bytes: 1024 * 1024 },
+  { value: "GB", bytes: 1024 * 1024 * 1024 },
+] as const;
+
+export type SizeUnit = (typeof SIZE_UNITS)[number]["value"];
+
+export const unitBytes = (unit: SizeUnit): number =>
+  SIZE_UNITS.find((u) => u.value === unit)!.bytes;
+
+/** Local midnight starting `offsetDays` from today (negative = in the past). */
+function localMidnight(offsetDays: number): Date {
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  d.setDate(d.getDate() + offsetDays);
+  return d;
+}
+
+/**
+ * `YYYY-MM-DD` (as shown in a date input, i.e. a LOCAL day) -> the instant that
+ * local day begins. Parsing without a `Z` is what makes JS treat it as local.
+ */
+function localDayStart(day: string): Date {
+  return new Date(`${day}T00:00:00`);
+}
+
+/**
+ * Local day range -> the half-open instant range the backend compares against.
+ * `until` is midnight of the day AFTER `toDay`, so `toDay` is fully included.
+ * `toISOString()` emits exactly the format Rust's `stamp()` writes.
+ */
+export function dayRangeToInstants(
+  fromDay: string | null,
+  toDay: string | null,
+): { from: string | null; until: string | null } {
+  const until = toDay === null ? null : localDayStart(toDay);
+  if (until) until.setDate(until.getDate() + 1);
+  return {
+    from: fromDay === null ? null : localDayStart(fromDay).toISOString(),
+    until: until ? until.toISOString() : null,
+  };
+}
+
+/**
+ * Relative date presets. Ranges are inclusive calendar days ending today, so
+ * "Last 7 days" is today plus the six before it. Resolved at click time — these
+ * are ephemeral session filters, not stored rules.
+ */
+export const DATE_PRESETS = [
+  { key: "today", label: "Today", fromOffset: 0 },
+  { key: "yesterday", label: "Yesterday", fromOffset: -1, toOffset: -1 },
+  { key: "7", label: "Last 7 days", fromOffset: -6 },
+  { key: "30", label: "Last 30 days", fromOffset: -29 },
+  { key: "90", label: "Last 90 days", fromOffset: -89 },
+  { key: "365", label: "Last 365 days", fromOffset: -364 },
+] as const;
+
+/** A preset key -> the instant range it means right now. */
+export function presetToInstants(key: string): { from: string | null; until: string | null } {
+  const preset = DATE_PRESETS.find((p) => p.key === key);
+  if (!preset) return { from: null, until: null };
+  const toOffset = "toOffset" in preset ? preset.toOffset : 0;
+  const until = localMidnight(toOffset + 1); // exclusive: start of the next day
+  return { from: localMidnight(preset.fromOffset).toISOString(), until: until.toISOString() };
+}
 
 export const ASSET_TYPE_LABELS: { value: AssetTypeFilter; label: string }[] = [
   { value: "image", label: "Images" },
@@ -146,6 +247,18 @@ export function shapeKey(shape: Shape | null): string {
   return preset ? preset.key : "custom";
 }
 
+/**
+ * A named, reusable FilterSet. A saved filter is a LENS — it narrows whatever
+ * scope you're currently in — so it has no parent, no sort and no place in the
+ * folder tree. (A smart folder would be the opposite: a scope of its own.)
+ */
+export interface SavedFilter {
+  id: string;
+  name: string;
+  position: number;
+  filters: FilterSet;
+}
+
 export interface Folder {
   id: string;
   name: string;
@@ -193,6 +306,8 @@ class AssetLibrary {
   filters = $state<FilterSet>(emptyFilters());
   /** Flat folder list for the tree UI, refreshed on library switch + import. */
   folders = $state<Folder[]>([]);
+  /** Named filter combinations for this library, refreshed on library switch. */
+  savedFilters = $state<SavedFilter[]>([]);
 
   /**
    * Cache-buster for regenerated thumbnails. A rebuild reuses the same
@@ -335,7 +450,8 @@ class AssetLibrary {
 
   /** Whether any filter dimension is active — drives the "Clear" affordance. */
   get hasFilters(): boolean {
-    return this.filters.asset_types.length > 0 || this.filters.shape !== null;
+    const f = this.filters;
+    return f.asset_types.length > 0 || f.shape !== null || f.date !== null || f.size !== null;
   }
 
   /** Replace the whole filter set and reload. Filters are never persisted. */
@@ -359,6 +475,67 @@ class AssetLibrary {
   /** Constrain by shape; `null` clears the dimension. */
   setShape(shape: Shape | null): Promise<void> {
     return this.setFilters({ ...this.filters, shape });
+  }
+
+  /**
+   * Constrain by date range. A range with both ends open is no constraint at
+   * all, so it normalises to `null` — otherwise `hasFilters` would light the
+   * bar up and offer a "Clear" for a filter that isn't filtering anything.
+   */
+  setDateFilter(date: DateFilter | null): Promise<void> {
+    const normalised = date && date.from === null && date.until === null ? null : date;
+    return this.setFilters({ ...this.filters, date: normalised });
+  }
+
+  /** Constrain by byte size. Both ends open normalises to `null`, as above. */
+  setSizeRange(size: SizeRange | null): Promise<void> {
+    const normalised = size && size.min === null && size.max === null ? null : size;
+    return this.setFilters({ ...this.filters, size: normalised });
+  }
+
+  // ── Saved filters ──────────────────────────────────────────────────────────
+
+  /** Refresh this library's saved filters. Non-fatal on failure. */
+  async loadSavedFilters(): Promise<void> {
+    try {
+      this.savedFilters = await invoke<SavedFilter[]>("fetch_saved_filters");
+    } catch (e) {
+      console.error("Failed to load saved filters:", e);
+      this.savedFilters = [];
+    }
+  }
+
+  /** Store the CURRENT filter set under `name`. */
+  async saveCurrentFilters(name: string): Promise<void> {
+    await invoke("create_saved_filter", { name, filters: $state.snapshot(this.filters) });
+    await this.loadSavedFilters();
+  }
+
+  /**
+   * Apply a saved filter to the current scope — it's a lens, so the scope and
+   * sort are untouched. The stored set is deep-copied so tweaking the filters
+   * afterwards doesn't quietly rewrite the saved definition.
+   */
+  applySavedFilter(id: string): Promise<void> {
+    const saved = this.savedFilters.find((f) => f.id === id);
+    if (!saved) return Promise.resolve();
+    return this.setFilters($state.snapshot(saved.filters));
+  }
+
+  async renameSavedFilter(id: string, name: string): Promise<void> {
+    await invoke("rename_saved_filter", { id, name });
+    await this.loadSavedFilters();
+  }
+
+  /** Overwrite a saved filter with whatever is active now. */
+  async updateSavedFilter(id: string): Promise<void> {
+    await invoke("update_saved_filter", { id, filters: $state.snapshot(this.filters) });
+    await this.loadSavedFilters();
+  }
+
+  async deleteSavedFilter(id: string): Promise<void> {
+    await invoke("delete_saved_filter", { id });
+    await this.loadSavedFilters();
   }
 
   /** Change the sort for the CURRENT scope, persist it, and reload. */
