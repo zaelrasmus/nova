@@ -66,17 +66,26 @@ export const ORDER_BY_LABELS: { value: OrderBy; label: string }[] = [
  */
 export type AssetTypeFilter = "image" | "video" | "audio";
 
-/** Note: `landscape` is a superset of `ultrawide` — see Orientation in assets.rs. */
-export type Orientation = "landscape" | "portrait" | "square" | "ultrawide";
+/**
+ * Shape of an asset. The broad variants overlap by design — an ultrawide image
+ * is also horizontal, and 16:9 is both. See Shape in assets.rs.
+ */
+export type Shape =
+  | { kind: "horizontal" }
+  | { kind: "vertical" }
+  | { kind: "square" }
+  | { kind: "ultrawide" }
+  | { kind: "panoramic_vertical" }
+  | { kind: "ratio"; num: number; den: number; tolerance: number };
 
 /** Ephemeral narrowing of the current scope. Dimensions AND together. */
 export interface FilterSet {
   asset_types: AssetTypeFilter[];
-  orientation: Orientation | null;
+  shape: Shape | null;
 }
 
 /** A fresh empty set — a function, so no two call sites share one object. */
-export const emptyFilters = (): FilterSet => ({ asset_types: [], orientation: null });
+export const emptyFilters = (): FilterSet => ({ asset_types: [], shape: null });
 
 export const ASSET_TYPE_LABELS: { value: AssetTypeFilter; label: string }[] = [
   { value: "image", label: "Images" },
@@ -84,12 +93,58 @@ export const ASSET_TYPE_LABELS: { value: AssetTypeFilter; label: string }[] = [
   { value: "audio", label: "Audio" },
 ];
 
-export const ORIENTATION_LABELS: { value: Orientation; label: string }[] = [
-  { value: "landscape", label: "Landscape" },
-  { value: "portrait", label: "Portrait" },
-  { value: "square", label: "Square" },
-  { value: "ultrawide", label: "Ultrawide" },
+/**
+ * Ratio match tolerance, in ratio units: 0.02 on 16:9 (1.778) accepts
+ * 1.758–1.798, so a 1918×1080 crop still counts as 16:9. Exact equality would
+ * make the fixed presets miss almost everything real.
+ */
+export const RATIO_TOLERANCE = 0.02;
+
+const ratio = (num: number, den: number): Shape => ({
+  kind: "ratio",
+  num,
+  den,
+  tolerance: RATIO_TOLERANCE,
+});
+
+/**
+ * Shape dropdown entries. `key` is the <select> value — a flat string, because
+ * a ratio can't be an option value on its own. Grouped for the UI.
+ */
+export const SHAPE_PRESETS: { key: string; label: string; group: string; shape: Shape }[] = [
+  { key: "horizontal", label: "Horizontal", group: "General", shape: { kind: "horizontal" } },
+  { key: "vertical", label: "Vertical", group: "General", shape: { kind: "vertical" } },
+  { key: "square", label: "Square", group: "General", shape: { kind: "square" } },
+  { key: "ultrawide", label: "Ultrawide", group: "Panoramic", shape: { kind: "ultrawide" } },
+  {
+    key: "panoramic_vertical",
+    label: "Panoramic vertical",
+    group: "Panoramic",
+    shape: { kind: "panoramic_vertical" },
+  },
+  { key: "16:9", label: "16:9", group: "Fixed ratio", shape: ratio(16, 9) },
+  { key: "9:16", label: "9:16", group: "Fixed ratio", shape: ratio(9, 16) },
+  { key: "3:2", label: "3:2", group: "Fixed ratio", shape: ratio(3, 2) },
+  { key: "2:3", label: "2:3", group: "Fixed ratio", shape: ratio(2, 3) },
+  { key: "4:3", label: "4:3", group: "Fixed ratio", shape: ratio(4, 3) },
+  { key: "3:4", label: "3:4", group: "Fixed ratio", shape: ratio(3, 4) },
 ];
+
+/** Preset groups in display order, for <optgroup>. */
+export const SHAPE_GROUPS = ["General", "Panoramic", "Fixed ratio"] as const;
+
+/**
+ * Active shape -> <select> key. A ratio that matches no preset is "custom", which
+ * is what keeps the custom inputs open after a reload.
+ */
+export function shapeKey(shape: Shape | null): string {
+  if (!shape) return "";
+  if (shape.kind !== "ratio") return shape.kind;
+  const preset = SHAPE_PRESETS.find(
+    (p) => p.shape.kind === "ratio" && p.shape.num === shape.num && p.shape.den === shape.den,
+  );
+  return preset ? preset.key : "custom";
+}
 
 export interface Folder {
   id: string;
@@ -280,7 +335,7 @@ class AssetLibrary {
 
   /** Whether any filter dimension is active — drives the "Clear" affordance. */
   get hasFilters(): boolean {
-    return this.filters.asset_types.length > 0 || this.filters.orientation !== null;
+    return this.filters.asset_types.length > 0 || this.filters.shape !== null;
   }
 
   /** Replace the whole filter set and reload. Filters are never persisted. */
@@ -301,8 +356,9 @@ class AssetLibrary {
     return this.setFilters({ ...this.filters, asset_types });
   }
 
-  setOrientation(orientation: Orientation | null): Promise<void> {
-    return this.setFilters({ ...this.filters, orientation });
+  /** Constrain by shape; `null` clears the dimension. */
+  setShape(shape: Shape | null): Promise<void> {
+    return this.setFilters({ ...this.filters, shape });
   }
 
   /** Change the sort for the CURRENT scope, persist it, and reload. */

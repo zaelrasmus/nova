@@ -49,39 +49,87 @@ pub struct Sort {
     pub is_ascending: bool,
 }
 
-/// Shape of an asset, derived from its stored dimensions. Note that `Landscape`
-/// is a SUPERSET of `Ultrawide` — an ultrawide image is also landscape. That
-/// overlap is deliberate and documented rather than papered over, so the counts
-/// behave the way the geometry says they should.
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum Orientation {
-    Landscape,
-    Portrait,
+/// Shape of an asset, derived from its stored dimensions.
+///
+/// Named "shape" rather than "orientation" on purpose: `Ultrawide` and `Ratio`
+/// describe *proportion*, not which way the image is turned, so "orientation"
+/// would only be accurate for the first three variants.
+///
+/// The broad variants overlap by design — an ultrawide image is also horizontal,
+/// and a 16:9 image is both. That's what the geometry says, so the filters say it
+/// too rather than carving out artificial exclusive bands.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Shape {
+    Horizontal,
+    Vertical,
     Square,
+    /// At least twice as wide as tall.
     Ultrawide,
+    /// At least twice as tall as wide — the vertical counterpart of `Ultrawide`.
+    PanoramicVertical,
+    /// Aspect ratio `num:den`, matched within `tolerance` (in ratio units, so
+    /// 0.02 on 16:9 accepts 1.758–1.798).
+    ///
+    /// One variant serves BOTH the fixed presets in the UI and a user-entered
+    /// custom ratio — they differ only in where the numbers come from, so there's
+    /// no reason for them to be different code paths.
+    Ratio { num: f64, den: f64, tolerance: f64 },
 }
 
-impl Orientation {
-    /// The comparison this orientation makes. Callers must AND this with the
-    /// non-zero dimension guard (see `DIMENSIONED`).
+impl Shape {
+    /// Append this shape's comparison. Callers must AND it with the non-zero
+    /// dimension guard (see `DIMENSIONED`).
     ///
-    /// Ratios use integer multiplication, not float division: no divide-by-zero
-    /// and no float equality anywhere in the predicate.
-    fn sql_predicate(self) -> &'static str {
+    /// Nothing here divides: the ratio test multiplies both sides by `height *
+    /// den`, so there is no divide-by-zero and no float equality in any predicate.
+    fn push_predicate(self, qb: &mut QueryBuilder<'_, Sqlite>) {
         match self {
-            Orientation::Landscape => "a.width > a.height",
-            Orientation::Portrait => "a.height > a.width",
-            Orientation::Square => "a.width = a.height",
-            Orientation::Ultrawide => "a.width >= a.height * 2",
+            Shape::Horizontal => {
+                qb.push("a.width > a.height");
+            }
+            Shape::Vertical => {
+                qb.push("a.height > a.width");
+            }
+            Shape::Square => {
+                qb.push("a.width = a.height");
+            }
+            Shape::Ultrawide => {
+                qb.push("a.width >= a.height * 2");
+            }
+            Shape::PanoramicVertical => {
+                qb.push("a.height >= a.width * 2");
+            }
+            // |w/h − num/den| ≤ tolerance, with both sides multiplied by h * den.
+            Shape::Ratio {
+                num,
+                den,
+                tolerance,
+            } => {
+                // The UI can't produce these, but a malformed IPC payload must not
+                // yield a nonsense predicate. `0` matches nothing, which surfaces
+                // as the (recoverable) "no assets match these filters" state.
+                if !(num.is_finite() && den.is_finite() && num > 0.0 && den > 0.0) {
+                    qb.push("0");
+                    return;
+                }
+                qb.push("ABS(a.width * ")
+                    .push_bind(den)
+                    .push(" - a.height * ")
+                    .push_bind(num)
+                    .push(") <= ")
+                    .push_bind(tolerance.max(0.0))
+                    .push(" * a.height * ")
+                    .push_bind(den);
+            }
         }
     }
 }
 
-/// Guard that must precede every orientation predicate. `width`/`height` default
-/// to 0, so audio (and anything whose dimensions failed to extract) is 0×0 —
-/// without this, `width = height` would report every audio file as "square".
-/// Excluding them is also the correct answer: a sound file has no orientation.
+/// Guard that must precede every shape predicate. `width`/`height` default to 0,
+/// so audio (and anything whose dimensions failed to extract) is 0×0 — without
+/// this, `width = height` would report every audio file as "square". Excluding
+/// them is also the correct answer: a sound file has no shape.
 const DIMENSIONED: &str = "a.width > 0 AND a.height > 0";
 
 /// Ephemeral, multi-dimensional narrowing of a scope. Deliberately NOT persisted:
@@ -97,7 +145,7 @@ pub struct FilterSet {
     pub asset_types: Vec<AssetType>,
     /// Shape constraint; `None` = any.
     #[serde(default)]
-    pub orientation: Option<Orientation>,
+    pub shape: Option<Shape>,
 }
 
 /// Everything the manifest needs, as ONE object, compiled into ONE statement.
@@ -335,11 +383,10 @@ fn build_manifest_query<'a>(
         qb.push(")");
     }
 
-    if let Some(orientation) = filters.orientation {
+    if let Some(shape) = filters.shape {
         conjunct(&mut qb, &mut written);
-        qb.push(DIMENSIONED)
-            .push(" AND ")
-            .push(orientation.sql_predicate());
+        qb.push(DIMENSIONED).push(" AND ");
+        shape.push_predicate(&mut qb);
     }
 
     // 3. Sort. The `a.id` tie-break runs in the SAME direction as the sort column
