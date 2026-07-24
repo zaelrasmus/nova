@@ -14,6 +14,7 @@
     import AssetGrid from "$components/AssetGrid.svelte";
     import FolderTree from "$components/FolderTree.svelte";
     import SavedFilters from "$components/SavedFilters.svelte";
+    import Inspector from "$components/Inspector.svelte";
     import { libraryManager, settings } from "../routes/settings.svelte";
 
     interface LibraryInfo {
@@ -432,6 +433,13 @@
             </div>
             <div class="flex-1 min-w-0">
                 <AssetGrid />
+            </div>
+            <!-- Right-hand column, the conventional DAM position. Rendered
+                 unconditionally so it never remounts on selection change —
+                 remounting would reset scroll and, once fields are editable,
+                 drop in-flight writes. -->
+            <div class="w-72 shrink-0">
+                <Inspector />
             </div>
         </div>
 

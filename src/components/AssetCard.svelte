@@ -10,10 +10,30 @@
         animate: boolean;
         heavy?: AssetMetadata;
         style: string;
-        onClick?: () => void;
+        selected?: boolean;
+        /**
+         * Press. Fires BEFORE `onClick` and is where the selection change
+         * normally lands, so a drag begins with the right payload.
+         */
+        onPointerDown?: (e: PointerEvent) => void;
+        /** Release without a drag. Resolves what `onPointerDown` deferred. */
+        onClick?: (e: MouseEvent) => void;
+        /** Keyboard activation — always selects this card alone. */
+        onActivate?: () => void;
     }
 
-    let { assetType, thumbHash, isAnimated, animate, heavy, style, onClick }: Props = $props();
+    let {
+        assetType,
+        thumbHash,
+        isAnimated,
+        animate,
+        heavy,
+        style,
+        selected = false,
+        onPointerDown,
+        onClick,
+        onActivate,
+    }: Props = $props();
 
     const placeholder = $derived(thumbHashUrl(thumbHash));
     // Animated original when the toggle is on and the asset is animated;
@@ -93,13 +113,21 @@
      unaffected by which interior snippet renders. -->
 <div
     {style}
-    role="button"
+    role="option"
+    aria-selected={selected}
     tabindex="0"
     class="absolute top-0 overflow-hidden rounded-md bg-neutral-900 cursor-pointer select-none
-           ring-offset-neutral-950 hover:ring-2 hover:ring-neutral-500 hover:ring-offset-1
-           focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-400"
+           ring-offset-2 ring-offset-white
+           focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-400
+           {selected ? 'ring-2 ring-blue-500' : 'hover:ring-2 hover:ring-neutral-400'}"
+    onpointerdown={onPointerDown}
     onclick={onClick}
-    onkeydown={(e) => e.key === "Enter" && onClick?.()}
+    onkeydown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault(); // Space would scroll the grid
+            onActivate?.();
+        }
+    }}
 >
     {#if placeholder || previewSrc}
         {@render thumbnail()}

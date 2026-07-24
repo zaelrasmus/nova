@@ -7,6 +7,7 @@
     import {get} from "svelte/store";
     import { libraryManager, settings } from "../routes/settings.svelte";
     import { assetLibrary, type AssetLightRow } from "$lib/assets.svelte";
+    import { selection } from "$lib/selection.svelte";
 
 
     // Manifest = layout source of truth (id, width, height, asset_type).
@@ -152,7 +153,43 @@
     });
 
 
+    // ── Selection ────────────────────────────────────────────────────────────
+    // The store owns the RULES; this component owns the ORDER. Ids are read
+    // lazily per interaction rather than kept in a $derived, because the manifest
+    // streams in chunks — a derived id list would be rebuilt on every chunk, and
+    // that's O(n²) over a large library. Clicks are rare; one map() is nothing.
+    const idsNow = () => assets.map((a) => a.id);
+    const mods = (e: MouseEvent | PointerEvent) => ({
+        ctrl: e.ctrlKey || e.metaKey, // metaKey = Cmd on macOS
+        shift: e.shiftKey,
+    });
+
+    // Ctrl+A / Escape. Window-level so they work wherever focus sits in the grid.
+    $effect(() => {
+        const onKey = (e: KeyboardEvent) => {
+            // Never steal keys from a text field — the filter bar sits directly
+            // above this grid and Ctrl+A there must still mean "select all text".
+            const t = e.target as HTMLElement | null;
+            if (t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))) return;
+
+            if (e.key === "Escape") {
+                selection.clear();
+            } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "a") {
+                e.preventDefault();
+                // `assets` is read here, when the handler RUNS, not when this
+                // effect does — so it never re-registers the listener, and
+                // "select all" always means all currently *visible* rows.
+                selection.selectAll(idsNow());
+            }
+        };
+        window.addEventListener("keydown", onKey);
+        return () => window.removeEventListener("keydown", onKey);
+    });
+
     // ── FUTURE: Pragmatic Drag and Drop (Atlassian) ───────────────────────────
+    // Selection is already the payload: `selection.assetIds` on dragstart, plus
+    // `selection.cancelPendingCollapse()` so the press that began the drag never
+    // collapses a multi-selection on release.
     // When you're ready to implement drag-to-reorder:
     //
     // 2. In each AssetCard, attach draggable() with { assetId: asset.id }
@@ -171,6 +208,9 @@
              library. `manifest` is the filtered set, so N comes from the store. -->
         <span class="text-xs text-neutral-400">
             {assets.length} assets{assetLibrary.hasFilters ? " (filtered)" : ""}
+            {#if selection.assetCount > 0}
+                <span class="text-blue-600">· {selection.assetCount} selected</span>
+            {/if}
         </span>
         <div class="flex items-center gap-3">
             <SortControl />
@@ -221,12 +261,25 @@
         {:else if assets.length === 0}
             <div class="flex items-center justify-center h-32 text-sm text-neutral-500">No assets in this library yet.</div>
         {:else}
+            <!-- Clicking the gaps between cards deselects, the way it does in
+                 every file manager. Cards stop this by being the closest
+                 [role=option]; the check runs on the bubbled event. -->
+            <!-- svelte-ignore a11y_no_static_element_interactions -->
             <div
                 bind:this={scrollEl}
+                onpointerdown={(e) => {
+                    if (!(e.target as HTMLElement).closest('[role="option"]')) selection.clear();
+                }}
                 class="relative flex-1 min-h-0 overflow-y-auto w-full
                        [scrollbar-width:thin] [scrollbar-color:theme(colors.neutral.700)_transparent] bg-white"
             >
-                <div style="position: relative; width: 100%; height: {$virtualizer.getTotalSize()}px;">
+                <!-- svelte-ignore a11y_no_noninteractive_element_to_interactive_role -->
+                <div
+                    role="listbox"
+                    aria-multiselectable="true"
+                    aria-label="Assets"
+                    style="position: relative; width: 100%; height: {$virtualizer.getTotalSize()}px;"
+                >
                     {#each $virtualizer.getVirtualItems() as item (item.key)}
 
                         {@const light = assets[item.index]}
@@ -238,7 +291,10 @@
                             animate={settings.preferences.animateGifsInGrid}
                             {heavy}
                             style="width: {columnWidth}px; height: {item.size - GAP}px; left: {item.lane * (columnWidth + GAP)}px; transform: translateY({item.start}px);"
-                            onClick={() => console.log("Selected asset:", light.id)}
+                            selected={selection.has(light.id)}
+                            onPointerDown={(e) => selection.pointerDown(idsNow(), item.index, mods(e))}
+                            onClick={() => selection.click(light.id)}
+                            onActivate={() => selection.selectOnly(light.id)}
                         />
                     {/each}
                 </div>

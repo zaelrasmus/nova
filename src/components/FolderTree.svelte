@@ -1,5 +1,6 @@
 <script lang="ts">
     import { assetLibrary, type Folder, type ManifestScope } from "$lib/assets.svelte";
+    import { selection } from "$lib/selection.svelte";
     import { toast } from "svelte-sonner";
 
     const folders = $derived(assetLibrary.folders);
@@ -16,7 +17,21 @@
         return map;
     });
 
-    const select = (scope: ManifestScope) => assetLibrary.setScope(scope);
+    /**
+     * Navigating and inspecting are two different things that one click happens
+     * to do together: the scope decides which assets the grid queries, the
+     * selection decides what the inspector shows.
+     *
+     * They're kept as separate state rather than derived from each other because
+     * "All" and "Uncategorized" are scopes with NO folder row behind them — no
+     * name, no notes, no timestamp — so they select nothing at all.
+     */
+    function select(scope: ManifestScope) {
+        if (scope.kind === "folder") selection.selectFolder(scope.id);
+        else selection.clear();
+        return assetLibrary.setScope(scope);
+    }
+
     const isFolder = (id: string) => active.kind === "folder" && active.id === id;
 
     async function newFolder(parentId: string | null) {

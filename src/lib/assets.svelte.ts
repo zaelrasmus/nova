@@ -3,6 +3,7 @@
 import { invoke, Channel } from "@tauri-apps/api/core";
 import { SvelteMap } from "svelte/reactivity";
 import { thumbHashToDataURL } from "thumbhash";
+import { selection } from "./selection.svelte";
 
 export interface AssetLightRow {
   id: string;
@@ -30,6 +31,10 @@ export type ManifestScope =
   | { kind: "all" }
   | { kind: "folder"; id: string }
   | { kind: "uncategorized" };
+
+/** Do two scopes name the same place? Scopes are rebuilt per click, so `===` won't do. */
+export const sameScope = (a: ManifestScope, b: ManifestScope): boolean =>
+  a.kind === b.kind && (a.kind !== "folder" || a.id === (b as { id: string }).id);
 
 export type OrderBy =
   | "imported_date"
@@ -307,6 +312,21 @@ export const SHAPE_PRESETS: { key: string; label: string; group: string; shape: 
 export const SHAPE_GROUPS = ["General", "Panoramic", "Fixed ratio"] as const;
 
 /**
+ * Pixel size -> the most specific shape word that applies, for read-only display
+ * (the inspector). Deliberately reuses the FILTER's vocabulary so the panel says
+ * "Ultrawide" about exactly the assets the Ultrawide filter would return.
+ *
+ * Thresholds mirror Shape::push_predicate in assets.rs — keep them in step.
+ */
+export function describeShape(width: number, height: number): string {
+  if (width <= 0 || height <= 0) return "—";
+  if (width === height) return "Square";
+  if (width >= height * 2) return "Ultrawide";
+  if (height >= width * 2) return "Panoramic vertical";
+  return width > height ? "Horizontal" : "Vertical";
+}
+
+/**
  * Active shape -> <select> key. A ratio that matches no preset is "custom", which
  * is what keeps the custom inputs open after a reload.
  */
@@ -451,6 +471,16 @@ class AssetLibrary {
     sort: Sort = this.sort,
     filters: FilterSet = this.filters,
   ): Promise<void> {
+    // Selection is a subset of what's on screen. A sort change reorders the very
+    // same rows, so it survives one (ids stay valid; indices are recomputed from
+    // the manifest at click time). Anything that changes WHICH rows exist drops
+    // it — otherwise the inspector shows an asset the user can't see, and a bulk
+    // action mutates invisible rows.
+    //
+    // Identity comparison on `filters` is exactly right: every setter builds a
+    // new object, and a sort-only reload passes `this.filters` straight through.
+    if (!sameScope(scope, this.scope) || filters !== this.filters) selection.clear();
+
     this.scope = scope;
     this.sort = sort;
     this.filters = filters;
@@ -501,6 +531,9 @@ class AssetLibrary {
     this.#pending.clear();
     this.#thumbRequested.clear();
     this.#thumbQueue = [];
+    // Asset ids are library-scoped, so a carried-over selection would point at
+    // rows in the library we just left.
+    selection.clear();
     // Session view state rather than a cache, but it resets with the library for
     // the same reason filters aren't persisted: landing in a fresh library that
     // silently shows a subset reads as "my import didn't work".
