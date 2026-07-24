@@ -407,6 +407,45 @@ pub async fn create_folder(
         .map_err(AppError::from)
 }
 
+#[instrument(skip_all, fields(count = asset_ids.len()))]
+#[tauri::command]
+pub async fn selection_summary(
+    asset_ids: Vec<String>,
+    state: tauri::State<'_, DbState>,
+) -> Result<assets::SelectionSummary, AppError> {
+    let pool = state.acquire_pool().await?;
+    assets::selection_summary(&pool, &asset_ids)
+        .await
+        .inspect_err(|e| tracing::error!(error = %e, "selection_summary failed"))
+        .map_err(AppError::from)
+}
+
+#[instrument(skip_all, fields(count = asset_ids.len()))]
+#[tauri::command]
+pub async fn folder_membership(
+    asset_ids: Vec<String>,
+    state: tauri::State<'_, DbState>,
+) -> Result<Vec<assets::FolderMembership>, AppError> {
+    let pool = state.acquire_pool().await?;
+    assets::folder_membership(&pool, &asset_ids)
+        .await
+        .inspect_err(|e| tracing::error!(error = %e, "folder_membership failed"))
+        .map_err(AppError::from)
+}
+
+#[instrument(skip_all)]
+#[tauri::command]
+pub async fn folder_stats(
+    folder_id: String,
+    state: tauri::State<'_, DbState>,
+) -> Result<assets::FolderStats, AppError> {
+    let pool = state.acquire_pool().await?;
+    assets::folder_stats(&pool, &folder_id)
+        .await
+        .inspect_err(|e| tracing::error!(error = %e, "folder_stats failed"))
+        .map_err(AppError::from)
+}
+
 #[instrument(skip_all)]
 #[tauri::command]
 pub async fn update_folder(

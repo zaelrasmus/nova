@@ -3,10 +3,16 @@
     import { toast } from "svelte-sonner";
     import { openUrl } from "@tauri-apps/plugin-opener";
     import { assetLibrary, describeShape, filenameStem } from "$lib/assets.svelte";
-    import type { AssetPatch, FolderPatch } from "$lib/assets.svelte";
+    import type {
+        AssetPatch,
+        FolderPatch,
+        FolderStats,
+        SelectionSummary,
+    } from "$lib/assets.svelte";
     import { selection } from "$lib/selection.svelte";
     import { formatAspectRatio, formatBytes, formatTimestamp } from "$lib/format";
     import PaletteSection from "./PaletteSection.svelte";
+    import FolderMembership from "./FolderMembership.svelte";
 
     // The inspector renders the selection; it never owns it. Every mode below is
     // a branch of one union, so "3 assets and a folder" can't be reached.
@@ -140,6 +146,35 @@
         }
     }
 
+    // ── Folder aggregates ────────────────────────────────────────────────────
+    // Recomputed when the selected folder changes AND when the folder list is
+    // reloaded — which happens after an import and after any folder CRUD, so the
+    // numbers refresh at the moments they'd otherwise go stale. Adding or
+    // removing individual assets still needs a reselect; that's the honest limit
+    // of not caching this anywhere.
+    let stats = $state<FolderStats | null>(null);
+
+    $effect(() => {
+        const id = folder?.id;
+        void assetLibrary.folders;
+        if (!id) {
+            stats = null;
+            return;
+        }
+        let cancelled = false;
+        assetLibrary
+            .fetchFolderStats(id)
+            .then((s) => {
+                if (!cancelled) stats = s;
+            })
+            .catch(() => {
+                if (!cancelled) stats = null;
+            });
+        return () => {
+            cancelled = true; // a newer selection superseded this fetch
+        };
+    });
+
     const TYPE_LABELS: Record<string, string> = {
         image: "Image",
         video: "Video",
@@ -147,19 +182,30 @@
         unknown: "File",
     };
 
-    // Total bytes for a multi-selection, but ONLY when every row happens to be
-    // hydrated. Summing the cached subset would silently under-report, and
-    // hydrating thousands of rows to answer it is the wrong trade — the real fix
-    // is one aggregate query, which lands with bulk edit.
-    const bulkBytes = $derived.by(() => {
-        if (current.kind !== "assets") return null;
-        let total = 0;
-        for (const id of current.ids) {
-            const row = assetLibrary.heavy.get(id);
-            if (!row) return null;
-            total += row.file_size;
+    // Exact totals from the DB. Summing the heavy cache would have been free but
+    // wrong: that cache holds a bounded window, so any selection larger than the
+    // screen would quietly under-report.
+    let summary = $state<SelectionSummary | null>(null);
+
+    $effect(() => {
+        const ids = current.kind === "assets" && current.ids.length > 1 ? current.ids : null;
+        if (!ids) {
+            summary = null;
+            return;
         }
-        return total;
+        let cancelled = false;
+        summary = null;
+        assetLibrary
+            .fetchSelectionSummary(ids)
+            .then((s) => {
+                if (!cancelled) summary = s;
+            })
+            .catch(() => {
+                if (!cancelled) summary = null;
+            });
+        return () => {
+            cancelled = true;
+        };
     });
 
     const inputClass =
@@ -256,6 +302,12 @@
 
             <div class="h-px bg-neutral-800"></div>
 
+            <!-- Same control as bulk mode, just with a selection of one — so the
+                 tri-state collapses to an ordinary checkbox on its own. -->
+            <FolderMembership assetIds={[asset.id]} {legendClass} />
+
+            <div class="h-px bg-neutral-800"></div>
+
             <!-- Images only: nothing else produces a palette, and an empty strip
                  on a video would read as a bug rather than as "not applicable". -->
             {#if asset.asset_type === "image"}
@@ -292,11 +344,16 @@
              "append or replace?" for a field shared by 50 rows. -->
         <div>
             <h2 class="text-neutral-100">{current.ids.length} assets selected</h2>
-            {#if bulkBytes !== null}
-                <p class="mt-0.5 text-xs text-neutral-500">{formatBytes(bulkBytes)} total</p>
-            {/if}
+            <p class="mt-0.5 text-xs text-neutral-500">
+                {summary ? `${formatBytes(summary.total_bytes)} total` : "Measuring…"}
+            </p>
         </div>
-        <p class="text-xs text-neutral-600">Batch editing arrives with the bulk inspector.</p>
+
+        <FolderMembership assetIds={current.ids} {legendClass} />
+
+        <p class="text-xs text-neutral-600">
+            Tags will appear here, with the same three states, once that feature lands.
+        </p>
     {:else if folder}
         <label class="block">
             <span class={legendClass}>Folder name</span>
@@ -315,9 +372,19 @@
         <div class="h-px bg-neutral-800"></div>
 
         <div class="flex flex-col text-xs">
+            {#if stats}
+                <!-- Counted across the whole subtree, deduplicated: an asset in
+                     both a parent and its child is one item, not two. -->
+                {@render row("Items", stats.asset_count.toLocaleString())}
+                {@render row("Size", formatBytes(stats.total_bytes))}
+                {#if stats.descendant_folders > 0}
+                    {@render row("Subfolders", stats.descendant_folders.toLocaleString())}
+                {/if}
+            {:else}
+                {@render row("Items", "…")}
+            {/if}
             {@render row("Created", formatTimestamp(folder.created_at))}
         </div>
-        <p class="text-xs text-neutral-600">Item count and total size arrive next.</p>
     {:else}
         <!-- An empty state, not a blank panel: a void reads as a bug. This is
              also what "All" and "Uncategorized" resolve to — they're places, and

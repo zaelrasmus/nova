@@ -1036,6 +1036,146 @@ pub async fn create_folder(
     })
 }
 
+// ── Selection aggregates ──────────────────────────────────────────────────────
+//
+// A selection can be arbitrarily large (Ctrl+A over the whole library), so unlike
+// `fetch_assets_by_ids` — which only ever sees a visible window — these chunk
+// their id lists. SQLite caps bound parameters at 32766.
+const IDS_PER_QUERY: usize = 8000;
+
+/// Deduplicate before chunking. Repeated ids inside ONE `IN (...)` list are
+/// harmless, but the same id in two different chunks would be counted twice.
+fn unique_ids(ids: &[String]) -> Vec<&String> {
+    let mut seen = std::collections::HashSet::with_capacity(ids.len());
+    ids.iter().filter(|id| seen.insert(id.as_str())).collect()
+}
+
+/// Exact totals for a set of assets.
+#[derive(Serialize, Debug, Clone, Default)]
+pub struct SelectionSummary {
+    pub count: i64,
+    pub total_bytes: i64,
+}
+
+#[instrument(skip(pool, ids), fields(ids = ids.len()))]
+pub async fn selection_summary(pool: &SqlitePool, ids: &[String]) -> Result<SelectionSummary> {
+    let ids = unique_ids(ids);
+    let mut summary = SelectionSummary::default();
+
+    for chunk in ids.chunks(IDS_PER_QUERY) {
+        let mut qb = QueryBuilder::new(
+            "SELECT COUNT(*), COALESCE(SUM(file_size), 0) FROM assets WHERE id IN (",
+        );
+        let mut separated = qb.separated(", ");
+        for id in chunk {
+            separated.push_bind(*id);
+        }
+        qb.push(")");
+
+        let (count, bytes): (i64, i64) = qb
+            .build_query_as()
+            .fetch_one(pool)
+            .await
+            .context("Failed to summarize selection")?;
+        summary.count += count;
+        summary.total_bytes += bytes;
+    }
+    Ok(summary)
+}
+
+/// How many of the queried assets sit in one folder — the raw material for the
+/// UI's all / some / none tri-state.
+#[derive(Serialize, Debug, Clone)]
+pub struct FolderMembership {
+    pub folder_id: String,
+    pub count: i64,
+}
+
+/// Membership counts for every folder that holds at least one of `ids`. Folders
+/// holding none are simply absent, which the caller reads as zero.
+#[instrument(skip(pool, ids), fields(ids = ids.len()))]
+pub async fn folder_membership(pool: &SqlitePool, ids: &[String]) -> Result<Vec<FolderMembership>> {
+    let ids = unique_ids(ids);
+    let mut totals: HashMap<String, i64> = HashMap::new();
+
+    for chunk in ids.chunks(IDS_PER_QUERY) {
+        let mut qb = QueryBuilder::new(
+            "SELECT folder_id, COUNT(DISTINCT asset_id) FROM assets_folders WHERE asset_id IN (",
+        );
+        let mut separated = qb.separated(", ");
+        for id in chunk {
+            separated.push_bind(*id);
+        }
+        qb.push(") GROUP BY folder_id");
+
+        let rows: Vec<(String, i64)> = qb
+            .build_query_as()
+            .fetch_all(pool)
+            .await
+            .context("Failed to read folder membership")?;
+        for (folder_id, count) in rows {
+            *totals.entry(folder_id).or_insert(0) += count;
+        }
+    }
+
+    Ok(totals
+        .into_iter()
+        .map(|(folder_id, count)| FolderMembership { folder_id, count })
+        .collect())
+}
+
+/// What a folder contains, counting every descendant folder.
+#[derive(Serialize, Debug, Clone)]
+pub struct FolderStats {
+    pub asset_count: i64,
+    pub total_bytes: i64,
+    /// Subfolders below this one at any depth, excluding the folder itself.
+    pub descendant_folders: i64,
+}
+
+/// Aggregate a folder's whole subtree.
+///
+/// `DISTINCT` is not optional here: an asset can be a member of BOTH a parent and
+/// one of its children, and a plain join would count it twice and add its bytes
+/// twice. The size sum therefore runs over the deduplicated id set rather than
+/// over the join — `SUM(DISTINCT file_size)` would be a different (and wrong)
+/// thing entirely, collapsing two same-sized files into one.
+///
+/// Deliberately a separate call made when a folder is SELECTED, never part of
+/// `fetch_folders`: listing N folders would otherwise run N recursive CTEs.
+#[instrument(skip(pool))]
+pub async fn folder_stats(pool: &SqlitePool, folder_id: &str) -> Result<FolderStats> {
+    // `UNION` (not `UNION ALL`) also makes this terminate if the tree ever
+    // contained a cycle — repeated ids stop the recursion instead of hanging.
+    // `move_folder` already rejects cycles; this is the second line of defence.
+    let (descendant_folders, asset_count, total_bytes): (i64, i64, i64) = sqlx::query_as(
+        "WITH RECURSIVE subtree(id) AS (
+             SELECT id FROM folders WHERE id = ?
+             UNION
+             SELECT f.id FROM folders f JOIN subtree s ON f.parent_id = s.id
+         ),
+         members AS (
+             SELECT DISTINCT af.asset_id AS asset_id
+             FROM assets_folders af JOIN subtree s ON af.folder_id = s.id
+         )
+         SELECT
+             (SELECT COUNT(*) FROM subtree) - 1,
+             (SELECT COUNT(*) FROM members),
+             (SELECT COALESCE(SUM(a.file_size), 0)
+              FROM members m JOIN assets a ON a.id = m.asset_id)",
+    )
+    .bind(folder_id)
+    .fetch_one(pool)
+    .await
+    .context("Failed to compute folder stats")?;
+
+    Ok(FolderStats {
+        asset_count,
+        total_bytes,
+        descendant_folders,
+    })
+}
+
 #[instrument(skip(pool))]
 pub async fn update_folder(pool: &SqlitePool, id: &str, patch: FolderPatch) -> Result<()> {
     let name = match patch.name {

@@ -441,6 +441,37 @@ export interface Folder {
   created_at: string;
 }
 
+/** Exact totals for a set of assets, computed by the DB rather than estimated. */
+export interface SelectionSummary {
+  count: number;
+  total_bytes: number;
+}
+
+/** How many of the queried assets sit in one folder. Absent folders mean zero. */
+export interface FolderMembership {
+  folder_id: string;
+  count: number;
+}
+
+/**
+ * Membership of a folder across a selection.
+ *
+ * The "some" state is what makes batch editing safe: it says the folder holds a
+ * SUBSET, so acting on it must be an add/remove delta rather than an overwrite.
+ * Tags will reuse this exact shape when that feature lands.
+ */
+export type TriState = "all" | "some" | "none";
+
+export const triStateOf = (count: number, total: number): TriState =>
+  count === 0 ? "none" : count >= total ? "all" : "some";
+
+/** What a folder holds, counting its whole subtree. Computed on demand. */
+export interface FolderStats {
+  asset_count: number;
+  total_bytes: number;
+  descendant_folders: number;
+}
+
 // ThumbHash (base64) -> data URL, memoized (cards mount/unmount on scroll).
 const thumbUrlCache = new Map<string, string>();
 export function thumbHashUrl(hash: string | null): string | null {
@@ -807,6 +838,29 @@ class AssetLibrary {
   }
 
   /**
+   * Exact count and total size for a selection. A real query rather than a sum
+   * over cached rows: the heavy cache holds a bounded window, so summing it
+   * would silently under-report the moment a selection outgrows the screen.
+   */
+  fetchSelectionSummary(assetIds: string[]): Promise<SelectionSummary> {
+    return invoke<SelectionSummary>("selection_summary", { assetIds });
+  }
+
+  /** Per-folder membership counts for a selection; drives the tri-state UI. */
+  fetchFolderMembership(assetIds: string[]): Promise<FolderMembership[]> {
+    return invoke<FolderMembership[]>("folder_membership", { assetIds });
+  }
+
+  /**
+   * Aggregate one folder's subtree. A separate call made when a folder is
+   * selected — never folded into `loadFolders`, since listing N folders would
+   * then run N recursive CTEs.
+   */
+  fetchFolderStats(folderId: string): Promise<FolderStats> {
+    return invoke<FolderStats>("folder_stats", { folderId });
+  }
+
+  /**
    * Apply a partial folder update. Omitted keys are left alone; `""` clears a
    * field — see FolderPatch in assets.rs. Reloads the tree because a rename
    * changes the sibling ordering (`ORDER BY parent_id, position, name`).
@@ -863,7 +917,9 @@ class AssetLibrary {
   async removeAssetsFromFolder(folderId: string, assetIds: string[]): Promise<void> {
     await invoke("remove_assets_from_folder", { folderId, assetIds });
     const active = this.scope;
-    if (active.kind === "folder" && active.id === folderId) {
+    // "uncategorized" too: dropping an asset's last membership is exactly what
+    // makes it appear there.
+    if (active.kind === "uncategorized" || (active.kind === "folder" && active.id === folderId)) {
       await this.reload();
     }
   }
