@@ -1216,13 +1216,28 @@ pub async fn update_folder(pool: &SqlitePool, id: &str, patch: FolderPatch) -> R
 /// Delete a folder. The self-FK and membership FKs are `ON DELETE CASCADE`, so
 /// this also removes every descendant folder and all membership rows — but never
 /// the assets themselves (an asset with no remaining folder becomes uncategorized).
-#[instrument(skip(pool))]
-pub async fn delete_folder(pool: &SqlitePool, id: &str) -> Result<()> {
-    sqlx::query("DELETE FROM folders WHERE id = ?")
-        .bind(id)
+/// Delete one or more folders.
+///
+/// One statement rather than a loop: deleting a parent cascades its children, so
+/// a loop would hit rows that no longer exist — harmless per-row, but it leaves a
+/// half-applied tree if any call in the middle fails. Selecting a parent and its
+/// child together is normal in a tree, so this is the common case, not an edge.
+#[instrument(skip(pool, ids), fields(count = ids.len()))]
+pub async fn delete_folders(pool: &SqlitePool, ids: &[String]) -> Result<()> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let mut qb = QueryBuilder::new("DELETE FROM folders WHERE id IN (");
+    let mut separated = qb.separated(", ");
+    for id in ids {
+        separated.push_bind(id);
+    }
+    qb.push(")");
+
+    qb.build()
         .execute(pool)
         .await
-        .context("Failed to delete folder")?;
+        .context("Failed to delete folders")?;
     Ok(())
 }
 

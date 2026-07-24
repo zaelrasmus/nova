@@ -479,11 +479,14 @@ pub async fn update_asset(
 
 #[instrument(skip_all)]
 #[tauri::command]
-pub async fn delete_folder(id: String, state: tauri::State<'_, DbState>) -> Result<(), AppError> {
+pub async fn delete_folders(
+    ids: Vec<String>,
+    state: tauri::State<'_, DbState>,
+) -> Result<(), AppError> {
     let pool = state.acquire_pool().await?;
-    assets::delete_folder(&pool, &id)
+    assets::delete_folders(&pool, &ids)
         .await
-        .inspect_err(|e| tracing::error!(error = %e, "delete_folder failed"))
+        .inspect_err(|e| tracing::error!(error = %e, "delete_folders failed"))
         .map_err(AppError::from)
 }
 

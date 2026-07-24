@@ -40,7 +40,7 @@ pub fn run() {
             commands::selection_summary,
             commands::folder_membership,
             commands::update_asset,
-            commands::delete_folder,
+            commands::delete_folders,
             commands::move_folder,
             commands::add_assets_to_folder,
             commands::remove_assets_from_folder,

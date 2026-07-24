@@ -179,7 +179,7 @@
                 // `assets` is read here, when the handler RUNS, not when this
                 // effect does — so it never re-registers the listener, and
                 // "select all" always means all currently *visible* rows.
-                selection.selectAll(idsNow());
+                selection.selectAllAssets(idsNow());
             }
         };
         window.addEventListener("keydown", onKey);
@@ -292,9 +292,10 @@
                             {heavy}
                             style="width: {columnWidth}px; height: {item.size - GAP}px; left: {item.lane * (columnWidth + GAP)}px; transform: translateY({item.start}px);"
                             selected={selection.has(light.id)}
-                            onPointerDown={(e) => selection.pointerDown(idsNow(), item.index, mods(e))}
-                            onClick={() => selection.click(light.id)}
-                            onActivate={() => selection.selectOnly(light.id)}
+                            onPointerDown={(e) =>
+                                selection.pointerDownAsset(idsNow(), item.index, mods(e))}
+                            onClick={() => selection.clickAsset(light.id)}
+                            onActivate={() => selection.selectOnlyAsset(light.id)}
                         />
                     {/each}
                 </div>

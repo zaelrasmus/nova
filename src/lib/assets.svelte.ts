@@ -891,9 +891,12 @@ class AssetLibrary {
    * the active view was the deleted folder or one of its now-gone descendants,
    * fall back to the full library.
    */
-  async deleteFolder(id: string): Promise<void> {
-    await invoke("delete_folder", { id });
+  async deleteFolders(ids: string[]): Promise<void> {
+    if (ids.length === 0) return;
+    await invoke("delete_folders", { ids });
     await this.loadFolders();
+    // Checking membership of the RELOADED list also catches descendants that
+    // went with a deleted parent, which `ids` alone doesn't name.
     const active = this.scope;
     if (active.kind === "folder" && !this.folders.some((f) => f.id === active.id)) {
       await this.setScope({ kind: "all" });
