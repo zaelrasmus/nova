@@ -8,6 +8,7 @@
     import { libraryManager, settings } from "../routes/settings.svelte";
     import { assetLibrary, type AssetLightRow } from "$lib/assets.svelte";
     import { selection } from "$lib/selection.svelte";
+    import { dropzone, DROP_LIBRARY_ATTR } from "$lib/dropzone.svelte";
 
 
     // Manifest = layout source of truth (id, width, height, asset_type).
@@ -209,7 +210,11 @@
 </script>
 
 
-<div class="flex flex-col h-full">
+<!-- The neutral import surface: a drop anywhere here that isn't a folder row
+     means "import into the library at large". Marked on the outer element rather
+     than the scroll container so the header and empty states accept drops too —
+     an empty library is exactly when you most want to drop files in. -->
+<div class="relative flex h-full flex-col" {...{ [DROP_LIBRARY_ATTR]: "" }}>
     <div class="flex items-center justify-between px-4 py-2 border-b border-neutral-800 bg-white shrink-0">
         <!-- Say "of N" when filtered, so a narrowed view never looks like a small
              library. `manifest` is the filtered set, so N comes from the store. -->
@@ -308,4 +313,20 @@
                 </div>
             </div>
         {/if}
+
+    <!-- Drop affordance. `pointer-events-none` is load-bearing, not cosmetic:
+         `elementFromPoint` skips elements that ignore pointer events, so without
+         it this overlay would sit between the cursor and the very target the
+         dropzone is trying to resolve. -->
+    {#if dropzone.active && dropzone.target?.kind === "library"}
+        <div
+            class="pointer-events-none absolute inset-0 z-20 flex items-center justify-center
+                   border-2 border-dashed border-emerald-500 bg-emerald-500/10"
+        >
+            <span class="rounded bg-emerald-600 px-3 py-1.5 text-sm font-medium text-white">
+                Import {dropzone.count}
+                {dropzone.count === 1 ? "item" : "items"}
+            </span>
+        </div>
+    {/if}
     </div>

@@ -1,6 +1,7 @@
 <script lang="ts">
     import { assetLibrary, type Folder, type ManifestScope } from "$lib/assets.svelte";
     import { RangeSelection, selection } from "$lib/selection.svelte";
+    import { dropzone, DROP_FOLDER_ATTR, DROP_FOLDER_NAME_ATTR } from "$lib/dropzone.svelte";
     import { toast } from "svelte-sonner";
 
     const folders = $derived(assetLibrary.folders);
@@ -160,7 +161,17 @@
     {#snippet tree(parentId: string | null, depth: number)}
         {#each childrenByParent.get(parentId) ?? [] as folder (folder.id)}
             {@const index = indexById.get(folder.id) ?? 0}
-            <div class="group flex items-center" style="padding-left: {depth * 12}px">
+            {@const dropping = dropzone.isOverFolder(folder.id)}
+            <!-- The whole row is the drop target, indent included: a thin strip
+                 is hard to hit with a file already in hand. The native drag-drop
+                 event carries no DOM target, so `dropzone` hit-tests these
+                 attributes by coordinate — see dropzone.svelte.ts. -->
+            <div
+                {...{ [DROP_FOLDER_ATTR]: folder.id, [DROP_FOLDER_NAME_ATTR]: folder.name }}
+                class="group flex items-center rounded transition-colors
+                    {dropping ? 'bg-emerald-600/25 ring-1 ring-emerald-500' : ''}"
+                style="padding-left: {depth * 12}px"
+            >
                 <button
                     type="button"
                     title={folder.name}

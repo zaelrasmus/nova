@@ -419,6 +419,30 @@ pub struct Folder {
     pub created_at: String,
 }
 
+/// Everything an import needs that the file tree cannot tell it.
+///
+/// Exists so the dialog path and the drop path stay ONE pipeline: they differ
+/// only in these four values, and bundling them keeps that difference visible in
+/// one place instead of spreading across two near-identical functions that drift.
+///
+/// Rust-internal — the commands assemble it from their own arguments, so it
+/// never crosses the IPC boundary and needs no serde.
+#[derive(Debug)]
+pub struct ImportRequest {
+    /// Directories, files, or a mix — a drop hands over whatever was grabbed.
+    pub sources: Vec<PathBuf>,
+    /// Existing folder the whole import nests beneath. `None` = library root.
+    /// Also where loose files land, which is what makes dropping a handful of
+    /// images onto a folder file them there.
+    pub target_folder: Option<String>,
+    /// Recreate the source directory structure as folders. Off = every asset
+    /// arrives free (or in `target_folder`, if there is one).
+    pub import_folders: bool,
+    /// Whether each source directory becomes a folder itself. See
+    /// `fs::scan_directories`.
+    pub include_roots: bool,
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 pub struct ImportResult {
     pub folders: Vec<Folder>,
@@ -1763,15 +1787,21 @@ async fn cleanup_orphans(root: &Path, assets: &[AssetMetadata]) {
     }
 }
 
-#[instrument(skip(reporter, pool), fields(source = %source_dir.display()))]
+#[instrument(skip(reporter, pool, request),
+    fields(sources = request.sources.len(), target = ?request.target_folder))]
 pub async fn import_assets(
     reporter: Arc<dyn ProgressReporter>,
-    source_dir: PathBuf,
+    request: ImportRequest,
     pool: SqlitePool,
     library_root: PathBuf,
-    import_folders: bool,
 ) -> Result<ImportResult> {
     let pipeline_start = std::time::Instant::now();
+    let ImportRequest {
+        sources,
+        target_folder,
+        import_folders,
+        include_roots,
+    } = request;
 
     reporter.report(ImportProgress {
         stage: ImportStage::Scanning,
@@ -1789,11 +1819,19 @@ pub async fn import_assets(
     // Stage 2: Walk directory tree.
     let scan_start = std::time::Instant::now();
     let (folders, folder_id_by_path) = if import_folders {
-        fs::scan_directories(&source_dir)
+        // Continue the target's existing children rather than restarting at 0,
+        // so dropped folders append instead of interleaving with what's there.
+        let root_position = next_folder_position(&pool, target_folder.as_deref()).await?;
+        fs::scan_directories(
+            &sources,
+            include_roots,
+            target_folder.as_deref(),
+            root_position,
+        )
     } else {
         (Vec::new(), HashMap::new())
     };
-    let discovered_files = fs::collect_files(&source_dir);
+    let discovered_files = fs::collect_files(&sources);
     let file_count = discovered_files.len();
 
     info!(
@@ -1878,11 +1916,18 @@ pub async fn import_assets(
                     .map(|(existing_id, staged)| (existing_id.as_str(), staged.source_path.as_str())),
             )
             .filter_map(|(asset_id, source_path)| {
-                let parent = Path::new(source_path).parent()?;
-                let folder_id = folder_id_by_path.get(parent)?;
+                // A file whose directory was scanned joins that folder. Anything
+                // else — a loose dropped file, or every file when structure is
+                // off — falls back to the drop target. With no target (the
+                // dialog path) it stays free, preserving the old behaviour where
+                // files directly under the import root are uncategorized.
+                let folder_id = Path::new(source_path)
+                    .parent()
+                    .and_then(|p| folder_id_by_path.get(p).cloned())
+                    .or_else(|| target_folder.clone())?;
                 let position = counters.entry(folder_id.clone()).or_insert(0.0);
                 let link = FolderLink {
-                    folder_id: folder_id.clone(),
+                    folder_id,
                     asset_id: asset_id.to_string(),
                     position: *position,
                 };

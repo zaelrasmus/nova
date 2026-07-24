@@ -32,6 +32,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::create_library,
             commands::import_assets,
+            commands::import_dropped_paths,
             commands::connect_library,
             commands::stream_manifest,
             commands::fetch_folders,

@@ -125,13 +125,60 @@ pub async fn import_assets(
 
     assets::import_assets(
         reporter,
-        source_dir,
+        assets::ImportRequest {
+            sources: vec![source_dir],
+            // The dialog imports into the library at large, and recreates the
+            // picked folder's CONTENTS rather than the folder itself.
+            target_folder: None,
+            import_folders,
+            include_roots: false,
+        },
         handle.pool,
         handle.root,
-        import_folders,
     )
     .await
     .inspect_err(|e| tracing::error!(error = %e, source = %source_path, "import_assets failed"))
+    .map_err(AppError::from)
+}
+
+/// Import files and folders dropped onto the window from the OS.
+///
+/// Separate from `import_assets` because a drop means something different: the
+/// paths are whatever was grabbed (files, directories, or both), each dropped
+/// directory becomes a folder in its own right, and the whole lot nests under
+/// whichever folder row the cursor was over.
+///
+/// `paths` comes straight from Tauri's native drag-drop event, so these are real
+/// OS paths the user chose by dragging — the same trust level as the file dialog.
+#[instrument(skip_all, fields(paths = paths.len(), target = ?target_folder))]
+#[tauri::command]
+pub async fn import_dropped_paths(
+    window: tauri::Window,
+    paths: Vec<String>,
+    target_folder: Option<String>,
+    import_folders: bool,
+    state: tauri::State<'_, DbState>,
+) -> Result<assets::ImportResult, AppError> {
+    let handle = state.acquire().await?;
+
+    let reporter = Arc::new(TauriProgressReporter {
+        window,
+        last_emit: std::sync::Mutex::new(std::time::Instant::now()),
+    });
+
+    assets::import_assets(
+        reporter,
+        assets::ImportRequest {
+            sources: paths.into_iter().map(std::path::PathBuf::from).collect(),
+            target_folder,
+            import_folders,
+            include_roots: true,
+        },
+        handle.pool,
+        handle.root,
+    )
+    .await
+    .inspect_err(|e| tracing::error!(error = %e, "import_dropped_paths failed"))
     .map_err(AppError::from)
 }
 

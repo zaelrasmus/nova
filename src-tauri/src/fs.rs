@@ -57,9 +57,28 @@ pub async fn ensure_dir(path: &Path) -> Result<()> {
     Ok(())
 }
 
-#[instrument(fields(source = %source_dir.display()))]
+/// Scan source directory trees into `Folder` rows, parent-before-child, plus the
+/// path→id map that attaches each asset to the folder its file lived in.
+///
+/// Two knobs, because a dialog import and a drop want different things from the
+/// same walk:
+///
+/// * `include_roots` — whether each source directory becomes a folder itself.
+///   The dialog says NO: you picked that folder, so its *contents* are the
+///   import and recreating it adds a level nobody asked for. A drop says YES:
+///   drag `Photos/` into Nova and a `Photos` folder is precisely what you expect
+///   to appear.
+/// * `parent_id` — an existing folder the whole scan nests beneath, which is how
+///   dropping onto a folder row nests instead of dumping at the top level.
+///
+/// `root_position` seeds the sibling order for the top level so dropped folders
+/// land AFTER whatever the target already contains rather than tying with it.
+#[instrument(skip(roots), fields(roots = roots.len(), include_roots, parent_id))]
 pub fn scan_directories(
-    source_dir: &Path,
+    roots: &[PathBuf],
+    include_roots: bool,
+    parent_id: Option<&str>,
+    root_position: f64,
 ) -> (
     Vec<crate::assets::Folder>,
     std::collections::HashMap<PathBuf, String>,
@@ -68,67 +87,88 @@ pub fn scan_directories(
     let mut folder_id_by_path: std::collections::HashMap<PathBuf, String> =
         std::collections::HashMap::new();
 
-    for entry in WalkDir::new(source_dir)
-        .min_depth(1)
-        .into_iter()
-        .filter_map(|e| {
-            e.inspect_err(|err| {
-                tracing::warn!(error = %err, "WalkDir error while scanning directories, skipping entry")
+    // Sibling order is per-parent, so one shared counter would leave gaps and
+    // ties across levels. Keyed by resolved parent; the top level starts at
+    // `root_position` so it continues an existing folder's children.
+    let mut next_position: std::collections::HashMap<Option<String>, f64> =
+        std::collections::HashMap::new();
+    next_position.insert(parent_id.map(str::to_string), root_position);
+
+    for root in roots {
+        for entry in WalkDir::new(root)
+            .min_depth(if include_roots { 0 } else { 1 })
+            .into_iter()
+            .filter_map(|e| {
+                e.inspect_err(|err| {
+                    tracing::warn!(error = %err, "WalkDir error while scanning directories, skipping entry")
+                })
+                .ok()
             })
-            .ok()
-        })
-        .filter(|e| e.file_type().is_dir())
-    {
-        let path = entry.path().to_path_buf();
-        let id = uuid::Uuid::new_v4().to_string();
-        let parent_id = path.parent().and_then(|p| folder_id_by_path.get(p).cloned());
+            .filter(|e| e.file_type().is_dir())
+        {
+            let path = entry.path().to_path_buf();
+            let id = uuid::Uuid::new_v4().to_string();
 
-        folders.push(crate::assets::Folder {
-            id: id.clone(),
-            name: entry.file_name().to_string_lossy().into_owned(),
-            parent_id,
-            position: folders.len() as f64, // discovery order; siblings stay monotonic
-            order_by: crate::assets::OrderBy::Manual,
-            is_ascending: true,
-            notes: None,
-            // When the folder entered THIS library, not the source directory's
-            // mtime — a scanned folder is created here and now, same as one made
-            // by hand. (The source's own timestamp isn't a property of the folder
-            // as the library understands it.)
-            created_at: crate::assets::now_stamp(),
-        });
+            // A directory whose parent was scanned nests under it; anything else
+            // is a top-level entry of this import and hangs off `parent_id`.
+            // That single fallback covers both the included root and the
+            // depth-1 children of an excluded one.
+            let resolved_parent = path
+                .parent()
+                .and_then(|p| folder_id_by_path.get(p).cloned())
+                .or_else(|| parent_id.map(str::to_string));
 
-        folder_id_by_path.insert(path, id);
+            let position = next_position.entry(resolved_parent.clone()).or_insert(0.0);
+
+            folders.push(crate::assets::Folder {
+                id: id.clone(),
+                name: entry.file_name().to_string_lossy().into_owned(),
+                parent_id: resolved_parent,
+                position: *position, // discovery order; siblings stay monotonic
+                order_by: crate::assets::OrderBy::Manual,
+                is_ascending: true,
+                notes: None,
+                // When the folder entered THIS library, not the source directory's
+                // mtime — a scanned folder is created here and now, same as one made
+                // by hand. (The source's own timestamp isn't a property of the folder
+                // as the library understands it.)
+                created_at: crate::assets::now_stamp(),
+            });
+            *position += 1.0;
+
+            folder_id_by_path.insert(path, id);
+        }
     }
 
-    debug!(
-        folders = folders.len(),
-        source = %source_dir.display(),
-        "Directory scan complete"
-    );
+    debug!(folders = folders.len(), "Directory scan complete");
 
     (folders, folder_id_by_path)
 }
 
-#[instrument(fields(source = %source_dir.display()))]
-pub fn collect_files(source_dir: &Path) -> Vec<PathBuf> {
-    let files: Vec<PathBuf> = WalkDir::new(source_dir)
-        .into_iter()
-        .filter_map(|e| {
-            e.inspect_err(|err| {
-                tracing::warn!(error = %err, "WalkDir error while collecting files, skipping entry")
-            })
-            .ok()
+/// Every file under `roots`, recursively.
+///
+/// Takes a slice because a drop hands over a mix of files and directories.
+/// WalkDir over a plain file yields that one file, so both kinds flow through
+/// here without a special case.
+#[instrument(skip(roots), fields(roots = roots.len()))]
+pub fn collect_files(roots: &[PathBuf]) -> Vec<PathBuf> {
+    let files: Vec<PathBuf> = roots
+        .iter()
+        .flat_map(|root| {
+            WalkDir::new(root)
+                .into_iter()
+                .filter_map(|e| {
+                    e.inspect_err(|err| {
+                        tracing::warn!(error = %err, "WalkDir error while collecting files, skipping entry")
+                    })
+                    .ok()
+                })
+                .filter(|e| e.file_type().is_file())
+                .map(|e| e.into_path())
         })
-        .filter(|e| e.file_type().is_file())
-        .map(|e| e.into_path())
         .collect();
 
-    debug!(
-        count = files.len(),
-        source = %source_dir.display(),
-        "File collection complete"
-    );
+    debug!(count = files.len(), "File collection complete");
 
     files
 }

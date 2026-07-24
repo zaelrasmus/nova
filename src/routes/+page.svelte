@@ -6,7 +6,8 @@
     import { cubicOut } from "svelte/easing";
     import { tweened } from "svelte/motion";
     import { QueryClient, QueryClientProvider } from "@tanstack/svelte-query";
-    import { assetLibrary } from "$lib/assets.svelte";
+    import { assetLibrary, type ManifestScope } from "$lib/assets.svelte";
+    import { dropzone, type DropTarget } from "$lib/dropzone.svelte";
 
     import { toast } from "svelte-sonner";
     import { Alert, AlertDescription, AlertTitle } from "$components/ui/alert";
@@ -120,14 +121,23 @@
         }
     }
 
-    async function handleImport() {
-        const selectedSource = await open({
-            directory: true,
-            multiple: false,
-            title: "Select folder to import",
-        });
-        if (!selectedSource) return;
-
+    /**
+     * Run an import command behind the progress overlay and the result toast.
+     *
+     * Shared by the dialog and by drag & drop: the two differ only in which
+     * command they call and with what, while the progress plumbing, the reload,
+     * and the reporting are identical — and the plumbing is the fiddly part
+     * (a listener that must be torn down on every exit path).
+     *
+     * `reveal` is where to navigate afterwards: wherever the assets actually
+     * landed. Staying put would leave the user staring at an unchanged grid
+     * wondering whether the import worked.
+     */
+    async function runImport(
+        command: string,
+        args: Record<string, unknown>,
+        reveal: ManifestScope,
+    ) {
         // Reset progress state
         current = 0;
         total = 0;
@@ -145,15 +155,13 @@
             smoothPercentage.set(p.total > 0 ? (p.current / p.total) * 100 : 0);
         });
 
-        const importPromise = invoke<ImportResult>("import_assets", {
-            sourcePath: selectedSource,
-            importFolders,
-        }).then(async (result) => {
-            // Import is now near-instant (no thumbnailing). Show the whole library
-            // and refresh the folder tree so newly created folders appear; the
-            // reload re-runs the grid's on-view effect, generating thumbnails for
-            // the visible window while the rest follow as the user scrolls.
-            await assetLibrary.setScope({ kind: "all" });
+        const importPromise = invoke<ImportResult>(command, args).then(async (result) => {
+            // Import is now near-instant (no thumbnailing). Show where the
+            // assets landed and refresh the folder tree so newly created folders
+            // appear; the reload re-runs the grid's on-view effect, generating
+            // thumbnails for the visible window while the rest follow as the
+            // user scrolls.
+            await assetLibrary.setScope(reveal);
             await assetLibrary.loadFolders();
             return result; // pass through so toast.promise still receives it
         });
@@ -180,6 +188,63 @@
             isImporting = false;
             unlisten();
         }
+    }
+
+    /**
+     * A drop landed. Turns the paths and the resolved target into an import.
+     *
+     * Lives here rather than in the dropzone store because this is where "what a
+     * drop MEANS" belongs — the store only knows what the cursor is over. It's
+     * also where the import overlay and the progress listener already are.
+     */
+    async function handleDrop(paths: string[], target: DropTarget) {
+        if (!libraryManager.state.activeLibrary) {
+            toast.error("Open a library before importing.");
+            return;
+        }
+        if (isImporting) {
+            // The pipeline holds a single DB handle and one progress channel; a
+            // second concurrent import would interleave both.
+            toast.error("An import is already running.");
+            return;
+        }
+
+        const targetFolder = target.kind === "folder" ? target.id : null;
+        await runImport(
+            "import_dropped_paths",
+            { paths, targetFolder, importFolders },
+            // Reveal where they landed: the folder they were dropped on, or the
+            // whole library for a neutral drop.
+            targetFolder ? { kind: "folder", id: targetFolder } : { kind: "all" },
+        );
+    }
+
+    // One listener for the whole app — there is a single webview, and the native
+    // drag-drop event is window-scoped, not per-element.
+    $effect(() => {
+        let unlisten: (() => void) | null = null;
+        let dead = false;
+        dropzone
+            .attach(handleDrop)
+            .then((fn) => (dead ? fn() : (unlisten = fn)))
+            .catch((e) => console.error("Failed to attach drop listener", e));
+        return () => {
+            dead = true;
+            unlisten?.();
+        };
+    });
+
+    async function handleImport() {
+        const selectedSource = await open({
+            directory: true,
+            multiple: false,
+            title: "Select folder to import",
+        });
+        if (!selectedSource) return;
+
+        await runImport("import_assets", { sourcePath: selectedSource, importFolders }, {
+            kind: "all",
+        });
     }
 
     async function runInjection() {
