@@ -11,6 +11,7 @@
     import { dropzone } from "$lib/dropzone.svelte";
     import { DROP_LIBRARY_ATTR, type DropTarget } from "$lib/droptarget";
     import { drag, draggable, DRAG_SCROLL_ATTR, type DropContext } from "$lib/dragdrop.svelte";
+    import { computeJustified, visibleRows } from "$lib/justified";
     import { toast } from "svelte-sonner";
 
 
@@ -59,19 +60,57 @@
       });
     })
 
+    // Height too, for justified row virtualization (waterfall gets it from
+    // TanStack; the justified path measures the window itself).
+    let containerHeight = $state(0);
+    let scrollTop = $state(0);
+
     $effect(() => {
         if (!scrollEl) return;
         const observer = new ResizeObserver(([entry]) => {
             containerWidth = entry.contentRect.width;
+            containerHeight = entry.contentRect.height;
         });
         observer.observe(scrollEl);
         return () => observer.disconnect();
+    });
+
+    // Track scroll position for the justified layout's visible-row window. rAF-
+    // coalesced so a fast scroll updates once per frame, not per event. The
+    // waterfall path ignores this — TanStack reads scroll on its own.
+    $effect(() => {
+        const el = scrollEl;
+        if (!el) return;
+        let ticking = false;
+        const onScroll = () => {
+            if (ticking) return;
+            ticking = true;
+            requestAnimationFrame(() => {
+                scrollTop = el.scrollTop;
+                ticking = false;
+            });
+        };
+        el.addEventListener("scroll", onScroll, { passive: true });
+        scrollTop = el.scrollTop;
+        return () => el.removeEventListener("scroll", onScroll);
     });
 
     const columnWidth = $derived(
         containerWidth > 0 ? (containerWidth - GAP * (numColumns - 1)) / numColumns : 200, // safe fallback before first measuremnt
     );
 
+    const manualSort = $derived(assetLibrary.sort.order_by === "manual");
+
+    // The layout actually rendered. Waterfall is the staggered masonry; justified
+    // fills full-width rows in reading order. Manual sort FORCES justified,
+    // regardless of the saved preference, because only reading order supports
+    // exact reorder — leaving manual restores the user's choice.
+    const effectiveView = $derived(
+        manualSort ? "justified" : settings.preferences.gridView,
+    );
+    const isJustified = $derived(effectiveView === "justified");
+
+    // ── Waterfall layout (TanStack lanes) ─────────────────────────────────────
     const virtualizer = createVirtualizer<HTMLDivElement, HTMLDivElement>({
       count: assets.length,
       getScrollElement: () => scrollEl,
@@ -95,6 +134,22 @@
       instance.measure();
     })
 
+    // ── Justified layout ──────────────────────────────────────────────────────
+    // The columns slider still controls thumbnail SIZE here: a "column width"
+    // becomes the target row height, so more columns → smaller thumbnails →
+    // more per row, matching the waterfall's feel.
+    const justified = $derived.by(() => {
+        if (!isJustified) return { rows: [], totalHeight: 0 };
+        const ratios = assets.map((a) => (a.width && a.height ? a.width / a.height : 1));
+        return computeJustified(ratios, containerWidth, columnWidth, GAP);
+    });
+
+    // Only the rows in (or near) the viewport get rendered — row-level
+    // virtualization, the justified counterpart of TanStack's item windowing.
+    const justifiedVisible = $derived(
+        isJustified ? visibleRows(justified, scrollTop, containerHeight, columnWidth * 2) : [],
+    );
+
     // Hydrate heavy rows + generate thumbnails for the visible window (+overscan).
     //
     // CRITICAL: read the virtualizer via get(virtualizer), NOT $virtualizer.
@@ -102,10 +157,21 @@
     // getVirtualItems() re-notifies the store, re-running the effect faster than
     // the debounce, so the timer is cleared forever and this never runs). Instead
     // we trigger off the scroll DOM event and off manifest changes.
-    function runHydrate() {
-        const rows = get(virtualizer)
+    // The indices on screen, from whichever layout is active. Both paths window
+    // to (visible + overscan), so hydration and thumbnail generation cover the
+    // same set regardless of view.
+    function visibleIndices(): number[] {
+        if (isJustified) {
+            return justifiedVisible.flatMap((row) => row.items.map((it) => it.index));
+        }
+        return get(virtualizer)
             .getVirtualItems()
-            .map((item) => assets[item.index])
+            .map((item) => item.index);
+    }
+
+    function runHydrate() {
+        const rows = visibleIndices()
+            .map((index) => assets[index])
             .filter((r): r is AssetLightRow => !!r);
         if (!rows.length) return;
         assetLibrary.ensure(rows.map((r) => r.id)); // hydrate heavy rows for the window
@@ -151,11 +217,21 @@
     });
 
     // Manifest/layout-driven: hydrate the initial window after load/import and
-    // when the column count changes (which shifts what's visible).
+    // when the column count or view changes (either shifts what's visible).
     $effect(() => {
         void assets.length;
         void numColumns;
+        void effectiveView;
         scheduleHydrate();
+    });
+
+    // Justified path has no `scrollend`-style hook of its own — its visible set
+    // is a derived, so scrolling changes it reactively. Hydrate whenever that
+    // set shifts. (Waterfall ignores this; it hydrates off the scroll listener.)
+    $effect(() => {
+        if (!isJustified) return;
+        void justifiedVisible;
+        scheduleHydrate(80);
     });
 
 
@@ -216,9 +292,9 @@
     //
     // Reordering writes a rank. Under any sort but manual that rank is invisible
     // — the card would snap back to where the sort puts it — so the gesture is
-    // available ONLY in manual mode. Dragging OUT to the sidebar stays live in
-    // every mode, because that writes membership, not a rank.
-    const manualSort = $derived(assetLibrary.sort.order_by === "manual");
+    // available ONLY in manual mode (see `manualSort`, defined with the layout).
+    // Dragging OUT to the sidebar stays live in every mode: it writes
+    // membership, not a rank.
 
     /**
      * Where a drop at (x, y) inserts: the manifest `index` it lands before
@@ -345,6 +421,40 @@
         </span>
         <div class="flex items-center gap-3">
             <SortControl />
+
+            <!-- View switcher. Waterfall is disabled while sorting manually,
+                 because reading order is required for exact reorder; the title
+                 says why rather than the button just being dead. -->
+            <div class="flex overflow-hidden rounded border border-neutral-300">
+                <button
+                    type="button"
+                    onclick={() => settings.set("gridView", "waterfall")}
+                    disabled={manualSort}
+                    title={manualSort
+                        ? "Waterfall can't reorder exactly — Manual sort uses Justified"
+                        : "Waterfall view"}
+                    aria-pressed={effectiveView === "waterfall"}
+                    class="px-2 py-0.5 text-xs font-medium transition-colors disabled:opacity-40
+                           {effectiveView === 'waterfall'
+                        ? 'bg-blue-600 text-white'
+                        : 'bg-white text-neutral-500 hover:bg-neutral-100'}"
+                >
+                    Waterfall
+                </button>
+                <button
+                    type="button"
+                    onclick={() => settings.set("gridView", "justified")}
+                    title="Justified rows"
+                    aria-pressed={effectiveView === "justified"}
+                    class="border-l border-neutral-300 px-2 py-0.5 text-xs font-medium transition-colors
+                           {effectiveView === 'justified'
+                        ? 'bg-blue-600 text-white'
+                        : 'bg-white text-neutral-500 hover:bg-neutral-100'}"
+                >
+                    Justified
+                </button>
+            </div>
+
             <button
                 type="button"
                 onclick={() =>
@@ -359,11 +469,15 @@
                 GIF
             </button>
             <div class="flex items-center gap-2">
-                <span class="text-xs text-neutral-500">Columns</span>
+                <!-- In justified view the slider sets thumbnail SIZE (via target
+                     row height), not a fixed column count — the label follows. -->
+                <span class="text-xs text-neutral-500">{isJustified ? "Size" : "Columns"}</span>
                 <input type="range" min="2" max="8" step="1" bind:value={numColumns}
                     onchange={() => settings.set("gridColumns", numColumns)}
                     class="w-24 accent-neutral-400" />
-                <span class="text-xs text-neutral-400 w-3 text-center">{numColumns}</span>
+                {#if !isJustified}
+                    <span class="text-xs text-neutral-400 w-3 text-center">{numColumns}</span>
+                {/if}
             </div>
         </div>
     </div>
@@ -417,28 +531,56 @@
                     role="listbox"
                     aria-multiselectable="true"
                     aria-label="Assets"
-                    style="position: relative; width: 100%; height: {$virtualizer.getTotalSize()}px;"
+                    style="position: relative; width: 100%; height: {isJustified
+                        ? justified.totalHeight
+                        : $virtualizer.getTotalSize()}px;"
                 >
-                    {#each $virtualizer.getVirtualItems() as item (item.key)}
-
-                        {@const light = assets[item.index]}
-                        {@const heavy = assetLibrary.heavy.get(light.id)}
-                        <AssetCard
-                            assetType={light.asset_type}
-                            thumbHash={light.thumb_hash}
-                            isAnimated={light.is_animated}
-                            animate={settings.preferences.animateGifsInGrid}
-                            {heavy}
-                            style="width: {columnWidth}px; height: {item.size - GAP}px; left: {item.lane * (columnWidth + GAP)}px; transform: translateY({item.start}px);"
-                            selected={selection.has(light.id)}
-                            dataId={light.id}
-                            dataIndex={item.index}
-                            onPointerDown={(e) =>
-                                selection.pointerDownAsset(idsNow(), item.index, mods(e))}
-                            onClick={() => selection.clickAsset(light.id)}
-                            onActivate={() => selection.selectOnlyAsset(light.id)}
-                        />
-                    {/each}
+                    {#if isJustified}
+                        <!-- Justified: absolute row tops, per-item left/width from
+                             the layout. Reading order == index order, so the
+                             reorder hit-test lands exactly. -->
+                        {#each justifiedVisible as row (row.top)}
+                            {#each row.items as it (assets[it.index].id)}
+                                {@const light = assets[it.index]}
+                                {@const heavy = assetLibrary.heavy.get(light.id)}
+                                <AssetCard
+                                    assetType={light.asset_type}
+                                    thumbHash={light.thumb_hash}
+                                    isAnimated={light.is_animated}
+                                    animate={settings.preferences.animateGifsInGrid}
+                                    {heavy}
+                                    style="width: {it.width}px; height: {row.height}px; left: {it.left}px; transform: translateY({row.top}px);"
+                                    selected={selection.has(light.id)}
+                                    dataId={light.id}
+                                    dataIndex={it.index}
+                                    onPointerDown={(e) =>
+                                        selection.pointerDownAsset(idsNow(), it.index, mods(e))}
+                                    onClick={() => selection.clickAsset(light.id)}
+                                    onActivate={() => selection.selectOnlyAsset(light.id)}
+                                />
+                            {/each}
+                        {/each}
+                    {:else}
+                        {#each $virtualizer.getVirtualItems() as item (item.key)}
+                            {@const light = assets[item.index]}
+                            {@const heavy = assetLibrary.heavy.get(light.id)}
+                            <AssetCard
+                                assetType={light.asset_type}
+                                thumbHash={light.thumb_hash}
+                                isAnimated={light.is_animated}
+                                animate={settings.preferences.animateGifsInGrid}
+                                {heavy}
+                                style="width: {columnWidth}px; height: {item.size - GAP}px; left: {item.lane * (columnWidth + GAP)}px; transform: translateY({item.start}px);"
+                                selected={selection.has(light.id)}
+                                dataId={light.id}
+                                dataIndex={item.index}
+                                onPointerDown={(e) =>
+                                    selection.pointerDownAsset(idsNow(), item.index, mods(e))}
+                                onClick={() => selection.clickAsset(light.id)}
+                                onActivate={() => selection.selectOnlyAsset(light.id)}
+                            />
+                        {/each}
+                    {/if}
                 </div>
             </div>
         {/if}

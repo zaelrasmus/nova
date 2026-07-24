@@ -13,6 +13,15 @@ export interface AppPreferences {
   thumbnailLossyQuality: number;
   /** Masonry column count in the grid (2-8). Persisted so it survives restart. */
   gridColumns: number;
+  /**
+   * Grid layout. "waterfall" is the staggered fixed-width-column masonry;
+   * "justified" fills full-width rows at a shared height (Flickr/Eagle style).
+   * Manual sort always renders justified regardless of this, because waterfall's
+   * shortest-lane packing can't support exact drag-to-reorder — this preference
+   * is what the view returns to when leaving manual sort. Extensible: a future
+   * "grid"/"list" is just another value.
+   */
+  gridView: "waterfall" | "justified";
   animateGifsInGrid: boolean;
   // Add new fields here. They will be filled from DEFAULT_PREFERENCES on first
   // load so existing installations are never broken by a new field.
@@ -38,6 +47,7 @@ const DEFAULT_PREFERENCES: AppPreferences = {
   thumbnailQuality: "auto",
   thumbnailLossyQuality: 80,
   gridColumns: 4,
+  gridView: "waterfall",
   animateGifsInGrid: false,
 };
 
