@@ -11,6 +11,9 @@
         heavy?: AssetMetadata;
         style: string;
         selected?: boolean;
+        /** Asset id and its manifest index, for the grid's reorder hit-testing. */
+        dataId?: string;
+        dataIndex?: number;
         /**
          * Press. Fires BEFORE `onClick` and is where the selection change
          * normally lands, so a drag begins with the right payload.
@@ -30,6 +33,8 @@
         heavy,
         style,
         selected = false,
+        dataId,
+        dataIndex,
         onPointerDown,
         onClick,
         onActivate,
@@ -115,6 +120,8 @@
     {style}
     role="option"
     aria-selected={selected}
+    data-asset-id={dataId}
+    data-asset-index={dataIndex}
     tabindex="0"
     class="absolute top-0 overflow-hidden rounded-md bg-neutral-900 cursor-pointer select-none
            ring-offset-2 ring-offset-white

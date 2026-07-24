@@ -7,7 +7,9 @@
     import { tweened } from "svelte/motion";
     import { QueryClient, QueryClientProvider } from "@tanstack/svelte-query";
     import { assetLibrary, type ManifestScope } from "$lib/assets.svelte";
-    import { dropzone, type DropTarget } from "$lib/dropzone.svelte";
+    import { dropzone } from "$lib/dropzone.svelte";
+    import type { DropTarget } from "$lib/droptarget";
+    import { drag, DRAG_SCROLL_ATTR } from "$lib/dragdrop.svelte";
 
     import { toast } from "svelte-sonner";
     import { Alert, AlertDescription, AlertTitle } from "$components/ui/alert";
@@ -504,7 +506,13 @@
 
         <!-- (h-[70vh] is pragmatic; long-term make <main> a h-screen flex flex-col and this flex-1 min-h-0. Any bounded height works.) -->
         <div class="mt-8 flex gap-4 h-[70vh]">
-            <div class="flex w-56 shrink-0 flex-col gap-3 overflow-y-auto">
+            <!-- Auto-scrolls while a drag hovers its edges: the folder you want
+                 is often below the fold, and there's no way to scroll a sidebar
+                 with a pointer already holding something. -->
+            <div
+                class="flex w-56 shrink-0 flex-col gap-3 overflow-y-auto"
+                {...{ [DRAG_SCROLL_ATTR]: "" }}
+            >
                 <FolderTree />
                 <SavedFilters />
                 <button
@@ -515,14 +523,6 @@
                 >
                     🏷 Manage tags
                 </button>
-                <!-- SPIKE D0 — remove with src/routes/spike-dnd/ -->
-                <a
-                    href="/spike-dnd"
-                    class="rounded-lg border border-dashed border-amber-800 px-3 py-2 text-left
-                           text-sm text-amber-500 transition-colors hover:bg-amber-950/30"
-                >
-                    🧪 D0 DnD spike
-                </a>
             </div>
             <div class="flex-1 min-w-0">
                 <AssetGrid />
@@ -535,6 +535,44 @@
                 <Inspector />
             </div>
         </div>
+
+        <!-- Drag preview. Follows the cursor because a pointer drag moves no
+             DOM of its own — unlike HTML5, nothing is dragged for us.
+             `pointer-events-none` is required, not cosmetic: elementFromPoint
+             skips it, so the preview never becomes its own drop target. -->
+        {#if drag.active && drag.payload}
+            {@const over = drag.target?.kind === "folder" ? drag.target : null}
+            <div
+                class="pointer-events-none fixed z-[100] flex items-center gap-2 rounded-md px-2.5
+                       py-1.5 text-xs font-medium text-white shadow-lg
+                       {drag.forbidden ? 'bg-red-700' : over ? 'bg-emerald-600' : 'bg-neutral-700'}"
+                style="left: {drag.x + 14}px; top: {drag.y + 14}px"
+            >
+                {#if drag.payload.kind === "assets"}
+                    <span>{drag.count} {drag.count === 1 ? "asset" : "assets"}</span>
+                    {#if over}
+                        <!-- Naming the action AND the destination, because add
+                             and move differ only by a held key and only one is
+                             reversible. -->
+                        <span class="opacity-80">
+                            {drag.move ? "move to" : "add to"} "{over.name}"
+                        </span>
+                    {/if}
+                {:else}
+                    <span>📁 {drag.payload.name}</span>
+                    {#if drag.forbidden}
+                        <span class="opacity-80">can't go inside itself</span>
+                    {:else if over}
+                        <!-- The zone IS the operation, so it has to be said out
+                             loud: the same row means two different things
+                             depending on where in it you release. -->
+                        <span class="opacity-80">
+                            {over.zone === "into" ? `into "${over.name}"` : "reorder"}
+                        </span>
+                    {/if}
+                {/if}
+            </div>
+        {/if}
 
         <!-- Background thumbnail generation (Rebuild / large runs). -->
         {#if assetLibrary.thumbProgress}

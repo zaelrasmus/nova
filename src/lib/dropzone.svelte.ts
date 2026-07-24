@@ -20,23 +20,7 @@
 
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import type { UnlistenFn } from "@tauri-apps/api/event";
-
-/**
- * Where a drop would land.
- *
- * `library` is the neutral surface — the grid, the empty space — meaning "import
- * at the top level". It is NOT the same as no target: dragging over the sidebar's
- * gaps or outside the window is `null`, and a drop there does nothing.
- */
-export type DropTarget =
-  | { kind: "library" }
-  | { kind: "folder"; id: string; name: string };
-
-/** Marks a folder row. The name rides along so the overlay can name the target. */
-export const DROP_FOLDER_ATTR = "data-drop-folder";
-export const DROP_FOLDER_NAME_ATTR = "data-drop-folder-name";
-/** Marks the neutral import surface. */
-export const DROP_LIBRARY_ATTR = "data-drop-library";
+import { resolveDropTarget, type DropTarget } from "./droptarget";
 
 /** What `attach` needs from the app to turn a drop into an import. */
 export interface DropHandler {
@@ -62,29 +46,16 @@ class DropZone {
   }
 
   /**
-   * Resolve a native drag position to a drop target.
+   * Native drag position -> drop target.
    *
-   * The conversion is the whole trick. Tauri reports a PhysicalPosition; the DOM
+   * The division is the whole trick. Tauri reports a PhysicalPosition; the DOM
    * works in CSS pixels. They differ by `devicePixelRatio` on any scaled display
-   * — measured in the D0 spike at 125% scaling, where the raw coordinates missed
-   * every target and the divided ones hit exactly. On a 100% display the two are
-   * identical, which is why this bug hides so well.
+   * — measured in the D0 spike at 125%, where the raw coordinates missed every
+   * target and the divided ones hit exactly.
    */
   #resolve(physicalX: number, physicalY: number): DropTarget | null {
     const dpr = window.devicePixelRatio || 1;
-    const el = document.elementFromPoint(physicalX / dpr, physicalY / dpr);
-    if (!el) return null;
-
-    const folder = el.closest(`[${DROP_FOLDER_ATTR}]`);
-    if (folder) {
-      return {
-        kind: "folder",
-        id: folder.getAttribute(DROP_FOLDER_ATTR) ?? "",
-        name: folder.getAttribute(DROP_FOLDER_NAME_ATTR) ?? "folder",
-      };
-    }
-
-    return el.closest(`[${DROP_LIBRARY_ATTR}]`) ? { kind: "library" } : null;
+    return resolveDropTarget(physicalX / dpr, physicalY / dpr);
   }
 
   #reset(): void {

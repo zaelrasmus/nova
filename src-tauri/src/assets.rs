@@ -747,6 +747,177 @@ pub async fn set_sort(pool: &SqlitePool, scope: &Scope, sort: Sort) -> Result<()
     Ok(())
 }
 
+/// Reorder assets within a scope's MANUAL sort by dropping a block of them at a
+/// new spot.
+///
+/// The column written depends on the scope, mirroring how `OrderBy::Manual`
+/// reads it back:
+///   * a folder writes `assets_folders.position` — order LOCAL to that folder;
+///   * "All" and "Uncategorized" write `assets.manual_position` — the GLOBAL
+///     order, so a reorder in one is visible in the other. That's a real
+///     coupling, surfaced to the user, not a bug.
+///
+/// `after` is the asset the block lands immediately behind, or `None` for the
+/// head. The block keeps the visible order of its members. The neighbours'
+/// stored positions are split, so this writes only the moved rows — O(block),
+/// not O(scope) — except when the fractional gap is exhausted and the scope is
+/// renumbered.
+///
+/// Reading the FULL stored order here (not the filtered view) is what makes a
+/// reorder under an active filter land correctly: the block is midpointed
+/// against whatever truly sits on either side, hidden rows included.
+#[instrument(skip(pool, moved_ids), fields(scope = ?scope, moved = moved_ids.len()))]
+pub async fn reorder_assets(
+    pool: &SqlitePool,
+    scope: &Scope,
+    moved_ids: &[String],
+    after: Option<&str>,
+) -> Result<()> {
+    if moved_ids.is_empty() {
+        return Ok(());
+    }
+
+    let mut tx = pool
+        .begin()
+        .await
+        .context("Failed to begin reorder transaction")?;
+
+    // The scope's assets in stored manual order, as (id, position).
+    let ordered: Vec<(String, f64)> = match scope {
+        Scope::Folder { id } => sqlx::query_as(
+            "SELECT asset_id, position FROM assets_folders
+             WHERE folder_id = ? ORDER BY position, asset_id",
+        )
+        .bind(id.as_str())
+        .fetch_all(&mut *tx)
+        .await
+        .context("Failed to read folder order")?,
+        Scope::All => sqlx::query_as(
+            "SELECT id, manual_position FROM assets ORDER BY manual_position, id",
+        )
+        .fetch_all(&mut *tx)
+        .await
+        .context("Failed to read global order")?,
+        Scope::Uncategorized => sqlx::query_as(
+            "SELECT id, manual_position FROM assets a
+             WHERE NOT EXISTS (SELECT 1 FROM assets_folders af WHERE af.asset_id = a.id)
+             ORDER BY manual_position, id",
+        )
+        .fetch_all(&mut *tx)
+        .await
+        .context("Failed to read uncategorized order")?,
+    };
+
+    let moved_set: std::collections::HashSet<&str> =
+        moved_ids.iter().map(String::as_str).collect();
+
+    // The block keeps the scope's own order, not the order the ids arrived in —
+    // a selection is a set, so its click order is meaningless for placement.
+    let mut moved: Vec<&str> = ordered
+        .iter()
+        .map(|(id, _)| id.as_str())
+        .filter(|id| moved_set.contains(id))
+        .collect();
+    // Any moved id not present in the scope (a stale selection) still gets
+    // placed, appended after the ones that were found.
+    for id in moved_ids {
+        if !ordered.iter().any(|(oid, _)| oid == id) {
+            moved.push(id.as_str());
+        }
+    }
+
+    // Everything staying put, in order, with the positions we'll split.
+    let remaining: Vec<(&str, f64)> = ordered
+        .iter()
+        .filter(|(id, _)| !moved_set.contains(id.as_str()))
+        .map(|(id, pos)| (id.as_str(), *pos))
+        .collect();
+
+    // Where the block lands among the remaining rows.
+    let insert_at = match after {
+        Some(a) => remaining
+            .iter()
+            .position(|(id, _)| *id == a)
+            .map(|i| i + 1)
+            .unwrap_or(remaining.len()),
+        None => 0,
+    };
+
+    let lower = insert_at.checked_sub(1).map(|i| remaining[i].1);
+    let upper = remaining.get(insert_at).map(|(_, p)| *p);
+    let n = moved.len();
+
+    // Enough room to fan N ranks between the neighbours?
+    let positions: Option<Vec<f64>> = match (lower, upper) {
+        (None, None) => Some((0..n).map(|i| i as f64).collect()),
+        (None, Some(u)) => Some((0..n).map(|i| u - (n - i) as f64).collect()),
+        (Some(l), None) => Some((0..n).map(|i| l + 1.0 + i as f64).collect()),
+        (Some(l), Some(u)) if u - l > POSITION_EPSILON * (n as f64 + 1.0) => {
+            let step = (u - l) / (n as f64 + 1.0);
+            Some((0..n).map(|i| l + step * (i as f64 + 1.0)).collect())
+        }
+        (Some(_), Some(_)) => None, // gap exhausted → renumber below
+    };
+
+    match positions {
+        Some(positions) => {
+            for (id, pos) in moved.iter().zip(positions) {
+                write_manual_position(&mut tx, scope, id, pos).await?;
+            }
+        }
+        None => {
+            // Rebuild the whole scope 0,1,2… in the intended final order. Rare,
+            // and the only way to guarantee distinct ranks once the doubles
+            // between two neighbours are used up.
+            tracing::info!(scope = ?scope, "Manual positions exhausted; renumbering scope");
+            let final_order = remaining[..insert_at]
+                .iter()
+                .map(|(id, _)| *id)
+                .chain(moved.iter().copied())
+                .chain(remaining[insert_at..].iter().map(|(id, _)| *id));
+            for (rank, id) in final_order.enumerate() {
+                write_manual_position(&mut tx, scope, id, rank as f64).await?;
+            }
+        }
+    }
+
+    tx.commit()
+        .await
+        .context("Failed to commit reorder transaction")?;
+    Ok(())
+}
+
+/// Write one asset's manual rank into whichever column the scope orders by.
+async fn write_manual_position(
+    tx: &mut sqlx::SqliteConnection,
+    scope: &Scope,
+    asset_id: &str,
+    position: f64,
+) -> Result<()> {
+    match scope {
+        Scope::Folder { id } => {
+            sqlx::query(
+                "UPDATE assets_folders SET position = ? WHERE folder_id = ? AND asset_id = ?",
+            )
+            .bind(position)
+            .bind(id.as_str())
+            .bind(asset_id)
+            .execute(&mut *tx)
+            .await
+            .context("Failed to write folder position")?;
+        }
+        Scope::All | Scope::Uncategorized => {
+            sqlx::query("UPDATE assets SET manual_position = ? WHERE id = ?")
+                .bind(position)
+                .bind(asset_id)
+                .execute(&mut *tx)
+                .await
+                .context("Failed to write manual position")?;
+        }
+    }
+    Ok(())
+}
+
 #[instrument(skip(pool))]
 pub async fn fetch_folders(pool: &SqlitePool) -> Result<Vec<Folder>> {
     let folders = sqlx::query_as::<_, Folder>(
@@ -1287,11 +1458,27 @@ pub async fn delete_folders(pool: &SqlitePool, ids: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// Reparent a folder (and append it to the end of the new parent's siblings).
-/// Rejects moving a folder into itself or one of its own descendants, which would
-/// orphan the subtree — checked by walking up from the target parent to the root.
-#[instrument(skip(pool))]
-pub async fn move_folder(pool: &SqlitePool, id: &str, new_parent_id: Option<&str>) -> Result<()> {
+/// Smallest gap between two sibling positions we will still split.
+///
+/// Fractional ranks halve the interval on every insert into the same spot, and a
+/// double runs out of mantissa after roughly fifty of them — at which point two
+/// siblings silently take the same position and the order becomes whatever the
+/// name tie-breaker says. Below this threshold the sibling set is renumbered
+/// instead. Rare, bounded, and invisible; the alternative is a bug that only
+/// appears after weeks of use and cannot be reproduced on demand.
+const POSITION_EPSILON: f64 = 1e-6;
+
+/// Reject moving a folder into itself or one of its own descendants, which would
+/// detach the subtree from the root.
+///
+/// Walks UP from the prospective parent, so this costs the tree's DEPTH rather
+/// than its size — the descendant set of the folder being moved could be most of
+/// the library, while the ancestor chain is a handful of rows.
+async fn assert_not_descendant(
+    pool: &SqlitePool,
+    id: &str,
+    new_parent_id: Option<&str>,
+) -> Result<()> {
     let mut cursor = new_parent_id.map(str::to_string);
     while let Some(cur) = cursor {
         if cur == id {
@@ -1305,6 +1492,111 @@ pub async fn move_folder(pool: &SqlitePool, id: &str, new_parent_id: Option<&str
                 .context("Failed to walk folder ancestry")?
                 .flatten();
     }
+    Ok(())
+}
+
+/// Place `id` under `new_parent`, immediately after sibling `after` — or first,
+/// when `after` is `None`.
+///
+/// This is the "drop between two rows" half of tree drag & drop; `move_folder`
+/// is the "drop onto a row" half and appends instead. Splitting the neighbours'
+/// positions writes ONE row rather than renumbering the list, which is what
+/// keeps a reorder O(1) in a tree of any size.
+#[instrument(skip(pool))]
+pub async fn reorder_folder(
+    pool: &SqlitePool,
+    id: &str,
+    new_parent: Option<&str>,
+    after: Option<&str>,
+) -> Result<()> {
+    assert_not_descendant(pool, id, new_parent).await?;
+
+    let mut tx = pool
+        .begin()
+        .await
+        .context("Failed to begin reorder transaction")?;
+
+    // Siblings in display order, EXCLUDING the folder being moved: when
+    // reordering inside one parent, its own current slot is not a neighbour of
+    // where it's going. Ordering must match `fetch_folders` or the index the
+    // frontend computed would point somewhere else.
+    let siblings: Vec<(String, f64)> = sqlx::query_as(
+        "SELECT id, position FROM folders
+         WHERE parent_id IS ? AND id <> ?
+         ORDER BY position, name",
+    )
+    .bind(new_parent)
+    .bind(id)
+    .fetch_all(&mut *tx)
+    .await
+    .context("Failed to read sibling folders")?;
+
+    // The index the folder lands AT. An `after` that isn't among the siblings
+    // (a stale tree on the frontend) appends rather than failing.
+    let insert_at = match after {
+        Some(a) => siblings
+            .iter()
+            .position(|(sid, _)| sid == a)
+            .map(|i| i + 1)
+            .unwrap_or(siblings.len()),
+        None => 0,
+    };
+
+    let prev = insert_at
+        .checked_sub(1)
+        .and_then(|i| siblings.get(i))
+        .map(|(_, p)| *p);
+    let next = siblings.get(insert_at).map(|(_, p)| *p);
+
+    let position = match (prev, next) {
+        (None, None) => 0.0,                                  // first child
+        (None, Some(n)) => n - 1.0,                           // new head
+        (Some(p), None) => p + 1.0,                           // new tail
+        (Some(p), Some(n)) if n - p > POSITION_EPSILON => (p + n) / 2.0,
+        // Gap exhausted — renumber the siblings 0,1,2…, leaving a hole at
+        // `insert_at` for the arriving folder.
+        (Some(_), Some(_)) => {
+            tracing::info!(parent = ?new_parent, "Sibling positions exhausted; renumbering");
+            for (rank, (sid, _)) in siblings.iter().enumerate() {
+                let renumbered = if rank < insert_at {
+                    rank as f64
+                } else {
+                    rank as f64 + 1.0
+                };
+                sqlx::query("UPDATE folders SET position = ? WHERE id = ?")
+                    .bind(renumbered)
+                    .bind(sid)
+                    .execute(&mut *tx)
+                    .await
+                    .context("Failed to renumber sibling folders")?;
+            }
+            insert_at as f64
+        }
+    };
+
+    let res = sqlx::query("UPDATE folders SET parent_id = ?, position = ? WHERE id = ?")
+        .bind(new_parent)
+        .bind(position)
+        .bind(id)
+        .execute(&mut *tx)
+        .await
+        .context("Failed to reorder folder")?;
+    if res.rows_affected() == 0 {
+        anyhow::bail!("Folder not found");
+    }
+
+    tx.commit()
+        .await
+        .context("Failed to commit reorder transaction")?;
+    Ok(())
+}
+
+/// Reparent a folder (and append it to the end of the new parent's siblings).
+/// Rejects moving a folder into itself or one of its own descendants, which would
+/// orphan the subtree — checked by walking up from the target parent to the root.
+#[instrument(skip(pool))]
+pub async fn move_folder(pool: &SqlitePool, id: &str, new_parent_id: Option<&str>) -> Result<()> {
+    assert_not_descendant(pool, id, new_parent_id).await?;
 
     let position = next_folder_position(pool, new_parent_id).await?;
     let res = sqlx::query("UPDATE folders SET parent_id = ?, position = ? WHERE id = ?")
@@ -1331,20 +1623,37 @@ pub async fn add_assets_to_folder(
     if asset_ids.is_empty() {
         return Ok(());
     }
+    let mut tx = pool
+        .begin()
+        .await
+        .context("Failed to begin membership transaction")?;
+    link_assets(&mut tx, folder_id, asset_ids).await?;
+    tx.commit()
+        .await
+        .context("Failed to commit membership transaction")?;
+    Ok(())
+}
+
+/// Append assets to a folder inside a caller-owned transaction.
+///
+/// Split out of `add_assets_to_folder` so a MOVE can add and remove atomically.
+/// `INSERT OR IGNORE` keeps an already-present asset at the position it has, so
+/// re-adding never reshuffles a folder the user has arranged by hand.
+async fn link_assets(
+    tx: &mut sqlx::SqliteConnection,
+    folder_id: &str,
+    asset_ids: &[String],
+) -> Result<()> {
     let mut position = sqlx::query_scalar::<_, Option<f64>>(
         "SELECT MAX(position) FROM assets_folders WHERE folder_id = ?",
     )
     .bind(folder_id)
-    .fetch_one(pool)
+    .fetch_one(&mut *tx)
     .await
     .context("Failed to compute membership position")?
     .map(|m| m + 1.0)
     .unwrap_or(0.0);
 
-    let mut tx = pool
-        .begin()
-        .await
-        .context("Failed to begin membership transaction")?;
     for id in asset_ids {
         sqlx::query(
             "INSERT OR IGNORE INTO assets_folders (folder_id, asset_id, position) VALUES (?, ?, ?)",
@@ -1357,9 +1666,55 @@ pub async fn add_assets_to_folder(
         .context("Failed to add asset to folder")?;
         position += 1.0;
     }
+    Ok(())
+}
+
+/// Move assets out of one folder and into another, atomically.
+///
+/// Not add-then-remove from the frontend: a failure between the two calls leaves
+/// every dragged asset in BOTH folders, which is the one outcome the user did
+/// not ask for and the hardest to notice. One transaction, one round trip.
+///
+/// `source` is the folder the drag started in. `None` degrades this to a plain
+/// add — dragging out of "All" or "Uncategorized" has no membership to remove,
+/// because there is nothing to move *from*. Same folder in and out is a no-op
+/// rather than an error: it's a drag the user aborted onto its own origin.
+#[instrument(skip(pool, asset_ids), fields(count = asset_ids.len()))]
+pub async fn move_assets_to_folder(
+    pool: &SqlitePool,
+    source: Option<&str>,
+    target: &str,
+    asset_ids: &[String],
+) -> Result<()> {
+    if asset_ids.is_empty() || source == Some(target) {
+        return Ok(());
+    }
+
+    let mut tx = pool
+        .begin()
+        .await
+        .context("Failed to begin move transaction")?;
+
+    link_assets(&mut tx, target, asset_ids).await?;
+
+    if let Some(source) = source {
+        let mut qb = QueryBuilder::new("DELETE FROM assets_folders WHERE folder_id = ");
+        qb.push_bind(source);
+        qb.push(" AND asset_id IN (");
+        let mut separated = qb.separated(", ");
+        for id in asset_ids {
+            separated.push_bind(id);
+        }
+        qb.push(")");
+        qb.build()
+            .execute(&mut *tx)
+            .await
+            .context("Failed to remove assets from the source folder")?;
+    }
+
     tx.commit()
         .await
-        .context("Failed to commit membership transaction")?;
+        .context("Failed to commit move transaction")?;
     Ok(())
 }
 

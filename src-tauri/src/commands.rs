@@ -494,6 +494,41 @@ pub async fn folder_stats(
         .map_err(AppError::from)
 }
 
+/// Drop-between-rows: place a folder under `newParentId`, after `afterId`.
+/// `afterId: null` means first among its new siblings.
+#[instrument(skip_all)]
+#[tauri::command]
+pub async fn reorder_folder(
+    id: String,
+    new_parent_id: Option<String>,
+    after_id: Option<String>,
+    state: tauri::State<'_, DbState>,
+) -> Result<(), AppError> {
+    let pool = state.acquire_pool().await?;
+    assets::reorder_folder(&pool, &id, new_parent_id.as_deref(), after_id.as_deref())
+        .await
+        .inspect_err(|e| tracing::error!(error = %e, "reorder_folder failed"))
+        .map_err(AppError::from)
+}
+
+/// Drop a block of assets at a new spot in the current scope's manual order.
+/// `afterId: null` drops at the head. Only meaningful when the scope is sorted
+/// manually — the frontend enforces that before calling.
+#[instrument(skip_all, fields(scope = ?scope, moved = moved_ids.len()))]
+#[tauri::command]
+pub async fn reorder_assets(
+    scope: assets::Scope,
+    moved_ids: Vec<String>,
+    after_id: Option<String>,
+    state: tauri::State<'_, DbState>,
+) -> Result<(), AppError> {
+    let pool = state.acquire_pool().await?;
+    assets::reorder_assets(&pool, &scope, &moved_ids, after_id.as_deref())
+        .await
+        .inspect_err(|e| tracing::error!(error = %e, "reorder_assets failed"))
+        .map_err(AppError::from)
+}
+
 #[instrument(skip_all)]
 #[tauri::command]
 pub async fn update_folder(
@@ -578,6 +613,26 @@ pub async fn remove_assets_from_folder(
         .await
         .inspect_err(|e| tracing::error!(error = %e, "remove_assets_from_folder failed"))
         .map_err(AppError::from)
+}
+
+#[instrument(skip_all, fields(count = asset_ids.len(), ?source_folder_id, target_folder_id))]
+#[tauri::command]
+pub async fn move_assets_to_folder(
+    source_folder_id: Option<String>,
+    target_folder_id: String,
+    asset_ids: Vec<String>,
+    state: tauri::State<'_, DbState>,
+) -> Result<(), AppError> {
+    let pool = state.acquire_pool().await?;
+    assets::move_assets_to_folder(
+        &pool,
+        source_folder_id.as_deref(),
+        &target_folder_id,
+        &asset_ids,
+    )
+    .await
+    .inspect_err(|e| tracing::error!(error = %e, "move_assets_to_folder failed"))
+    .map_err(AppError::from)
 }
 
 // ── Tags ────────────────────────────────────────────────────────────────────

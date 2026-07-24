@@ -650,6 +650,7 @@ class AssetLibrary {
     scope: ManifestScope = this.scope,
     sort: Sort = this.sort,
     filters: FilterSet = this.filters,
+    { quiet = false }: { quiet?: boolean } = {},
   ): Promise<void> {
     // The ASSET selection is a subset of what's on screen. A sort change reorders
     // the very same rows, so it survives one (ids stay valid; indices are
@@ -670,16 +671,29 @@ class AssetLibrary {
     const token = ++this.#loadToken;
     this.isLoading = true;
     this.error = null;
-    this.manifest = [];
-    this.#indexById.clear();
     // Queued windows describe the OLD order, so drop them; the grid re-requests
     // its visible window as soon as the new manifest paints.
     this.#thumbQueue = [];
+
+    // `quiet` keeps the OLD rows on screen and swaps them in one shot when the
+    // stream finishes — a refresh of the SAME view (reorder, membership change,
+    // import-into-current) must never blank the grid to "Loading…". A plain
+    // load (scope/library change) still streams progressively into an emptied
+    // manifest, because there you navigated away and a blank is expected.
+    const streamed: AssetLightRow[] = [];
+    if (!quiet) {
+      this.manifest = [];
+      this.#indexById.clear();
+    }
 
     try {
       const channel = new Channel<AssetLightRow[]>();
       channel.onmessage = (chunk) => {
         if (token !== this.#loadToken) return; // a newer load superseded this one
+        if (quiet) {
+          streamed.push(...chunk);
+          return;
+        }
         // Build the id->index map incrementally, in lock-step with the manifest.
         // (Channel messages can arrive AFTER the invoke promise resolves, so a
         // one-shot rebuild after `await` would run on an empty manifest.)
@@ -690,6 +704,7 @@ class AssetLibrary {
         this.manifest.push(...chunk);
       };
       await invoke("stream_manifest", { query: { scope, filters, sort }, onChunk: channel });
+      if (quiet && token === this.#loadToken) this.#swapManifest(streamed);
     } catch (e) {
       if (token === this.#loadToken) {
         this.error = typeof e === "string" ? e : "Failed to load assets.";
@@ -699,8 +714,16 @@ class AssetLibrary {
     }
   }
 
+  /** Replace the manifest and its index map atomically (no empty frame). */
+  #swapManifest(rows: AssetLightRow[]): void {
+    this.#indexById.clear();
+    for (let i = 0; i < rows.length; i++) this.#indexById.set(rows[i].id, i);
+    this.manifest = rows;
+  }
+
+  /** Refresh the CURRENT view without blanking the grid. */
   reload(): Promise<void> {
-    return this.load();
+    return this.load(this.scope, this.sort, this.filters, { quiet: true });
   }
 
   /**
@@ -894,6 +917,40 @@ class AssetLibrary {
       console.error("Failed to persist sort:", e);
     }
     await this.load(scope, sort);
+  }
+
+  /**
+   * Drop a block of assets at a new spot in the CURRENT scope's manual order.
+   * `afterId` is the asset the block lands behind, null for the head.
+   *
+   * Only valid when the active sort is manual — a reorder writes a rank, and a
+   * rank is invisible under any other sort, so the caller gates on that. The
+   * scope decides which rank column is written (see the Rust side); this just
+   * passes the scope the manifest was built with.
+   */
+  async reorderAssets(movedIds: string[], afterId: string | null): Promise<void> {
+    if (movedIds.length === 0) return;
+
+    // Apply the new order to the manifest IMMEDIATELY, before the round trip.
+    // The persisted order is exactly this array's order, so the optimistic view
+    // is what the query would return anyway — showing it now makes the reorder
+    // feel instant AND lets the user see the true (re-packed) result at once,
+    // instead of a flash followed by a jump when a reload lands.
+    const moved = new Set(movedIds);
+    const kept = this.manifest.filter((r) => !moved.has(r.id));
+    // Moved rows keep their manifest order, matching how Rust orders the block.
+    const movedRows = this.manifest.filter((r) => moved.has(r.id));
+    const at = afterId ? kept.findIndex((r) => r.id === afterId) + 1 : 0;
+    const next = [...kept.slice(0, at), ...movedRows, ...kept.slice(at)];
+    this.#swapManifest(next);
+
+    try {
+      await invoke("reorder_assets", { scope: this.scope, movedIds, afterId });
+    } catch (e) {
+      // The optimistic order is now a lie — pull the truth back from the DB.
+      await this.reload();
+      throw e;
+    }
   }
 
   /** Refresh the folder tree for the active library. Non-fatal on failure. */
@@ -1115,11 +1172,53 @@ class AssetLibrary {
     await this.loadFolders();
   }
 
+  /**
+   * Place a folder under `newParentId`, immediately after `afterId`
+   * (null = first among its new siblings). The drop-between-rows half of tree
+   * drag & drop; `moveFolder` appends instead.
+   *
+   * The scope deliberately doesn't change: moving a folder rearranges the tree,
+   * not what's on screen. Its assets are unaffected, so the manifest is too.
+   */
+  async reorderFolder(
+    id: string,
+    newParentId: string | null,
+    afterId: string | null,
+  ): Promise<void> {
+    await invoke("reorder_folder", { id, newParentId, afterId });
+    await this.loadFolders();
+  }
+
   /** Add assets to a folder; reload the manifest if the change affects the view. */
   async addAssetsToFolder(folderId: string, assetIds: string[]): Promise<void> {
     await invoke("add_assets_to_folder", { folderId, assetIds });
     const active = this.scope;
     if (active.kind === "uncategorized" || (active.kind === "folder" && active.id === folderId)) {
+      await this.reload();
+    }
+  }
+
+  /**
+   * Move assets from one folder to another in a single transaction.
+   *
+   * `sourceFolderId` is null outside a folder scope ("All", "Uncategorized"),
+   * where there is no membership to move FROM and this degrades to an add.
+   *
+   * Reloads whenever either end of the move is what's on screen — the source
+   * because rows left it, the target because rows arrived, and "uncategorized"
+   * because gaining a first membership is exactly what removes an asset from it.
+   */
+  async moveAssetsToFolder(
+    sourceFolderId: string | null,
+    targetFolderId: string,
+    assetIds: string[],
+  ): Promise<void> {
+    await invoke("move_assets_to_folder", { sourceFolderId, targetFolderId, assetIds });
+    const active = this.scope;
+    if (
+      active.kind === "uncategorized" ||
+      (active.kind === "folder" && (active.id === targetFolderId || active.id === sourceFolderId))
+    ) {
       await this.reload();
     }
   }

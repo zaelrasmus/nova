@@ -8,7 +8,10 @@
     import { libraryManager, settings } from "../routes/settings.svelte";
     import { assetLibrary, type AssetLightRow } from "$lib/assets.svelte";
     import { selection } from "$lib/selection.svelte";
-    import { dropzone, DROP_LIBRARY_ATTR } from "$lib/dropzone.svelte";
+    import { dropzone } from "$lib/dropzone.svelte";
+    import { DROP_LIBRARY_ATTR, type DropTarget } from "$lib/droptarget";
+    import { drag, draggable, DRAG_SCROLL_ATTR, type DropContext } from "$lib/dragdrop.svelte";
+    import { toast } from "svelte-sonner";
 
 
     // Manifest = layout source of truth (id, width, height, asset_type).
@@ -194,19 +197,135 @@
         return () => window.removeEventListener("keydown", onKey);
     });
 
-    // ── FUTURE: Pragmatic Drag and Drop (Atlassian) ───────────────────────────
-    // Selection is already the payload: `selection.assetIds` on dragstart, plus
-    // `selection.cancelPendingCollapse()` so the press that began the drag never
-    // collapses a multi-selection on release.
-    // When you're ready to implement drag-to-reorder:
+    // ── Dragging assets out to the sidebar ────────────────────────────────────
     //
-    // 2. In each AssetCard, attach draggable() with { assetId: asset.id }
-    // 3. Here, attach a dropTargetForElements() on the scrollEl
-    // 4. On drop, invoke a Tauri command to persist the new order in
-    //    the folder_assets.position column (already in your schema).
+    // One `draggable` on the scroll container, not one per card: rows mount and
+    // unmount on every scroll tick under virtualization, so per-card listeners
+    // would churn and a card can vanish mid-drag. `payload` decides from the
+    // event whether the press landed on a card.
+
+    /** The selection is the payload — a press on a card drags whatever is selected. */
+    function dragPayload(e: PointerEvent) {
+        if (!(e.target as HTMLElement).closest('[role="option"]')) return null;
+        return selection.assetCount > 0
+            ? ({ kind: "assets", ids: selection.assetIds } as const)
+            : null;
+    }
+
+    // ── Manual reorder within the grid ────────────────────────────────────────
     //
-    // The virtualizer handles rendering — DnD only updates the data order.
-    // ────────────────────────────────────────────────────────────────────────
+    // Reordering writes a rank. Under any sort but manual that rank is invisible
+    // — the card would snap back to where the sort puts it — so the gesture is
+    // available ONLY in manual mode. Dragging OUT to the sidebar stays live in
+    // every mode, because that writes membership, not a rank.
+    const manualSort = $derived(assetLibrary.sort.order_by === "manual");
+
+    /**
+     * Where a drop at (x, y) inserts: the manifest `index` it lands before
+     * (`assets.length` = the very end), plus viewport coordinates for the bar.
+     *
+     * ONE function feeds both the live bar and the actual drop, so the two can
+     * never disagree — the item lands exactly where the bar showed.
+     *
+     * The split is the card under the cursor at its horizontal midpoint. Honest
+     * caveat: the grid is a shortest-lane MASONRY, so a card's manifest index
+     * and its visual position don't march in lock-step — near a tall image the
+     * insert can land a slot off from where it looks. The optimistic reorder
+     * shows the true result instantly, which is the best available answer short
+     * of a reading-order layout for manual mode.
+     */
+    function insertionAt(x: number, y: number) {
+        const el = document.elementFromPoint(x, y);
+        const card = el?.closest<HTMLElement>("[data-asset-id]");
+        if (!card) return { index: assets.length, bar: null }; // empty space past the end
+        const idx = Number(card.dataset.assetIndex);
+        const r = card.getBoundingClientRect();
+        const after = x >= r.left + r.width / 2;
+        return {
+            index: after ? idx + 1 : idx,
+            bar: { x: after ? r.right + GAP / 2 : r.left - GAP / 2, top: r.top, height: r.height },
+        };
+    }
+
+    /** Is (x, y) inside the scroll viewport? Lets a near-miss still reorder. */
+    function withinGrid(x: number, y: number): boolean {
+        if (!scrollEl) return false;
+        const r = scrollEl.getBoundingClientRect();
+        return x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
+    }
+
+    /** Live insertion bar while dragging assets over the grid in manual mode. */
+    const reorderBar = $derived.by(() => {
+        if (drag.payload?.kind !== "assets" || !manualSort) return null;
+        // Over a folder row we're filing, not reordering — no bar.
+        if (drag.target?.kind === "folder") return null;
+        if (!withinGrid(drag.x, drag.y)) return null;
+        return insertionAt(drag.x, drag.y).bar; // reactive via drag.x / drag.y
+    });
+
+    /** Blocked reorder: dragging assets over the grid while NOT in manual sort. */
+    const reorderBlocked = $derived(
+        drag.payload?.kind === "assets" && drag.target?.kind === "library" && !manualSort,
+    );
+
+    async function reorderTo(index: number, movedIds: string[]) {
+        // The block lands after the nearest asset at/above the insert point that
+        // ISN'T being moved — Rust drops moved ids from the neighbour set, so an
+        // afterId must be a stayer or it falls through to "append".
+        const moved = new Set(movedIds);
+        let afterId: string | null = null;
+        for (let i = index - 1; i >= 0; i--) {
+            if (!moved.has(assets[i].id)) {
+                afterId = assets[i].id;
+                break;
+            }
+        }
+        try {
+            await assetLibrary.reorderAssets(movedIds, afterId);
+        } catch (e) {
+            toast.error(typeof e === "string" ? e : "Failed to reorder.");
+        }
+    }
+
+    async function onAssetDrop(target: DropTarget | null, ctx: DropContext) {
+        if (ctx.payload.kind !== "assets") return; // a folder drag isn't ours
+        const ids = ctx.payload.ids;
+        if (ids.length === 0) return;
+
+        // A drop on the grid — or a near-miss released within its bounds — is a
+        // reorder in manual mode, otherwise a silent abandon (the guardrail
+        // already said why during the drag). Accepting the null/near-miss case
+        // is what fixes "dragged to the bottom but nothing happened": releasing
+        // in the empty space past the last card no longer falls through.
+        const onGrid = target?.kind === "library" || (target === null && withinGrid(ctx.x, ctx.y));
+        if (onGrid) {
+            if (manualSort) await reorderTo(insertionAt(ctx.x, ctx.y).index, ids);
+            return;
+        }
+        if (target?.kind !== "folder") return;
+
+        // Move only means something when the drag STARTED somewhere: in "All" or
+        // "Uncategorized" there is no source membership to remove, so Shift
+        // quietly degrades to an add.
+        const source = assetLibrary.scope.kind === "folder" ? assetLibrary.scope.id : null;
+        if (source === target.id) return; // dropped on the folder we're already in
+
+        try {
+            if (ctx.move) {
+                await assetLibrary.moveAssetsToFolder(source, target.id, ids);
+                toast.success(
+                    source
+                        ? `Moved ${ids.length} to "${target.name}".`
+                        : `Added ${ids.length} to "${target.name}".`,
+                );
+            } else {
+                await assetLibrary.addAssetsToFolder(target.id, ids);
+                toast.success(`Added ${ids.length} to "${target.name}".`);
+            }
+        } catch (e) {
+            toast.error(typeof e === "string" ? e : "Failed to file assets.");
+        }
+    }
 </script>
 
 
@@ -279,6 +398,14 @@
             <!-- svelte-ignore a11y_no_static_element_interactions -->
             <div
                 bind:this={scrollEl}
+                use:draggable={{
+                    payload: dragPayload,
+                    // The press that starts a drag must not collapse a
+                    // multi-selection when it's released.
+                    onStart: () => selection.assets.cancelPendingCollapse(),
+                    onDrop: onAssetDrop,
+                }}
+                {...{ [DRAG_SCROLL_ATTR]: "" }}
                 onpointerdown={(e) => {
                     if (!(e.target as HTMLElement).closest('[role="option"]')) selection.clear();
                 }}
@@ -304,6 +431,8 @@
                             {heavy}
                             style="width: {columnWidth}px; height: {item.size - GAP}px; left: {item.lane * (columnWidth + GAP)}px; transform: translateY({item.start}px);"
                             selected={selection.has(light.id)}
+                            dataId={light.id}
+                            dataIndex={item.index}
                             onPointerDown={(e) =>
                                 selection.pointerDownAsset(idsNow(), item.index, mods(e))}
                             onClick={() => selection.clickAsset(light.id)}
@@ -327,6 +456,39 @@
                 Import {dropzone.count}
                 {dropzone.count === 1 ? "item" : "items"}
             </span>
+        </div>
+    {/if}
+
+    <!-- Manual reorder insertion bar. Fixed-position, off the card under the
+         cursor, so it needs no virtualizer math. pointer-events-none for the
+         same reason as every drag overlay: it must not shadow its own target. -->
+    {#if reorderBar}
+        <div
+            class="pointer-events-none fixed z-30 w-0.5 rounded bg-blue-500"
+            style="left: {reorderBar.x}px; top: {reorderBar.top}px; height: {reorderBar.height}px"
+        ></div>
+    {/if}
+
+    <!-- Guardrail: a reorder attempt under a non-manual sort can't write a
+         visible order, so say why rather than silently doing nothing. The button
+         switches sort mid-drag; releasing then completes the reorder. -->
+    {#if reorderBlocked}
+        <div
+            class="pointer-events-none absolute inset-x-0 bottom-3 z-30 flex justify-center"
+        >
+            <div
+                class="pointer-events-auto flex items-center gap-2 rounded-full bg-neutral-900/95 px-3
+                       py-1.5 text-xs text-neutral-200 shadow-lg ring-1 ring-neutral-700"
+            >
+                <span>Sorted by {assetLibrary.sort.order_by.replace("_", " ")} — reordering needs Manual sort.</span>
+                <button
+                    type="button"
+                    onclick={() => assetLibrary.setSort({ order_by: "manual", is_ascending: true })}
+                    class="rounded-full bg-blue-600 px-2 py-0.5 font-medium text-white hover:bg-blue-500"
+                >
+                    Switch
+                </button>
+            </div>
         </div>
     {/if}
     </div>
