@@ -144,6 +144,14 @@ export interface DraggableOptions {
    * reorder rather than a dead drop.
    */
   onDrop?: (target: DropTarget | null, ctx: DropContext) => void;
+  /**
+   * The pointer left the app window mid-drag, still held — hand off to a native
+   * OS drag (drag OUT to Explorer/Photoshop/…). The internal drag has already
+   * ended when this fires, so `onDrop` will NOT also run. Only reached for
+   * payloads that make sense outside the app (assets, not folders); the source
+   * decides by ignoring the ones it doesn't handle.
+   */
+  onDragOut?: (payload: DragPayload) => void;
 }
 
 /**
@@ -271,8 +279,33 @@ export function draggable(node: HTMLElement, options: DraggableOptions) {
     }
   }
 
+  /**
+   * The pointer crossed OUTSIDE the app window while dragging — hand the gesture
+   * to the OS as a drag-out. Detected as true out-of-bounds coordinates, NOT as
+   * "near an edge": the sidebar and inspector live at the edges, and dragging
+   * onto them must stay internal. A held-button drag keeps delivering moves with
+   * out-of-range coordinates (the OS captures to the window), so this fires the
+   * instant the cursor leaves the glass.
+   */
+  function tryHandoff(e: PointerEvent): boolean {
+    if (!started || !pending || pending.kind !== "assets" || !opts.onDragOut) return false;
+    const outside =
+      e.clientX < 0 ||
+      e.clientY < 0 ||
+      e.clientX > window.innerWidth ||
+      e.clientY > window.innerHeight;
+    if (!outside) return false;
+
+    const payload = pending;
+    detach();
+    finish(); // ends the internal drag so its pointerup can't also fire onDrop
+    opts.onDragOut(payload);
+    return true;
+  }
+
   function onPointerMove(e: PointerEvent) {
     if (e.pointerId !== pointerId) return;
+    if (tryHandoff(e)) return;
 
     if (!started) {
       const dx = Math.abs(e.clientX - startX);

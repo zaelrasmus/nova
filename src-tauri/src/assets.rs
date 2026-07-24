@@ -1430,6 +1430,110 @@ pub async fn update_folder(pool: &SqlitePool, id: &str, patch: FolderPatch) -> R
     Ok(())
 }
 
+/// The hidden directory, inside the library root, where files are materialised
+/// for an outbound OS drag. Inside the root on purpose: hard links only work
+/// within a volume, and staging here guarantees the same volume as the assets.
+pub const DRAG_STAGING_DIR: &str = ".drag-staging";
+
+/// Materialise assets for dragging OUT to another application, returning the
+/// absolute staged paths.
+///
+/// Two problems this solves, both established in the D5 analysis:
+///   * on disk an asset is `UUID.ext`; dragging that hands the receiver a UUID.
+///     Here it's linked under its real `filename`.
+///   * a `CF_HDROP` drop can offer "move", which would delete the file out of the
+///     library. A hard link shares the bytes, so if the receiver moves it only
+///     the LINK dies — the library file is untouched. (Copy mode is also
+///     requested on the JS side; this is the belt to that suspenders.)
+///
+/// Security: takes IDS, never paths. The webview names things; Rust resolves
+/// locations — the same rule `source_url` follows. A caller cannot smuggle an
+/// arbitrary filesystem path through this.
+///
+/// Each drag gets its own `<uuid>/` subdir so concurrent or repeated drags never
+/// collide, and cleanup can delete one drag's files without racing another.
+#[instrument(skip(pool, ids), fields(count = ids.len()))]
+pub async fn stage_assets_for_drag(
+    pool: &SqlitePool,
+    root: &Path,
+    ids: &[String],
+) -> Result<Vec<String>> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let ids = unique_ids(ids);
+    let mut rows: Vec<(String, String)> = Vec::new();
+    for chunk in ids.chunks(IDS_PER_QUERY) {
+        let mut qb = QueryBuilder::new("SELECT path, filename FROM assets WHERE id IN (");
+        let mut sep = qb.separated(", ");
+        for id in chunk {
+            sep.push_bind(id);
+        }
+        qb.push(")");
+        let mut part: Vec<(String, String)> = qb
+            .build_query_as()
+            .fetch_all(pool)
+            .await
+            .context("Failed to read assets to stage")?;
+        rows.append(&mut part);
+    }
+
+    let dir = root
+        .join(DRAG_STAGING_DIR)
+        .join(uuid::Uuid::new_v4().to_string());
+    std::fs::create_dir_all(&dir).context("Failed to create drag staging dir")?;
+
+    // Two assets can share a display name ("photo.png") — the library allows it,
+    // but one directory can't. Disambiguate the SECOND onward as "photo (2).png".
+    let mut seen: HashMap<String, u32> = HashMap::new();
+    let mut staged = Vec::with_capacity(rows.len());
+
+    for (rel_path, filename) in rows {
+        let name = dedupe_name(&filename, &mut seen);
+        let src = root.join(&rel_path);
+        let dst = dir.join(&name);
+
+        if std::fs::hard_link(&src, &dst).is_err() {
+            // Cross-device (shouldn't happen under the root) or a filesystem
+            // without hard links: fall back to a copy so the drag still works.
+            std::fs::copy(&src, &dst)
+                .with_context(|| format!("Failed to stage {}", src.display()))?;
+        }
+        staged.push(dst.to_string_lossy().into_owned());
+    }
+
+    Ok(staged)
+}
+
+/// Turn a filename into one unique within this drag, inserting " (n)" before the
+/// extension on collision: `photo.png`, `photo (2).png`, `photo (3).png`.
+fn dedupe_name(filename: &str, seen: &mut HashMap<String, u32>) -> String {
+    let key = filename.to_lowercase();
+    let count = seen.entry(key).or_insert(0);
+    *count += 1;
+    if *count == 1 {
+        return filename.to_string();
+    }
+    match filename.rsplit_once('.') {
+        Some((stem, ext)) => format!("{stem} ({count}).{ext}"),
+        None => format!("{filename} ({count})"),
+    }
+}
+
+/// Remove everything under the drag-staging directory. Called after a drag ends
+/// (the staged links have served their purpose) and swept on library open so a
+/// crash mid-drag never leaks links. Missing dir is success — nothing to clean.
+#[instrument(skip_all)]
+pub fn clear_drag_staging(root: &Path) -> Result<()> {
+    let dir = root.join(DRAG_STAGING_DIR);
+    match std::fs::remove_dir_all(&dir) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e).context("Failed to clear drag staging"),
+    }
+}
+
 /// Delete a folder. The self-FK and membership FKs are `ON DELETE CASCADE`, so
 /// this also removes every descendant folder and all membership rows — but never
 /// the assets themselves (an asset with no remaining folder becomes uncategorized).

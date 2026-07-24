@@ -5,6 +5,7 @@
     "": {
       "name": "nova",
       "dependencies": {
+        "@crabnebula/tauri-plugin-drag": "^2.1.0",
         "@tanstack/svelte-query": "^6.1.16",
         "@tanstack/svelte-virtual": "^3.13.24",
         "@tauri-apps/api": "^2.10.1",
@@ -43,6 +44,8 @@
     },
   },
   "packages": {
+    "@crabnebula/tauri-plugin-drag": ["@crabnebula/tauri-plugin-drag@2.1.0", "", { "dependencies": { "@tauri-apps/api": "^2.0.0" } }, "sha512-LnUXAZwQt1cdMoGDLJ6ogW9wFCYServCZXlGadS7CA+CZ9eXS7L+Q7QyQW6g/zGw9YI2MwKFqf1aSNBGyWw+OA=="],
+
     "@emnapi/core": ["@emnapi/core@1.9.2", "", { "dependencies": { "@emnapi/wasi-threads": "1.2.1", "tslib": "^2.4.0" } }, "sha512-UC+ZhH3XtczQYfOlu3lNEkdW/p4dsJ1r/bP7H8+rhao3TTTMO1ATq/4DdIi23XuGoFY+Cz0JmCbdVl0hz9jZcA=="],
 
     "@emnapi/runtime": ["@emnapi/runtime@1.9.2", "", { "dependencies": { "tslib": "^2.4.0" } }, "sha512-3U4+MIWHImeyu1wnmVygh5WlgfYDtyf0k8AbLhMFxOipihf6nrWC4syIm/SwEeec0mNSafiiNnMJwbza/Is6Lw=="],

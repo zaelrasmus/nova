@@ -10,8 +10,10 @@
     import { selection } from "$lib/selection.svelte";
     import { dropzone } from "$lib/dropzone.svelte";
     import { DROP_LIBRARY_ATTR, type DropTarget } from "$lib/droptarget";
-    import { drag, draggable, DRAG_SCROLL_ATTR, type DropContext } from "$lib/dragdrop.svelte";
+    import { drag, draggable, DRAG_SCROLL_ATTR, type DropContext, type DragPayload } from "$lib/dragdrop.svelte";
     import { computeJustified, visibleRows } from "$lib/justified";
+    import { invoke } from "@tauri-apps/api/core";
+    import { startDrag } from "@crabnebula/tauri-plugin-drag";
     import { toast } from "svelte-sonner";
 
 
@@ -363,6 +365,50 @@
         }
     }
 
+    // ── Dragging assets OUT to other apps ─────────────────────────────────────
+    //
+    // The engine hands off here when the cursor leaves the window mid-drag. We
+    // stage the files in Rust (ids in, paths out — never the reverse), then let
+    // the native drag plugin take over. `mode: "copy"` plus the hard-link staging
+    // means the library is safe even if the receiver "moves" the file.
+
+    /** A small blue badge with the item count, as a PNG data URL for the drag image. */
+    function dragIcon(count: number): string {
+        const s = 48;
+        const c = document.createElement("canvas");
+        c.width = s;
+        c.height = s;
+        const ctx = c.getContext("2d");
+        if (!ctx) return "";
+        ctx.fillStyle = "#2563eb";
+        const r = 10;
+        ctx.beginPath();
+        ctx.roundRect(0, 0, s, s, r);
+        ctx.fill();
+        ctx.fillStyle = "#fff";
+        ctx.font = "bold 22px system-ui, sans-serif";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText(String(count), s / 2, s / 2 + 1);
+        return c.toDataURL("image/png");
+    }
+
+    async function onDragOut(payload: DragPayload) {
+        if (payload.kind !== "assets" || payload.ids.length === 0) return;
+        try {
+            const paths = await invoke<string[]>("start_asset_drag", { assetIds: payload.ids });
+            if (!paths.length) return;
+            await startDrag(
+                { item: paths, icon: dragIcon(payload.ids.length), mode: "copy" },
+                // Fires on Dropped OR Cancelled — either way the staged links have
+                // done their job and can go.
+                () => void invoke("clear_drag_staging").catch(() => {}),
+            );
+        } catch (e) {
+            toast.error(typeof e === "string" ? e : "Couldn't start the drag.");
+        }
+    }
+
     async function onAssetDrop(target: DropTarget | null, ctx: DropContext) {
         if (ctx.payload.kind !== "assets") return; // a folder drag isn't ours
         const ids = ctx.payload.ids;
@@ -518,6 +564,7 @@
                     // multi-selection when it's released.
                     onStart: () => selection.assets.cancelPendingCollapse(),
                     onDrop: onAssetDrop,
+                    onDragOut: onDragOut,
                 }}
                 {...{ [DRAG_SCROLL_ATTR]: "" }}
                 onpointerdown={(e) => {

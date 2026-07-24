@@ -63,6 +63,12 @@ pub async fn connect_library<R: Runtime>(
             AppError::Io(std::io::Error::new(std::io::ErrorKind::PermissionDenied, e.to_string()))
         })?;
 
+    // Sweep any drag-staging links left by a crash mid-drag. Cheap, and the
+    // per-drag cleanup already handles the normal case; this is the safety net.
+    if let Ok(handle) = state.acquire().await {
+        let _ = assets::clear_drag_staging(&handle.root);
+    }
+
     info!(library_path = %library_path, "Library connected");
     Ok("Library connected successfully".into())
 }
@@ -570,6 +576,35 @@ pub async fn delete_folders(
     assets::delete_folders(&pool, &ids)
         .await
         .inspect_err(|e| tracing::error!(error = %e, "delete_folders failed"))
+        .map_err(AppError::from)
+}
+
+/// Stage the given assets for an outbound OS drag and return the absolute staged
+/// paths. The frontend hands these to the drag plugin's `startDrag`.
+///
+/// Ids in, paths out: the webview never names a source location, so this can't be
+/// turned into an arbitrary-file read. See `stage_assets_for_drag`.
+#[instrument(skip_all, fields(count = asset_ids.len()))]
+#[tauri::command]
+pub async fn start_asset_drag(
+    asset_ids: Vec<String>,
+    state: tauri::State<'_, DbState>,
+) -> Result<Vec<String>, AppError> {
+    let handle = state.acquire().await?;
+    assets::stage_assets_for_drag(&handle.pool, &handle.root, &asset_ids)
+        .await
+        .inspect_err(|e| tracing::error!(error = %e, "start_asset_drag failed"))
+        .map_err(AppError::from)
+}
+
+/// Remove staged drag links. Called after a drag ends. Non-fatal: staged links
+/// are near-zero-byte and swept on next library open regardless.
+#[instrument(skip_all)]
+#[tauri::command]
+pub async fn clear_drag_staging(state: tauri::State<'_, DbState>) -> Result<(), AppError> {
+    let handle = state.acquire().await?;
+    assets::clear_drag_staging(&handle.root)
+        .inspect_err(|e| tracing::warn!(error = %e, "clear_drag_staging failed"))
         .map_err(AppError::from)
 }
 

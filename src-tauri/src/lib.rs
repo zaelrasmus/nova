@@ -29,10 +29,13 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_drag::init())
         .invoke_handler(tauri::generate_handler![
             commands::create_library,
             commands::import_assets,
             commands::import_dropped_paths,
+            commands::start_asset_drag,
+            commands::clear_drag_staging,
             commands::connect_library,
             commands::stream_manifest,
             commands::fetch_folders,

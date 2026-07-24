@@ -13,6 +13,7 @@
   },
   "license": "MIT",
   "dependencies": {
+    "@crabnebula/tauri-plugin-drag": "^2.1.0",
     "@tanstack/svelte-query": "^6.1.16",
     "@tanstack/svelte-virtual": "^3.13.24",
     "@tauri-apps/api": "^2.10.1",

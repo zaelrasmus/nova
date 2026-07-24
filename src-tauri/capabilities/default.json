@@ -6,6 +6,7 @@
   "permissions": [
     "core:default",
     "opener:default",
+    "drag:default",
     "fs:default",
     "dialog:default",
     "store:default"
