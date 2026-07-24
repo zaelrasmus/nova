@@ -81,9 +81,22 @@ class SelectionStore {
   }
 
   clear(): void {
+    this.clearAssets();
+    this.#folder = null;
+  }
+
+  /**
+   * Drop the asset selection but keep any selected folder.
+   *
+   * The invariant a manifest reload enforces is "selected ASSETS ⊆ what's on
+   * screen" — a folder selection isn't a claim about the manifest's contents, so
+   * reloading must not touch it. Clearing both here is what made clicking a
+   * folder flash the inspector open and immediately shut: the click selects the
+   * folder, then the scope change reloads and wiped it a tick later.
+   */
+  clearAssets(): void {
     this.#assets.clear();
     this.#anchor = null;
-    this.#folder = null;
     this.#pendingCollapse = null;
   }
 

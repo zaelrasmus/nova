@@ -23,7 +23,44 @@ export interface AssetMetadata extends AssetLightRow {
   creation_date: string;
   modified_date: string;
 
+  /** User-authored. Never derived from the file. */
+  notes: string | null;
+  /** Where the asset came from, if the user recorded it. */
+  source_url: string | null;
+
   thumb_path: string; // "" => no thumbnail; fallback to dest_path
+}
+
+/**
+ * Partial update. An omitted key leaves that column alone; `""` clears it. The
+ * inspector sends one field at a time as it's edited, so the difference matters.
+ */
+export interface AssetPatch {
+  /**
+   * The name WITHOUT its extension. Rust recomposes `{stem}.{extension}` from the
+   * row's own extension, so the label and the format can never drift apart.
+   *
+   * Renaming mutates the database ONLY — the file stays `UUID.ext` on disk, which
+   * is what makes it instant, reversible, and free of the failure modes a real
+   * filesystem rename carries.
+   */
+  stem?: string;
+  notes?: string;
+  source_url?: string;
+}
+
+export interface FolderPatch {
+  name?: string;
+  notes?: string;
+}
+
+/** "photo.jpg" -> "photo". The extension is shown separately and isn't editable. */
+export function filenameStem(filename: string, extension: string): string {
+  if (!extension) return filename;
+  const suffix = `.${extension}`;
+  return filename.toLowerCase().endsWith(suffix.toLowerCase())
+    ? filename.slice(0, -suffix.length)
+    : filename;
 }
 
 /** Which slice of the library is shown. A scope is a place, not a filter. */
@@ -184,6 +221,47 @@ export function hexToRgb(hex: string): { r: number; g: number; b: number } | nul
 
 export const rgbToHex = (c: { r: number; g: number; b: number }): string =>
   "#" + [c.r, c.g, c.b].map((v) => v.toString(16).padStart(2, "0")).join("");
+
+export const rgbToCss = (c: { r: number; g: number; b: number }): string =>
+  `rgb(${c.r}, ${c.g}, ${c.b})`;
+
+/** sRGB -> `hsl(H, S%, L%)`. Plain color-space math, no perceptual weighting. */
+export function rgbToHsl(c: { r: number; g: number; b: number }): string {
+  const [r, g, b] = [c.r / 255, c.g / 255, c.b / 255];
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  const l = (max + min) / 2;
+  const d = max - min;
+
+  let h = 0;
+  if (d !== 0) {
+    if (max === r) h = ((g - b) / d) % 6;
+    else if (max === g) h = (b - r) / d + 2;
+    else h = (r - g) / d + 4;
+    h *= 60;
+    if (h < 0) h += 360;
+  }
+  const s = d === 0 ? 0 : d / (1 - Math.abs(2 * l - 1));
+  return `hsl(${Math.round(h)}, ${Math.round(s * 100)}%, ${Math.round(l * 100)}%)`;
+}
+
+/** One color of an asset's palette, with the share of the image it covers. */
+export interface PaletteSwatch {
+  r: number;
+  g: number;
+  b: number;
+  ratio: number;
+}
+
+/** Formats a swatch can be copied in. */
+export const COLOR_FORMATS = ["HEX", "RGB", "HSL"] as const;
+export type ColorFormat = (typeof COLOR_FORMATS)[number];
+
+export function formatColor(c: PaletteSwatch, format: ColorFormat): string {
+  if (format === "RGB") return rgbToCss(c);
+  if (format === "HSL") return rgbToHsl(c);
+  return rgbToHex(c).toUpperCase();
+}
 
 /** How much of the library has a color palette. */
 export interface ColorCoverage {
@@ -358,6 +436,9 @@ export interface Folder {
   position: number;
   order_by: OrderBy;
   is_ascending: boolean;
+  notes: string | null;
+  /** When the folder entered this library (RFC 3339, UTC). */
+  created_at: string;
 }
 
 // ThumbHash (base64) -> data URL, memoized (cards mount/unmount on scroll).
@@ -471,15 +552,18 @@ class AssetLibrary {
     sort: Sort = this.sort,
     filters: FilterSet = this.filters,
   ): Promise<void> {
-    // Selection is a subset of what's on screen. A sort change reorders the very
-    // same rows, so it survives one (ids stay valid; indices are recomputed from
-    // the manifest at click time). Anything that changes WHICH rows exist drops
-    // it — otherwise the inspector shows an asset the user can't see, and a bulk
-    // action mutates invisible rows.
+    // The ASSET selection is a subset of what's on screen. A sort change reorders
+    // the very same rows, so it survives one (ids stay valid; indices are
+    // recomputed from the manifest at click time). Anything that changes WHICH
+    // rows exist drops it — otherwise the inspector shows an asset the user can't
+    // see, and a bulk action mutates invisible rows.
+    //
+    // `clearAssets`, not `clear`: a selected folder is not a claim about the
+    // manifest, and navigating INTO a folder is precisely when it gets selected.
     //
     // Identity comparison on `filters` is exactly right: every setter builds a
     // new object, and a sort-only reload passes `this.filters` straight through.
-    if (!sameScope(scope, this.scope) || filters !== this.filters) selection.clear();
+    if (!sameScope(scope, this.scope) || filters !== this.filters) selection.clearAssets();
 
     this.scope = scope;
     this.sort = sort;
@@ -628,6 +712,16 @@ class AssetLibrary {
     }
   }
 
+  /**
+   * One asset's palette, most-covering first. Empty means "not analyzed yet".
+   *
+   * Not cached: it's eight rows behind an indexed lookup, and a cache would go
+   * stale the moment "Analyze colors" runs.
+   */
+  fetchPalette(assetId: string): Promise<PaletteSwatch[]> {
+    return invoke<PaletteSwatch[]>("fetch_palette", { assetId });
+  }
+
   /** Backfill palettes for un-analyzed images. Resolves with the count done. */
   async analyzeColors(): Promise<number> {
     const count = await invoke<number>("analyze_colors");
@@ -708,9 +802,34 @@ class AssetLibrary {
     await this.loadFolders();
   }
 
-  async renameFolder(id: string, name: string): Promise<void> {
-    await invoke("rename_folder", { id, name });
+  renameFolder(id: string, name: string): Promise<void> {
+    return this.updateFolder(id, { name });
+  }
+
+  /**
+   * Apply a partial folder update. Omitted keys are left alone; `""` clears a
+   * field — see FolderPatch in assets.rs. Reloads the tree because a rename
+   * changes the sibling ordering (`ORDER BY parent_id, position, name`).
+   */
+  async updateFolder(id: string, patch: FolderPatch): Promise<void> {
+    await invoke("update_folder", { id, patch });
     await this.loadFolders();
+  }
+
+  /**
+   * Apply a partial asset update, then refresh the cached row from what the DB
+   * actually stored — without this, scrolling away and back would show the old
+   * name, since the grid renders from `heavy`, not from the inspector.
+   */
+  async updateAsset(id: string, patch: AssetPatch): Promise<void> {
+    const row = await invoke<AssetMetadata>("update_asset", { id, patch });
+    if (this.heavy.has(id)) this.heavy.set(id, row);
+
+    // A rename moves the row under a filename sort. Reload once, here on commit —
+    // never per keystroke, which would re-stream the manifest as the user types.
+    if (patch.stem !== undefined && this.sort.order_by === "filename") {
+      await this.reload();
+    }
   }
 
   /**

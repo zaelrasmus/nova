@@ -48,6 +48,12 @@ pub fn scan_directories(
             position: folders.len() as f64, // discovery order; siblings stay monotonic
             order_by: crate::assets::OrderBy::Manual,
             is_ascending: true,
+            notes: None,
+            // When the folder entered THIS library, not the source directory's
+            // mtime — a scanned folder is created here and now, same as one made
+            // by hand. (The source's own timestamp isn't a property of the folder
+            // as the library understands it.)
+            created_at: crate::assets::now_stamp(),
         });
 
         folder_id_by_path.insert(path, id);

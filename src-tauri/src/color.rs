@@ -61,6 +61,14 @@ pub struct PaletteEntry {
     pub ratio: f32,
 }
 
+/// D65 white point, the reference both conversions normalize against.
+const XN: f32 = 0.950_47;
+const YN: f32 = 1.0;
+const ZN: f32 = 1.088_83;
+
+/// Break point of the CIE curve's linear segment, which keeps it finite at zero.
+const DELTA: f32 = 6.0 / 29.0;
+
 /// sRGB (0–255) to CIELAB, D65 white point.
 pub fn srgb_to_lab(r: u8, g: u8, b: u8) -> Lab {
     // 1. Undo the sRGB transfer function to get linear light.
@@ -80,12 +88,7 @@ pub fn srgb_to_lab(r: u8, g: u8, b: u8) -> Lab {
     let z = 0.019_333_9 * r + 0.119_192 * g + 0.950_304_1 * b;
 
     // 3. XYZ -> Lab, normalized against the D65 white point.
-    const XN: f32 = 0.950_47;
-    const YN: f32 = 1.0;
-    const ZN: f32 = 1.088_83;
-    // The linear segment near zero keeps the curve finite at the origin.
     fn f(t: f32) -> f32 {
-        const DELTA: f32 = 6.0 / 29.0;
         if t > DELTA * DELTA * DELTA {
             t.cbrt()
         } else {
@@ -99,6 +102,44 @@ pub fn srgb_to_lab(r: u8, g: u8, b: u8) -> Lab {
         a: 500.0 * (fx - fy),
         b: 200.0 * (fy - fz),
     }
+}
+
+/// CIELAB back to sRGB (0–255), for showing a stored palette entry on screen.
+///
+/// Lab describes more colors than sRGB can display, and averaging pixels inside a
+/// quantization bin can land just outside the gamut, so clamping is normal here
+/// rather than a sign of bad input — the nearest displayable color is exactly
+/// what a swatch should show.
+pub fn lab_to_srgb(lab: Lab) -> (u8, u8, u8) {
+    // 1. Lab -> XYZ (the inverse of `f` above).
+    fn f_inv(t: f32) -> f32 {
+        if t > DELTA {
+            t * t * t
+        } else {
+            3.0 * DELTA * DELTA * (t - 4.0 / 29.0)
+        }
+    }
+    let fy = (lab.l + 16.0) / 116.0;
+    let fx = fy + lab.a / 500.0;
+    let fz = fy - lab.b / 200.0;
+    let (x, y, z) = (XN * f_inv(fx), YN * f_inv(fy), ZN * f_inv(fz));
+
+    // 2. XYZ -> linear RGB (inverse of the sRGB/D65 matrix used above).
+    let r = 3.240_97 * x - 1.537_383 * y - 0.498_611 * z;
+    let g = -0.969_244 * x + 1.875_968 * y + 0.041_555 * z;
+    let b = 0.055_63 * x - 0.203_977 * y + 1.056_972 * z;
+
+    // 3. Re-apply the sRGB transfer function.
+    fn encode(c: f32) -> u8 {
+        let c = c.clamp(0.0, 1.0);
+        let s = if c <= 0.003_130_8 {
+            12.92 * c
+        } else {
+            1.055 * c.powf(1.0 / 2.4) - 0.055
+        };
+        (s * 255.0).round() as u8
+    }
+    (encode(r), encode(g), encode(b))
 }
 
 /// Weighted squared distance between two LAB colors. Squared so callers can

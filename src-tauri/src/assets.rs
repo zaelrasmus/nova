@@ -143,6 +143,12 @@ fn stamp(dt: DateTime<Utc>) -> String {
     dt.to_rfc3339_opts(SecondsFormat::Millis, true)
 }
 
+/// `stamp(Utc::now())`, for callers outside this module. Exists so no other file
+/// is tempted to format a timestamp its own way — see above for why that matters.
+pub fn now_stamp() -> String {
+    stamp(Utc::now())
+}
+
 /// Guard that must precede every shape predicate. `width`/`height` default to 0,
 /// so audio (and anything whose dimensions failed to extract) is 0×0 — without
 /// this, `width = height` would report every audio file as "square". Excluding
@@ -318,6 +324,15 @@ pub struct AssetMetadata {
     #[sqlx(rename = "modified_date")]
     pub modified_date: String,
 
+    /// User-authored, never derived from the file.
+    #[sqlx(default)]
+    pub notes: Option<String>,
+
+    /// Where the asset came from. See the column comment in the migration for
+    /// why this is stored permissively but opened strictly.
+    #[sqlx(default)]
+    pub source_url: Option<String>,
+
     #[sqlx(default)]
     pub thumb_hash: Option<String>,
 
@@ -387,6 +402,10 @@ pub struct Folder {
     pub position: f64,
     pub order_by: OrderBy,
     pub is_ascending: bool,
+    #[sqlx(default)]
+    pub notes: Option<String>,
+    #[sqlx(default)]
+    pub created_at: String,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -685,7 +704,7 @@ pub async fn set_sort(pool: &SqlitePool, scope: &Scope, sort: Sort) -> Result<()
 #[instrument(skip(pool))]
 pub async fn fetch_folders(pool: &SqlitePool) -> Result<Vec<Folder>> {
     let folders = sqlx::query_as::<_, Folder>(
-        "SELECT id, name, parent_id, position, order_by, is_ascending
+        "SELECT id, name, parent_id, position, order_by, is_ascending, notes, created_at
          FROM folders
          ORDER BY parent_id, position, name",
     )
@@ -860,6 +879,126 @@ async fn next_folder_position(pool: &SqlitePool, parent_id: Option<&str>) -> Res
     Ok(max.map(|m| m + 1.0).unwrap_or(0.0))
 }
 
+// ── Inspector edits ───────────────────────────────────────────────────────────
+//
+// Every field here is metadata: renaming an asset mutates the database ONLY. The
+// file on disk stays `UUID.ext`, which is what makes rename instant, always
+// reversible, and free of the failure modes a real rename carries (locked files,
+// per-OS invalid characters, collisions, and a half-applied state when the FS
+// write succeeds and the DB write doesn't). It's also what lets two assets share
+// a display name, which a managed library must allow.
+
+/// Partial update of an asset. `None` means "leave this column alone", `Some("")`
+/// means "clear it to NULL" — a distinction the UI relies on, since it sends one
+/// field at a time as the user edits it.
+#[derive(Deserialize, Debug, Default)]
+#[serde(default)]
+pub struct AssetPatch {
+    /// The name WITHOUT its extension. `filename` is always recomposed as
+    /// `{stem}.{extension}` from the row's own extension, so the two columns can
+    /// never drift and the extension — which describes the actual bytes, not the
+    /// user's label — can't be edited away by accident.
+    pub stem: Option<String>,
+    pub notes: Option<String>,
+    pub source_url: Option<String>,
+}
+
+/// Partial update of a folder. Same `None` vs `Some("")` contract as `AssetPatch`.
+#[derive(Deserialize, Debug, Default)]
+#[serde(default)]
+pub struct FolderPatch {
+    pub name: Option<String>,
+    pub notes: Option<String>,
+}
+
+/// Trim, and treat an empty result as NULL. Used for every free-text field, so a
+/// cleared box and a box full of spaces both mean "unset" rather than leaving a
+/// row that looks blank but isn't.
+fn blank_to_null(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+/// Clean a user-supplied display name.
+///
+/// These never reach the filesystem, so this is about legibility, not safety:
+/// path separators and control characters would render as garbage and would
+/// break a future "export under the display name". An all-whitespace name is
+/// rejected outright — a nameless row is unreadable in every list that shows it.
+fn clean_name(raw: &str) -> Result<String> {
+    let cleaned: String = raw
+        .chars()
+        .filter(|c| !c.is_control() && !matches!(c, '/' | '\\'))
+        .collect();
+    blank_to_null(&cleaned).ok_or_else(|| anyhow::anyhow!("Name cannot be empty"))
+}
+
+/// Apply `patch` and return the updated row, so the caller refreshes its cache
+/// from what was actually stored rather than from what it hoped it stored.
+#[instrument(skip(pool, root))]
+pub async fn update_asset(
+    pool: &SqlitePool,
+    root: &Path,
+    id: &str,
+    patch: AssetPatch,
+) -> Result<AssetMetadata> {
+    let filename = match patch.stem {
+        Some(raw) => {
+            let stem = clean_name(&raw).context("An asset needs a name")?;
+            let extension: String = sqlx::query_scalar("SELECT extension FROM assets WHERE id = ?")
+                .bind(id)
+                .fetch_optional(pool)
+                .await
+                .context("Failed to read asset extension")?
+                .ok_or_else(|| anyhow::anyhow!("Asset not found"))?;
+            // Extensionless files exist; don't leave them with a trailing dot.
+            Some(if extension.is_empty() {
+                stem
+            } else {
+                format!("{stem}.{extension}")
+            })
+        }
+        None => None,
+    };
+    let notes = patch.notes.map(|s| blank_to_null(&s));
+    let source_url = patch.source_url.map(|s| blank_to_null(&s));
+
+    if filename.is_some() || notes.is_some() || source_url.is_some() {
+        let mut qb = QueryBuilder::new("UPDATE assets SET ");
+        {
+            let mut sep = qb.separated(", ");
+            if let Some(v) = &filename {
+                sep.push("filename = ");
+                sep.push_bind_unseparated(v);
+            }
+            if let Some(v) = &notes {
+                sep.push("notes = ");
+                sep.push_bind_unseparated(v);
+            }
+            if let Some(v) = &source_url {
+                sep.push("source_url = ");
+                sep.push_bind_unseparated(v);
+            }
+        }
+        qb.push(" WHERE id = ").push_bind(id);
+
+        let res = qb
+            .build()
+            .execute(pool)
+            .await
+            .context("Failed to update asset")?;
+        if res.rows_affected() == 0 {
+            anyhow::bail!("Asset not found");
+        }
+    }
+
+    let ids = [id.to_string()];
+    fetch_assets_by_ids(pool, root, &ids)
+        .await?
+        .pop()
+        .ok_or_else(|| anyhow::anyhow!("Asset not found"))
+}
+
 #[instrument(skip(pool))]
 pub async fn create_folder(
     pool: &SqlitePool,
@@ -868,15 +1007,19 @@ pub async fn create_folder(
 ) -> Result<Folder> {
     let id = uuid::Uuid::new_v4().to_string();
     let position = next_folder_position(pool, parent_id).await?;
+    // Written explicitly rather than left to the column DEFAULT, so the returned
+    // struct carries the same value the row does without a read-back.
+    let created_at = stamp(Utc::now());
 
     sqlx::query(
-        "INSERT INTO folders (id, name, parent_id, position, order_by, is_ascending)
-         VALUES (?, ?, ?, ?, 'manual', 1)",
+        "INSERT INTO folders (id, name, parent_id, position, created_at, order_by, is_ascending)
+         VALUES (?, ?, ?, ?, ?, 'manual', 1)",
     )
     .bind(&id)
     .bind(name)
     .bind(parent_id)
     .bind(position)
+    .bind(&created_at)
     .execute(pool)
     .await
     .context("Failed to insert folder")?;
@@ -888,17 +1031,42 @@ pub async fn create_folder(
         position,
         order_by: OrderBy::Manual,
         is_ascending: true,
+        notes: None,
+        created_at,
     })
 }
 
 #[instrument(skip(pool))]
-pub async fn rename_folder(pool: &SqlitePool, id: &str, name: &str) -> Result<()> {
-    let res = sqlx::query("UPDATE folders SET name = ? WHERE id = ?")
-        .bind(name)
-        .bind(id)
+pub async fn update_folder(pool: &SqlitePool, id: &str, patch: FolderPatch) -> Result<()> {
+    let name = match patch.name {
+        Some(raw) => Some(clean_name(&raw).context("A folder needs a name")?),
+        None => None,
+    };
+    let notes = patch.notes.map(|s| blank_to_null(&s));
+
+    if name.is_none() && notes.is_none() {
+        return Ok(());
+    }
+
+    let mut qb = QueryBuilder::new("UPDATE folders SET ");
+    {
+        let mut sep = qb.separated(", ");
+        if let Some(v) = &name {
+            sep.push("name = ");
+            sep.push_bind_unseparated(v);
+        }
+        if let Some(v) = &notes {
+            sep.push("notes = ");
+            sep.push_bind_unseparated(v);
+        }
+    }
+    qb.push(" WHERE id = ").push_bind(id);
+
+    let res = qb
+        .build()
         .execute(pool)
         .await
-        .context("Failed to rename folder")?;
+        .context("Failed to update folder")?;
     if res.rows_affected() == 0 {
         anyhow::bail!("Folder not found");
     }
@@ -1031,7 +1199,7 @@ pub async fn fetch_assets_by_ids(
     // 32766 bind-parameter limit, so no chunking needed.
     let mut qb = QueryBuilder::new(
         "SELECT id, asset_type, filename, extension, path, width, height, file_size, \
-         imported_date, creation_date, modified_date, thumb_hash, is_animated \
+         imported_date, creation_date, modified_date, notes, source_url, thumb_hash, is_animated \
          FROM assets WHERE id IN (",
     );
     let mut separated = qb.separated(", ");
@@ -1088,13 +1256,14 @@ async fn persist_import(
     //    are immediate, so insertion order is what makes this valid.
     for chunk in folders.chunks(ROWS_PER_INSERT) {
         let mut qb = QueryBuilder::new(
-            "INSERT INTO folders (id, name, parent_id, position, order_by, is_ascending) ",
+            "INSERT INTO folders (id, name, parent_id, position, created_at, order_by, is_ascending) ",
         );
         qb.push_values(chunk, |mut b, f| {
             b.push_bind(&f.id)
                 .push_bind(&f.name)
                 .push_bind(f.parent_id.as_deref())
                 .push_bind(f.position)
+                .push_bind(&f.created_at)
                 .push_bind(f.order_by)
                 .push_bind(f.is_ascending);
         });
@@ -1235,6 +1404,10 @@ fn build_asset_metadata(src: PathBuf) -> Option<AssetMetadata> {
         imported_date: stamp(Utc::now()),
         creation_date: stamp(created),
         modified_date: stamp(modified),
+        // User-authored fields; an imported file has neither until someone types
+        // one. `source_url` will be filled in by the download path when it lands.
+        notes: None,
+        source_url: None,
         thumb_hash: None, // generated later by generate_pending_thumbnails
         thumb_config: None,
         is_animated: visual.is_animated,
@@ -1682,6 +1855,48 @@ async fn run_generation(
 }
 
 // ── Color analysis ────────────────────────────────────────────────────────────
+
+/// One palette entry as the UI consumes it: sRGB for display plus the share of
+/// the image it covers.
+///
+/// Stored in CIELAB and converted on read rather than kept as extra RGB columns.
+/// Eight rows per asset makes the conversion free, it needs no schema change or
+/// backfill, and it keeps every color transform in `color.rs` instead of spread
+/// across a table definition.
+#[derive(Serialize, Debug, Clone)]
+pub struct PaletteSwatch {
+    pub r: u8,
+    pub g: u8,
+    pub b: u8,
+    /// Share of the sampled pixels, 0.0–1.0.
+    pub ratio: f32,
+}
+
+/// An asset's palette, most-covering first. Empty means "not analyzed yet",
+/// which is the same signal `color_coverage` reports library-wide.
+#[instrument(skip(pool))]
+pub async fn fetch_palette(pool: &SqlitePool, asset_id: &str) -> Result<Vec<PaletteSwatch>> {
+    let rows: Vec<(f32, f32, f32, f32)> = sqlx::query_as(
+        "SELECT l, a, b, ratio FROM asset_colors WHERE asset_id = ? ORDER BY ratio DESC",
+    )
+    .bind(asset_id)
+    .fetch_all(pool)
+    .await
+    .context("Failed to fetch asset palette")?;
+
+    Ok(rows
+        .into_iter()
+        .map(|(l, a, b, ratio)| {
+            let (r, g, blue) = crate::color::lab_to_srgb(crate::color::Lab { l, a, b });
+            PaletteSwatch {
+                r,
+                g,
+                b: blue,
+                ratio,
+            }
+        })
+        .collect())
+}
 
 /// How much of the library has a color palette. An asset with no `asset_colors`
 /// rows simply hasn't been analyzed, and a color filter cannot match it — so the

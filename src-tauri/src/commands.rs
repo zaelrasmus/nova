@@ -273,6 +273,19 @@ pub async fn color_coverage(
         .map_err(AppError::from)
 }
 
+#[instrument(skip_all)]
+#[tauri::command]
+pub async fn fetch_palette(
+    asset_id: String,
+    state: tauri::State<'_, DbState>,
+) -> Result<Vec<assets::PaletteSwatch>, AppError> {
+    let pool = state.acquire_pool().await?;
+    assets::fetch_palette(&pool, &asset_id)
+        .await
+        .inspect_err(|e| tracing::error!(error = %e, "fetch_palette failed"))
+        .map_err(AppError::from)
+}
+
 /// Backfill palettes for images that don't have one. Shares the thumbnail
 /// generation lock: both passes decode images, and running them together would
 /// just contend for the same cores.
@@ -396,15 +409,32 @@ pub async fn create_folder(
 
 #[instrument(skip_all)]
 #[tauri::command]
-pub async fn rename_folder(
+pub async fn update_folder(
     id: String,
-    name: String,
+    patch: assets::FolderPatch,
     state: tauri::State<'_, DbState>,
 ) -> Result<(), AppError> {
     let pool = state.acquire_pool().await?;
-    assets::rename_folder(&pool, &id, &name)
+    assets::update_folder(&pool, &id, patch)
         .await
-        .inspect_err(|e| tracing::error!(error = %e, "rename_folder failed"))
+        .inspect_err(|e| tracing::error!(error = %e, "update_folder failed"))
+        .map_err(AppError::from)
+}
+
+/// Returns the stored row so the frontend refreshes its cache from what the DB
+/// actually holds — including the recomposed `filename`, which the client never
+/// builds itself.
+#[instrument(skip_all)]
+#[tauri::command]
+pub async fn update_asset(
+    id: String,
+    patch: assets::AssetPatch,
+    state: tauri::State<'_, DbState>,
+) -> Result<assets::AssetMetadata, AppError> {
+    let handle = state.acquire().await?;
+    assets::update_asset(&handle.pool, &handle.root, &id, patch)
+        .await
+        .inspect_err(|e| tracing::error!(error = %e, "update_asset failed"))
         .map_err(AppError::from)
 }
 

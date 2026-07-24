@@ -3,7 +3,12 @@ CREATE TABLE IF NOT EXISTS folders (
    name TEXT NOT NULL,
    parent_id TEXT,
    position REAL NOT NULL DEFAULT 0,
-   description TEXT,
+   -- Free-text user notes. Named to match assets.notes: it's the same field for
+   -- the same purpose, and the inspector edits both through one control.
+   notes TEXT,
+   -- Same format as the `stamp()` writer in assets.rs (RFC 3339, millis, Z), so
+   -- folder timestamps sort and compare against asset timestamps as plain text.
+   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
    order_by TEXT NOT NULL DEFAULT 'manual',
    is_ascending INTEGER NOT NULL DEFAULT 1, -- 0 = false, 1 = true
 
@@ -28,6 +33,16 @@ CREATE TABLE IF NOT EXISTS assets (
     imported_date TEXT NOT NULL,
     modified_date TEXT NOT NULL,
     creation_date TEXT NOT NULL,
+
+    -- Free-text user notes.
+    notes TEXT,
+
+    -- Where the asset came from, if the user downloaded it. Purely a record the
+    -- user keeps by hand today; the download-from-URL path will populate it
+    -- automatically when that lands. Stored permissively (any text), but only
+    -- ever OPENED when the scheme is http/https — it's user data being handed to
+    -- the OS shell, and file:// or a custom protocol handler is a real vector.
+    source_url TEXT,
 
     -- TESTING Columns
     thumb_hash TEXT, -- base64 ThumbHash (NULL until generated)

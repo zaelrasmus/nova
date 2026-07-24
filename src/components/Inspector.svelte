@@ -1,7 +1,12 @@
 <script lang="ts">
-    import { assetLibrary, describeShape } from "$lib/assets.svelte";
+    import { untrack } from "svelte";
+    import { toast } from "svelte-sonner";
+    import { openUrl } from "@tauri-apps/plugin-opener";
+    import { assetLibrary, describeShape, filenameStem } from "$lib/assets.svelte";
+    import type { AssetPatch, FolderPatch } from "$lib/assets.svelte";
     import { selection } from "$lib/selection.svelte";
     import { formatAspectRatio, formatBytes, formatTimestamp } from "$lib/format";
+    import PaletteSection from "./PaletteSection.svelte";
 
     // The inspector renders the selection; it never owns it. Every mode below is
     // a branch of one union, so "3 assets and a folder" can't be reached.
@@ -12,12 +17,6 @@
     );
     const asset = $derived(singleId ? assetLibrary.heavy.get(singleId) : undefined);
 
-    // The selected row is normally on screen and already hydrated, but a
-    // selection outlives its window — scroll far enough and the LRU evicts it.
-    $effect(() => {
-        if (singleId && !assetLibrary.heavy.has(singleId)) assetLibrary.ensure([singleId]);
-    });
-
     // Looked up rather than stored: if the folder is deleted while selected, this
     // goes undefined and the panel falls back to the empty state on its own.
     const folder = $derived(
@@ -25,6 +24,128 @@
             ? assetLibrary.folders.find((f) => f.id === current.id)
             : undefined,
     );
+
+    // The selected row is normally on screen and already hydrated, but a
+    // selection outlives its window — scroll far enough and the LRU evicts it.
+    $effect(() => {
+        if (singleId && !assetLibrary.heavy.has(singleId)) assetLibrary.ensure([singleId]);
+    });
+
+    // ── Editing ──────────────────────────────────────────────────────────────
+    //
+    // Drafts are local and saved on a debounce, so typing never waits on IPC. The
+    // whole design turns on one hazard: type a new name, click a different asset
+    // before the timer fires, and a naive implementation writes your text to the
+    // WRONG row. So every queued edit captures the key it belongs to, and
+    // switching targets flushes the old one before reseeding.
+
+    const AUTOSAVE_MS = 500;
+
+    /**
+     * Which row the drafts belong to, as "asset:<id>" or "folder:<id>".
+     * Deliberately NOT `$state`: it's bookkeeping for the flush, and making it
+     * reactive would re-trigger the seeding effect from inside its own body.
+     */
+    let editingKey: string | null = null;
+
+    let draftName = $state("");
+    let draftNotes = $state("");
+    let draftUrl = $state("");
+
+    let pending: Record<string, string> = {};
+    let pendingKey: string | null = null;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    const targetKey = (): string | null =>
+        asset ? `asset:${asset.id}` : folder ? `folder:${folder.id}` : null;
+
+    // Reseed when the inspected row changes — and only then. A save patches the
+    // cache, which re-runs this effect with the same key; the early return is what
+    // stops that from wiping out whatever is currently being typed.
+    $effect(() => {
+        const key = targetKey();
+        const a = asset;
+        const f = folder;
+        untrack(() => {
+            if (key === editingKey) return;
+            flush(editingKey); // commit whatever the row we're leaving had pending
+            editingKey = key;
+            draftName = a ? filenameStem(a.filename, a.extension) : (f?.name ?? "");
+            draftNotes = a ? (a.notes ?? "") : (f?.notes ?? "");
+            draftUrl = a?.source_url ?? "";
+        });
+    });
+
+    // Last line of defence: the panel going away must not swallow a pending edit.
+    $effect(() => () => void flush(pendingKey));
+
+    function queue(field: keyof AssetPatch | keyof FolderPatch, value: string) {
+        const key = editingKey;
+        if (!key) return;
+        // A different row than the last queued edit means that one was already
+        // flushed by the effect above; don't carry its fields over.
+        if (pendingKey !== key) {
+            pending = {};
+            pendingKey = key;
+        }
+        pending[field] = value;
+        clearTimeout(timer);
+        timer = setTimeout(() => flush(key), AUTOSAVE_MS); // `key` captured, not read later
+    }
+
+    async function flush(key: string | null): Promise<void> {
+        clearTimeout(timer);
+        if (!key || key !== pendingKey) return; // nothing pending, or not for this row
+        const patch = pending;
+        pending = {};
+        pendingKey = null;
+        if (Object.keys(patch).length === 0) return;
+
+        const cut = key.indexOf(":");
+        const [kind, id] = [key.slice(0, cut), key.slice(cut + 1)];
+        try {
+            if (kind === "asset") await assetLibrary.updateAsset(id, patch as AssetPatch);
+            else await assetLibrary.updateFolder(id, patch as FolderPatch);
+        } catch (e) {
+            toast.error(typeof e === "string" ? e : "Failed to save changes.");
+        }
+    }
+
+    /** Names can't be blank. Skip the write rather than round-tripping an error. */
+    function editName(value: string) {
+        draftName = value;
+        if (value.trim()) queue(asset ? "stem" : "name", value);
+    }
+
+    /** Blur restores a name the user emptied but never committed. */
+    function commitName() {
+        if (!draftName.trim()) {
+            draftName = asset ? filenameStem(asset.filename, asset.extension) : (folder?.name ?? "");
+            return;
+        }
+        flush(editingKey);
+    }
+
+    // Stored permissively, opened strictly: this is user-editable text being
+    // handed to the OS shell, and file:// or a custom protocol handler is a real
+    // vector. Anything that isn't http(s) stays plain text.
+    const openable = $derived(/^https?:\/\//i.test(draftUrl.trim()));
+    async function openSource() {
+        const url = draftUrl.trim();
+        if (!/^https?:\/\//i.test(url)) return;
+        try {
+            await openUrl(url);
+        } catch {
+            toast.error("Couldn't open that link.");
+        }
+    }
+
+    const TYPE_LABELS: Record<string, string> = {
+        image: "Image",
+        video: "Video",
+        audio: "Audio",
+        unknown: "File",
+    };
 
     // Total bytes for a multi-selection, but ONLY when every row happens to be
     // hydrated. Summing the cached subset would silently under-report, and
@@ -41,12 +162,10 @@
         return total;
     });
 
-    const TYPE_LABELS: Record<string, string> = {
-        image: "Image",
-        video: "Video",
-        audio: "Audio",
-        unknown: "File",
-    };
+    const inputClass =
+        "w-full rounded border border-neutral-700 bg-neutral-900 px-2 py-1 text-neutral-200 " +
+        "placeholder:text-neutral-600 focus:border-neutral-500 focus:outline-none";
+    const legendClass = "mb-1 block text-[10px] font-medium uppercase tracking-wide text-neutral-500";
 </script>
 
 {#snippet row(label: string, value: string)}
@@ -56,19 +175,93 @@
     </div>
 {/snippet}
 
+{#snippet notesField()}
+    <label class="block">
+        <span class={legendClass}>Notes</span>
+        <textarea
+            rows="3"
+            value={draftNotes}
+            oninput={(e) => {
+                draftNotes = e.currentTarget.value;
+                queue("notes", draftNotes);
+            }}
+            onblur={() => flush(editingKey)}
+            placeholder="Add a note…"
+            class="resize-y {inputClass}"
+        ></textarea>
+    </label>
+{/snippet}
+
 <aside
-    class="flex h-full flex-col overflow-y-auto rounded-lg border border-neutral-800
+    class="flex h-full flex-col gap-3 overflow-y-auto rounded-lg border border-neutral-800
            bg-neutral-900/40 p-3 text-sm"
     aria-label="Inspector"
 >
     {#if current.kind === "assets" && current.ids.length === 1}
         {#if asset}
-            <h2 class="truncate text-neutral-100" title={asset.filename}>{asset.filename}</h2>
-            <p class="mt-0.5 text-xs text-neutral-500">
-                {TYPE_LABELS[asset.asset_type] ?? "File"} · {asset.extension.toUpperCase()}
-            </p>
+            <div>
+                <label class="block">
+                    <span class={legendClass}>Name</span>
+                    <div class="flex items-center gap-1">
+                        <input
+                            type="text"
+                            value={draftName}
+                            oninput={(e) => editName(e.currentTarget.value)}
+                            onblur={commitName}
+                            spellcheck="false"
+                            class={inputClass}
+                        />
+                        <!-- The extension is shown, never edited: it describes the
+                             actual bytes, not the user's label for them. -->
+                        {#if asset.extension}
+                            <span class="shrink-0 text-xs text-neutral-500"
+                                >.{asset.extension}</span
+                            >
+                        {/if}
+                    </div>
+                </label>
+                <p class="mt-1 text-[10px] text-neutral-600">
+                    {TYPE_LABELS[asset.asset_type] ?? "File"} · renaming affects this library only
+                </p>
+            </div>
 
-            <div class="my-3 h-px bg-neutral-800"></div>
+            {@render notesField()}
+
+            <label class="block">
+                <span class={legendClass}>Source URL</span>
+                <div class="flex items-center gap-1">
+                    <input
+                        type="url"
+                        value={draftUrl}
+                        oninput={(e) => {
+                            draftUrl = e.currentTarget.value;
+                            queue("source_url", draftUrl);
+                        }}
+                        onblur={() => flush(editingKey)}
+                        spellcheck="false"
+                        placeholder="https://…"
+                        class={inputClass}
+                    />
+                    <button
+                        type="button"
+                        onclick={openSource}
+                        disabled={!openable}
+                        title={openable ? "Open in browser" : "Only http(s) links can be opened"}
+                        class="shrink-0 rounded px-1.5 py-1 text-neutral-500
+                               enabled:hover:bg-neutral-800 enabled:hover:text-neutral-200
+                               disabled:cursor-not-allowed disabled:text-neutral-700">↗</button
+                    >
+                </div>
+            </label>
+
+            <div class="h-px bg-neutral-800"></div>
+
+            <!-- Images only: nothing else produces a palette, and an empty strip
+                 on a video would read as a bug rather than as "not applicable". -->
+            {#if asset.asset_type === "image"}
+                <PaletteSection assetId={asset.id} {legendClass} />
+                <div class="h-px bg-neutral-800"></div>
+            {/if}
 
             <div class="flex flex-col text-xs">
                 {@render row("Dimensions", `${asset.width} × ${asset.height}`)}
@@ -77,9 +270,10 @@
                     `${formatAspectRatio(asset.width, asset.height)} · ${describeShape(asset.width, asset.height)}`,
                 )}
                 {@render row("Size", formatBytes(asset.file_size))}
+                {@render row("Format", asset.extension.toUpperCase() || "—")}
             </div>
 
-            <div class="my-3 h-px bg-neutral-800"></div>
+            <div class="h-px bg-neutral-800"></div>
 
             <div class="flex flex-col text-xs">
                 {@render row("Added", formatTimestamp(asset.imported_date))}
@@ -93,19 +287,37 @@
             <p class="text-xs text-neutral-500">Loading details…</p>
         {/if}
     {:else if current.kind === "assets"}
-        <h2 class="text-neutral-100">{current.ids.length} assets selected</h2>
-        {#if bulkBytes !== null}
-            <p class="mt-0.5 text-xs text-neutral-500">{formatBytes(bulkBytes)} total</p>
-        {/if}
-        <p class="mt-3 text-xs text-neutral-600">
-            Batch editing arrives with the bulk inspector.
-        </p>
+        <!-- Name, notes and source URL are absent rather than disabled: a greyed
+             box showing nothing is a puzzle, and there's no safe answer to
+             "append or replace?" for a field shared by 50 rows. -->
+        <div>
+            <h2 class="text-neutral-100">{current.ids.length} assets selected</h2>
+            {#if bulkBytes !== null}
+                <p class="mt-0.5 text-xs text-neutral-500">{formatBytes(bulkBytes)} total</p>
+            {/if}
+        </div>
+        <p class="text-xs text-neutral-600">Batch editing arrives with the bulk inspector.</p>
     {:else if folder}
-        <h2 class="truncate text-neutral-100" title={folder.name}>{folder.name}</h2>
-        <p class="mt-0.5 text-xs text-neutral-500">Folder</p>
-        <p class="mt-3 text-xs text-neutral-600">
-            Item count, size and notes arrive with the folder inspector.
-        </p>
+        <label class="block">
+            <span class={legendClass}>Folder name</span>
+            <input
+                type="text"
+                value={draftName}
+                oninput={(e) => editName(e.currentTarget.value)}
+                onblur={commitName}
+                spellcheck="false"
+                class={inputClass}
+            />
+        </label>
+
+        {@render notesField()}
+
+        <div class="h-px bg-neutral-800"></div>
+
+        <div class="flex flex-col text-xs">
+            {@render row("Created", formatTimestamp(folder.created_at))}
+        </div>
+        <p class="text-xs text-neutral-600">Item count and total size arrive next.</p>
     {:else}
         <!-- An empty state, not a blank panel: a void reads as a bug. This is
              also what "All" and "Uncategorized" resolve to — they're places, and
