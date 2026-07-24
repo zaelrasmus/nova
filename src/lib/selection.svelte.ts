@@ -183,6 +183,18 @@ class SelectionStore {
   readonly assets = new RangeSelection();
   #folder = $state<string | null>(null);
 
+  /**
+   * Bumped by the `T` shortcut to ask the mounted tag editor to focus. A nonce
+   * rather than a boolean so two presses in a row both register — the editor
+   * watches it and reacts to the change, never reads a level.
+   */
+  tagFocusNonce = $state(0);
+
+  /** Ask the inspector's tag editor to take focus, if there's a selection. */
+  requestTagFocus(): void {
+    if (this.assets.size > 0) this.tagFocusNonce++;
+  }
+
   /** The current selection, as the tagged union consumers should match on. */
   get current(): Selection {
     if (this.#folder !== null) return { kind: "folder", id: this.#folder };

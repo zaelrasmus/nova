@@ -6,6 +6,7 @@ mod error;
 mod extract;
 mod fs;
 mod library;
+mod tags;
 mod thumbnail;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -44,6 +45,13 @@ pub fn run() {
             commands::move_folder,
             commands::add_assets_to_folder,
             commands::remove_assets_from_folder,
+            commands::fetch_tags,
+            commands::ensure_tag,
+            commands::rename_tag,
+            commands::delete_tag,
+            commands::assign_tag,
+            commands::unassign_tag,
+            commands::tag_usage_for_assets,
             commands::fetch_assets_by_ids,
             commands::generate_thumbnails_for_ids,
             commands::rebuild_thumbnails,

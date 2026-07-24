@@ -50,6 +50,7 @@
         assetLibrary.loadFolders();
         assetLibrary.loadSavedFilters();
         assetLibrary.loadColorCoverage();
+        assetLibrary.loadTags();
       });
     })
 
@@ -180,6 +181,11 @@
                 // effect does — so it never re-registers the listener, and
                 // "select all" always means all currently *visible* rows.
                 selection.selectAllAssets(idsNow());
+            } else if (e.key.toLowerCase() === "t" && !e.ctrlKey && !e.metaKey && !e.altKey) {
+                // Open the tag editor for the current selection. No-op with
+                // nothing selected (requestTagFocus guards that).
+                e.preventDefault();
+                selection.requestTagFocus();
             }
         };
         window.addEventListener("keydown", onKey);

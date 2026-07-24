@@ -13,6 +13,7 @@
     import { formatAspectRatio, formatBytes, formatTimestamp } from "$lib/format";
     import PaletteSection from "./PaletteSection.svelte";
     import FolderMembership from "./FolderMembership.svelte";
+    import TagEditor from "./TagEditor.svelte";
 
     // The inspector renders the selection; it never owns it. Every mode below is
     // a branch of one union, so "3 assets and a folder" can't be reached.
@@ -302,6 +303,10 @@
 
             <div class="h-px bg-neutral-800"></div>
 
+            <TagEditor assetIds={[asset.id]} {legendClass} />
+
+            <div class="h-px bg-neutral-800"></div>
+
             <!-- Same control as bulk mode, just with a selection of one — so the
                  tri-state collapses to an ordinary checkbox on its own. -->
             <FolderMembership assetIds={[asset.id]} {legendClass} />
@@ -349,11 +354,8 @@
             </p>
         </div>
 
+        <TagEditor assetIds={current.ids} {legendClass} />
         <FolderMembership assetIds={current.ids} {legendClass} />
-
-        <p class="text-xs text-neutral-600">
-            Tags will appear here, with the same three states, once that feature lands.
-        </p>
     {:else if folder}
         <label class="block">
             <span class={legendClass}>Folder name</span>

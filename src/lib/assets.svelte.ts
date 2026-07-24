@@ -454,6 +454,27 @@ export interface FolderMembership {
 }
 
 /**
+ * A tag with its live usage count. Globally unique by name (case-insensitive), a
+ * lens on assets — never on folders. `group_id`/`color`/`is_starred` are carried
+ * from the schema but only exercised from T2 on.
+ */
+export interface Tag {
+  id: string;
+  name: string;
+  color: string | null;
+  group_id: string | null;
+  is_starred: boolean;
+  position: number;
+  usage: number;
+}
+
+/** How many of a selection carry one tag. Absent tags mean zero. */
+export interface TagUsage {
+  tag_id: string;
+  count: number;
+}
+
+/**
  * Membership of a folder across a selection.
  *
  * The "some" state is what makes batch editing safe: it says the folder holds a
@@ -512,6 +533,12 @@ class AssetLibrary {
   folders = $state<Folder[]>([]);
   /** Named filter combinations for this library, refreshed on library switch. */
   savedFilters = $state<SavedFilter[]>([]);
+  /**
+   * Every tag in the library with its usage count, alphabetical. Refreshed on
+   * library switch and after any tag mutation, so usage counts and the inspector
+   * always read from one authoritative list.
+   */
+  tags = $state<Tag[]>([]);
   /**
    * How many images have a color palette; null until first read. Surfaced in the
    * UI because a color filter cannot match an un-analyzed asset, and a filter
@@ -849,6 +876,57 @@ class AssetLibrary {
   /** Per-folder membership counts for a selection; drives the tri-state UI. */
   fetchFolderMembership(assetIds: string[]): Promise<FolderMembership[]> {
     return invoke<FolderMembership[]>("folder_membership", { assetIds });
+  }
+
+  // ── Tags ────────────────────────────────────────────────────────────────
+
+  /** Refresh the tag list for the active library. Non-fatal on failure. */
+  async loadTags(): Promise<void> {
+    try {
+      this.tags = await invoke<Tag[]>("fetch_tags");
+    } catch (e) {
+      console.error("Failed to load tags:", e);
+      this.tags = [];
+    }
+  }
+
+  /**
+   * Find-or-create a tag by name (case-insensitive), returning its id. The
+   * backend reuses an existing row rather than duplicating, so "Red" typed twice
+   * is one tag. Refreshes the list so a newly created tag appears everywhere.
+   */
+  async ensureTag(name: string): Promise<string> {
+    const id = await invoke<string>("ensure_tag", { name });
+    await this.loadTags();
+    return id;
+  }
+
+  async renameTag(id: string, name: string): Promise<void> {
+    await invoke("rename_tag", { id, name });
+    await this.loadTags();
+  }
+
+  /** Delete a tag globally (removes every assignment). Reloads the manifest if a
+      tag filter is active, since the result set may change. */
+  async deleteTag(id: string): Promise<void> {
+    await invoke("delete_tag", { id });
+    await this.loadTags();
+  }
+
+  /** Assign a tag to assets. Reloads the tag list so usage counts stay honest. */
+  async assignTag(tagId: string, assetIds: string[]): Promise<void> {
+    await invoke("assign_tag", { tagId, assetIds });
+    await this.loadTags();
+  }
+
+  async unassignTag(tagId: string, assetIds: string[]): Promise<void> {
+    await invoke("unassign_tag", { tagId, assetIds });
+    await this.loadTags();
+  }
+
+  /** Per-tag counts across a selection; drives the inspector's tri-state. */
+  fetchTagUsage(assetIds: string[]): Promise<TagUsage[]> {
+    return invoke<TagUsage[]>("tag_usage_for_assets", { assetIds });
   }
 
   /**

@@ -2,6 +2,7 @@ use crate::assets::{
     self, AssetLightRow, AssetMetadata, ImportProgress, ImportResult, ProgressReporter,
 };
 use crate::db::DbState;
+use crate::tags;
 use crate::error::AppError;
 use crate::library::{self, LibraryInfo};
 use std::sync::Arc;
@@ -529,6 +530,97 @@ pub async fn remove_assets_from_folder(
     assets::remove_assets_from_folder(&pool, &folder_id, &asset_ids)
         .await
         .inspect_err(|e| tracing::error!(error = %e, "remove_assets_from_folder failed"))
+        .map_err(AppError::from)
+}
+
+// ── Tags ────────────────────────────────────────────────────────────────────
+
+#[instrument(skip_all)]
+#[tauri::command]
+pub async fn fetch_tags(state: tauri::State<'_, DbState>) -> Result<Vec<tags::Tag>, AppError> {
+    let pool = state.acquire_pool().await?;
+    tags::fetch_tags(&pool)
+        .await
+        .inspect_err(|e| tracing::error!(error = %e, "fetch_tags failed"))
+        .map_err(AppError::from)
+}
+
+/// Find-or-create by name, returning the tag id. This is the create-on-the-fly
+/// primitive the inspector calls before assigning.
+#[instrument(skip_all)]
+#[tauri::command]
+pub async fn ensure_tag(name: String, state: tauri::State<'_, DbState>) -> Result<String, AppError> {
+    let pool = state.acquire_pool().await?;
+    tags::ensure_tag(&pool, &name)
+        .await
+        .inspect_err(|e| tracing::error!(error = %e, "ensure_tag failed"))
+        .map_err(AppError::from)
+}
+
+#[instrument(skip_all)]
+#[tauri::command]
+pub async fn rename_tag(
+    id: String,
+    name: String,
+    state: tauri::State<'_, DbState>,
+) -> Result<(), AppError> {
+    let pool = state.acquire_pool().await?;
+    tags::rename_tag(&pool, &id, &name)
+        .await
+        .inspect_err(|e| tracing::error!(error = %e, "rename_tag failed"))
+        .map_err(AppError::from)
+}
+
+#[instrument(skip_all)]
+#[tauri::command]
+pub async fn delete_tag(id: String, state: tauri::State<'_, DbState>) -> Result<(), AppError> {
+    let pool = state.acquire_pool().await?;
+    tags::delete_tag(&pool, &id)
+        .await
+        .inspect_err(|e| tracing::error!(error = %e, "delete_tag failed"))
+        .map_err(AppError::from)
+}
+
+/// Assign an existing tag to a set of assets. Idempotent per asset.
+#[instrument(skip_all, fields(count = asset_ids.len()))]
+#[tauri::command]
+pub async fn assign_tag(
+    tag_id: String,
+    asset_ids: Vec<String>,
+    state: tauri::State<'_, DbState>,
+) -> Result<(), AppError> {
+    let pool = state.acquire_pool().await?;
+    tags::assign_tag(&pool, &tag_id, &asset_ids)
+        .await
+        .inspect_err(|e| tracing::error!(error = %e, "assign_tag failed"))
+        .map_err(AppError::from)
+}
+
+#[instrument(skip_all, fields(count = asset_ids.len()))]
+#[tauri::command]
+pub async fn unassign_tag(
+    tag_id: String,
+    asset_ids: Vec<String>,
+    state: tauri::State<'_, DbState>,
+) -> Result<(), AppError> {
+    let pool = state.acquire_pool().await?;
+    tags::unassign_tag(&pool, &tag_id, &asset_ids)
+        .await
+        .inspect_err(|e| tracing::error!(error = %e, "unassign_tag failed"))
+        .map_err(AppError::from)
+}
+
+/// Per-tag counts across a selection — drives the inspector's tri-state.
+#[instrument(skip_all, fields(count = asset_ids.len()))]
+#[tauri::command]
+pub async fn tag_usage_for_assets(
+    asset_ids: Vec<String>,
+    state: tauri::State<'_, DbState>,
+) -> Result<Vec<tags::TagUsage>, AppError> {
+    let pool = state.acquire_pool().await?;
+    tags::tag_usage_for_assets(&pool, &asset_ids)
+        .await
+        .inspect_err(|e| tracing::error!(error = %e, "tag_usage_for_assets failed"))
         .map_err(AppError::from)
 }
 

@@ -128,6 +128,66 @@ CREATE TABLE IF NOT EXISTS asset_colors (
 -- it; this one exists for the asset_id lookup inside the EXISTS subquery.
 CREATE INDEX IF NOT EXISTS idx_asset_colors ON asset_colors (asset_id);
 
+-- ── Tags ──────────────────────────────────────────────────────────────────────
+--
+-- A tag is a LENS on assets, never a place: applying one narrows the current
+-- scope through the FilterSet, exactly like shape or size. Tags never apply to
+-- folders. Groups are pure organization — a tag belongs to at most one — and are
+-- flat (no nesting), matching the Tag Manager's own sidebar.
+
+-- Optional grouping of tags (the manager's "Groups"). Deleting a group must NOT
+-- delete its tags: SET NULL leaves them ungrouped. Cascading here would turn one
+-- click into silent mass tag loss (and, through assets_tags, lost assignments).
+CREATE TABLE IF NOT EXISTS tag_groups (
+    id TEXT PRIMARY KEY NOT NULL,
+    name TEXT NOT NULL,
+    color TEXT,
+    -- Sibling ordering in the manager (fractional rank, same idea as folders).
+    position REAL NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+CREATE TABLE IF NOT EXISTS tags (
+    id TEXT PRIMARY KEY NOT NULL,
+    name TEXT NOT NULL,
+
+    -- Own color overrides the group's; NULL inherits it, then a neutral default.
+    color TEXT,
+
+    -- At most one group. SET NULL, never CASCADE — see tag_groups above.
+    group_id TEXT REFERENCES tag_groups(id) ON DELETE SET NULL,
+
+    -- Pinned in the manager's "Starred" view. Column present from the start so
+    -- the T4 feature needs no migration; unused until then.
+    is_starred INTEGER NOT NULL DEFAULT 0,
+
+    position REAL NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+-- Global name uniqueness, case-INSENSITIVE: "Red" and "red" are the same tag, so
+-- create-on-the-fly resolves to the existing row instead of spawning a near-dupe.
+-- A UNIQUE INDEX (not a column constraint) so the collation is explicit.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_tags_name ON tags (name COLLATE NOCASE);
+CREATE INDEX IF NOT EXISTS idx_tags_group ON tags (group_id, position);
+
+CREATE TABLE IF NOT EXISTS assets_tags (
+    asset_id TEXT NOT NULL,
+    tag_id TEXT NOT NULL,
+    -- When the tag was applied, for the "recently used" suggestion. Same RFC 3339
+    -- shape as every other timestamp so it compares as plain text.
+    added_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+
+    PRIMARY KEY (asset_id, tag_id),
+    FOREIGN KEY (asset_id) REFERENCES assets(id) ON DELETE CASCADE,
+    FOREIGN KEY (tag_id) REFERENCES tags(id) ON DELETE CASCADE
+);
+
+-- The composite PK already serves asset -> tags (the inspector). EVERY other tag
+-- operation — usage counts, filtering, merge, the whole manager — is tag ->
+-- assets, so it needs the reverse index or each one is a full scan.
+CREATE INDEX IF NOT EXISTS idx_assets_tags_reverse ON assets_tags (tag_id, asset_id);
+
 -- Membership indexes
 CREATE INDEX IF NOT EXISTS idx_folder_contents ON assets_folders(folder_id, added_at);
 CREATE INDEX IF NOT EXISTS idx_folders_position ON assets_folders (folder_id, position); -- Serve a folder's assets already ordered by manual position
