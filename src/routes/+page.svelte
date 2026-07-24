@@ -15,6 +15,7 @@
     import FolderTree from "$components/FolderTree.svelte";
     import SavedFilters from "$components/SavedFilters.svelte";
     import Inspector from "$components/Inspector.svelte";
+    import TagManager from "$components/TagManager.svelte";
     import { libraryManager, settings } from "../routes/settings.svelte";
 
     interface LibraryInfo {
@@ -215,6 +216,9 @@
     // Alert is shown as persistent inline state — not a toast —
     // because "no library connected" requires user action before anything else works.
     let noLibraryConnected = $derived(!libraryManager.state.activeLibrary);
+
+    // The Tag Manager is a full-screen view, opened over the library.
+    let tagManagerOpen = $state(false);
 
     import * as Dialog from "$components/ui/dialog";
     import * as Tabs from "$components/ui/tabs";
@@ -430,6 +434,14 @@
             <div class="flex w-56 shrink-0 flex-col gap-3 overflow-y-auto">
                 <FolderTree />
                 <SavedFilters />
+                <button
+                    type="button"
+                    onclick={() => (tagManagerOpen = true)}
+                    class="rounded-lg border border-neutral-800 bg-neutral-900/40 px-3 py-2 text-left
+                           text-sm text-neutral-300 transition-colors hover:bg-neutral-800"
+                >
+                    🏷 Manage tags
+                </button>
             </div>
             <div class="flex-1 min-w-0">
                 <AssetGrid />
@@ -467,4 +479,8 @@
             </div>
         {/if}
     </main>
+
+    {#if tagManagerOpen}
+        <TagManager onClose={() => (tagManagerOpen = false)} />
+    {/if}
 </QueryClientProvider>

@@ -51,6 +51,7 @@
         assetLibrary.loadSavedFilters();
         assetLibrary.loadColorCoverage();
         assetLibrary.loadTags();
+        assetLibrary.loadTagGroups();
       });
     })
 

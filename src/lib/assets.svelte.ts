@@ -154,6 +154,32 @@ export interface ColorFilter {
   min_coverage: number;
 }
 
+/** How selected tags combine. `all` (AND) is the default and most common. */
+export type TagMatchMode = "any" | "all" | "equals";
+
+/**
+ * Tag constraint. `include`/`exclude` hold tag IDS, not names, so a rename can't
+ * change what a saved filter matches; a deleted tag's id simply matches nothing.
+ * `untagged` matches assets with no tags — a pseudo-selection, never a real tag.
+ */
+export interface TagFilter {
+  mode: TagMatchMode;
+  include: string[];
+  exclude: string[];
+  untagged: boolean;
+}
+
+export const emptyTagFilter = (): TagFilter => ({
+  mode: "all",
+  include: [],
+  exclude: [],
+  untagged: false,
+});
+
+/** A tag filter that would narrow nothing — normalized back to `null`. */
+export const isTagFilterEmpty = (t: TagFilter): boolean =>
+  !t.untagged && t.include.length === 0 && t.exclude.length === 0;
+
 /** Ephemeral narrowing of the current scope. Dimensions AND together. */
 export interface FilterSet {
   asset_types: AssetTypeFilter[];
@@ -161,6 +187,7 @@ export interface FilterSet {
   date: DateFilter | null;
   size: SizeRange | null;
   color: ColorFilter | null;
+  tags: TagFilter | null;
 }
 
 /** A fresh empty set — a function, so no two call sites share one object. */
@@ -170,6 +197,7 @@ export const emptyFilters = (): FilterSet => ({
   date: null,
   size: null,
   color: null,
+  tags: null,
 });
 
 /**
@@ -466,12 +494,23 @@ export interface Tag {
   is_starred: boolean;
   position: number;
   usage: number;
+  /** Most recent application (RFC 3339), or null if never used. Drives recency. */
+  last_used: string | null;
 }
 
 /** How many of a selection carry one tag. Absent tags mean zero. */
 export interface TagUsage {
   tag_id: string;
   count: number;
+}
+
+/** A tag group with its tag count. Pure organization; a tag has at most one. */
+export interface TagGroup {
+  id: string;
+  name: string;
+  color: string | null;
+  position: number;
+  tag_count: number;
 }
 
 /**
@@ -539,6 +578,8 @@ class AssetLibrary {
    * always read from one authoritative list.
    */
   tags = $state<Tag[]>([]);
+  /** Tag groups for the Tag Manager. Refreshed alongside `tags`. */
+  tagGroups = $state<TagGroup[]>([]);
   /**
    * How many images have a color palette; null until first read. Surfaced in the
    * UI because a color filter cannot match an un-analyzed asset, and a filter
@@ -709,7 +750,8 @@ class AssetLibrary {
       f.shape !== null ||
       f.date !== null ||
       f.size !== null ||
-      f.color !== null
+      f.color !== null ||
+      f.tags !== null
     );
   }
 
@@ -755,6 +797,16 @@ class AssetLibrary {
   /** Constrain by dominant color; `null` clears the dimension. */
   setColorFilter(color: ColorFilter | null): Promise<void> {
     return this.setFilters({ ...this.filters, color });
+  }
+
+  /**
+   * Constrain by tags. A filter that would narrow nothing (no includes, no
+   * excludes, not untagged) normalises to `null`, same as the range filters —
+   * so switching mode with nothing selected doesn't light up the bar.
+   */
+  setTagFilter(tags: TagFilter | null): Promise<void> {
+    const normalised = tags && isTagFilterEmpty(tags) ? null : tags;
+    return this.setFilters({ ...this.filters, tags: normalised });
   }
 
   /**
@@ -906,27 +958,104 @@ class AssetLibrary {
     await this.loadTags();
   }
 
-  /** Delete a tag globally (removes every assignment). Reloads the manifest if a
-      tag filter is active, since the result set may change. */
+  /** Delete a tag globally (removes every assignment). */
   async deleteTag(id: string): Promise<void> {
     await invoke("delete_tag", { id });
     await this.loadTags();
+    await this.#reloadIfTagFiltered();
   }
 
   /** Assign a tag to assets. Reloads the tag list so usage counts stay honest. */
   async assignTag(tagId: string, assetIds: string[]): Promise<void> {
     await invoke("assign_tag", { tagId, assetIds });
     await this.loadTags();
+    await this.#reloadIfTagFiltered();
   }
 
   async unassignTag(tagId: string, assetIds: string[]): Promise<void> {
     await invoke("unassign_tag", { tagId, assetIds });
     await this.loadTags();
+    await this.#reloadIfTagFiltered();
+  }
+
+  /**
+   * Reload the manifest when a tag filter is active — editing an asset's tags can
+   * move it in or out of the current view. Skipped otherwise so the common
+   * "tag while browsing unfiltered" path doesn't re-stream the whole library.
+   *
+   * This is `reload()`, which passes the SAME `filters` object, so `load()` keeps
+   * the selection (its clear only fires on a scope/filters CHANGE). That's what
+   * lets a multi-tag bulk session keep its selection between edits. Rows the edit
+   * pushed out of a filtered view stay selected-but-hidden until the next
+   * selection change — an acceptable seam for the filter-and-edit-at-once combo.
+   */
+  async #reloadIfTagFiltered(): Promise<void> {
+    if (this.filters.tags !== null) await this.reload();
   }
 
   /** Per-tag counts across a selection; drives the inspector's tri-state. */
   fetchTagUsage(assetIds: string[]): Promise<TagUsage[]> {
     return invoke<TagUsage[]>("tag_usage_for_assets", { assetIds });
+  }
+
+  // ── Tag Manager: tag attributes ───────────────────────────────────────────
+
+  async setTagColor(id: string, color: string | null): Promise<void> {
+    await invoke("set_tag_color", { id, color });
+    await this.loadTags();
+  }
+
+  async setTagStarred(id: string, starred: boolean): Promise<void> {
+    await invoke("set_tag_starred", { id, starred });
+    await this.loadTags();
+  }
+
+  async setTagGroup(id: string, groupId: string | null): Promise<void> {
+    await invoke("set_tag_group", { id, groupId });
+    await this.loadTags();
+    await this.loadTagGroups();
+  }
+
+  /** Merge `source` into `target`, then refresh. Reloads the manifest if a tag
+      filter references the vanished source. Irreversible — confirm before calling. */
+  async mergeTags(source: string, target: string): Promise<void> {
+    await invoke("merge_tags", { source, target });
+    await this.loadTags();
+    await this.#reloadIfTagFiltered();
+  }
+
+  // ── Tag Manager: groups ───────────────────────────────────────────────────
+
+  async loadTagGroups(): Promise<void> {
+    try {
+      this.tagGroups = await invoke<TagGroup[]>("fetch_tag_groups");
+    } catch (e) {
+      console.error("Failed to load tag groups:", e);
+      this.tagGroups = [];
+    }
+  }
+
+  async createTagGroup(name: string): Promise<string> {
+    const id = await invoke<string>("create_tag_group", { name });
+    await this.loadTagGroups();
+    return id;
+  }
+
+  async renameTagGroup(id: string, name: string): Promise<void> {
+    await invoke("rename_tag_group", { id, name });
+    await this.loadTagGroups();
+  }
+
+  async setTagGroupColor(id: string, color: string | null): Promise<void> {
+    await invoke("set_tag_group_color", { id, color });
+    await this.loadTagGroups();
+  }
+
+  /** Delete a group. Its tags survive, ungrouped (FK SET NULL). */
+  async deleteTagGroup(id: string): Promise<void> {
+    await invoke("delete_tag_group", { id });
+    await this.loadTagGroups();
+    await this.loadTags();
   }
 
   /**

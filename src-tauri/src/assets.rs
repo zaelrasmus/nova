@@ -182,6 +182,10 @@ pub struct FilterSet {
     /// Dominant-color proximity; `None` = no color filtering.
     #[serde(default)]
     pub color: Option<ColorFilter>,
+    /// Tag constraint; `None` = no tag filtering. `#[serde(default)]` means saved
+    /// filters written before tags existed still parse — they just get `None`.
+    #[serde(default)]
+    pub tags: Option<crate::tags::TagFilter>,
 }
 
 /// Match assets containing a color close to `(r, g, b)`.
@@ -586,6 +590,13 @@ fn build_manifest_query<'a>(
             .push(") <= ")
             .push_bind(tol_sq)
             .push(")");
+    }
+
+    if let Some(tags) = &filters.tags {
+        if tags.is_active() {
+            conjunct(&mut qb, &mut written);
+            tags.push_predicate(&mut qb);
+        }
     }
 
     // 3. Sort. The `a.id` tie-break runs in the SAME direction as the sort column

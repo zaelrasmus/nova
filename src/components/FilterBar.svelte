@@ -17,6 +17,7 @@
         type SizeUnit,
     } from "$lib/assets.svelte";
     import ColorFilterControl from "./ColorFilterControl.svelte";
+    import TagFilterControl from "./TagFilterControl.svelte";
 
     const filters = $derived(assetLibrary.filters);
     const active = $derived(assetLibrary.hasFilters);
@@ -280,6 +281,8 @@
     </div>
 
     <ColorFilterControl {fieldClass} {labelClass} />
+
+    <TagFilterControl {fieldClass} {labelClass} />
 
     {#if active}
         <button

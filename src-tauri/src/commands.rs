@@ -624,6 +624,129 @@ pub async fn tag_usage_for_assets(
         .map_err(AppError::from)
 }
 
+#[instrument(skip_all)]
+#[tauri::command]
+pub async fn set_tag_color(
+    id: String,
+    color: Option<String>,
+    state: tauri::State<'_, DbState>,
+) -> Result<(), AppError> {
+    let pool = state.acquire_pool().await?;
+    tags::set_tag_color(&pool, &id, color)
+        .await
+        .inspect_err(|e| tracing::error!(error = %e, "set_tag_color failed"))
+        .map_err(AppError::from)
+}
+
+#[instrument(skip_all)]
+#[tauri::command]
+pub async fn set_tag_starred(
+    id: String,
+    starred: bool,
+    state: tauri::State<'_, DbState>,
+) -> Result<(), AppError> {
+    let pool = state.acquire_pool().await?;
+    tags::set_tag_starred(&pool, &id, starred)
+        .await
+        .inspect_err(|e| tracing::error!(error = %e, "set_tag_starred failed"))
+        .map_err(AppError::from)
+}
+
+#[instrument(skip_all)]
+#[tauri::command]
+pub async fn set_tag_group(
+    id: String,
+    group_id: Option<String>,
+    state: tauri::State<'_, DbState>,
+) -> Result<(), AppError> {
+    let pool = state.acquire_pool().await?;
+    tags::set_tag_group(&pool, &id, group_id)
+        .await
+        .inspect_err(|e| tracing::error!(error = %e, "set_tag_group failed"))
+        .map_err(AppError::from)
+}
+
+/// Merge `source` into `target` (reassign then delete source). Irreversible.
+#[instrument(skip_all)]
+#[tauri::command]
+pub async fn merge_tags(
+    source: String,
+    target: String,
+    state: tauri::State<'_, DbState>,
+) -> Result<(), AppError> {
+    let pool = state.acquire_pool().await?;
+    tags::merge_tags(&pool, &source, &target)
+        .await
+        .inspect_err(|e| tracing::error!(error = %e, "merge_tags failed"))
+        .map_err(AppError::from)
+}
+
+#[instrument(skip_all)]
+#[tauri::command]
+pub async fn fetch_tag_groups(
+    state: tauri::State<'_, DbState>,
+) -> Result<Vec<tags::TagGroup>, AppError> {
+    let pool = state.acquire_pool().await?;
+    tags::fetch_tag_groups(&pool)
+        .await
+        .inspect_err(|e| tracing::error!(error = %e, "fetch_tag_groups failed"))
+        .map_err(AppError::from)
+}
+
+#[instrument(skip_all)]
+#[tauri::command]
+pub async fn create_tag_group(
+    name: String,
+    state: tauri::State<'_, DbState>,
+) -> Result<String, AppError> {
+    let pool = state.acquire_pool().await?;
+    tags::create_tag_group(&pool, &name)
+        .await
+        .inspect_err(|e| tracing::error!(error = %e, "create_tag_group failed"))
+        .map_err(AppError::from)
+}
+
+#[instrument(skip_all)]
+#[tauri::command]
+pub async fn rename_tag_group(
+    id: String,
+    name: String,
+    state: tauri::State<'_, DbState>,
+) -> Result<(), AppError> {
+    let pool = state.acquire_pool().await?;
+    tags::rename_tag_group(&pool, &id, &name)
+        .await
+        .inspect_err(|e| tracing::error!(error = %e, "rename_tag_group failed"))
+        .map_err(AppError::from)
+}
+
+#[instrument(skip_all)]
+#[tauri::command]
+pub async fn set_tag_group_color(
+    id: String,
+    color: Option<String>,
+    state: tauri::State<'_, DbState>,
+) -> Result<(), AppError> {
+    let pool = state.acquire_pool().await?;
+    tags::set_tag_group_color(&pool, &id, color)
+        .await
+        .inspect_err(|e| tracing::error!(error = %e, "set_tag_group_color failed"))
+        .map_err(AppError::from)
+}
+
+#[instrument(skip_all)]
+#[tauri::command]
+pub async fn delete_tag_group(
+    id: String,
+    state: tauri::State<'_, DbState>,
+) -> Result<(), AppError> {
+    let pool = state.acquire_pool().await?;
+    tags::delete_tag_group(&pool, &id)
+        .await
+        .inspect_err(|e| tracing::error!(error = %e, "delete_tag_group failed"))
+        .map_err(AppError::from)
+}
+
 #[instrument(skip_all, fields(count = ids.len()))]
 #[tauri::command]
 pub async fn fetch_assets_by_ids(

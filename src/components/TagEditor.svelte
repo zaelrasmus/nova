@@ -61,14 +61,19 @@
     // order. These render as tri-state badges.
     const applied = $derived(assetLibrary.tags.filter((t) => (counts.get(t.id) ?? 0) > 0));
 
-    // The dropdown: existing tags matching the query that aren't already on EVERY
-    // asset (adding those is a no-op). Case-insensitive, capped so a big library
-    // doesn't render a thousand rows.
-    const suggestions = $derived.by(() => {
+    const searching = $derived(query.trim().length > 0);
+
+    // A tag is assignable if it isn't already on EVERY selected asset (adding
+    // those is a no-op). Shared by search and every suggestion list.
+    const assignable = (t: Tag) => stateOf(t.id) !== "all";
+
+    // SEARCH mode: name-matched, capped so a big library doesn't render a
+    // thousand rows.
+    const matches = $derived.by(() => {
         const q = query.trim().toLowerCase();
         return assetLibrary.tags
-            .filter((t) => stateOf(t.id) !== "all")
-            .filter((t) => (q ? t.name.toLowerCase().includes(q) : true))
+            .filter(assignable)
+            .filter((t) => t.name.toLowerCase().includes(q))
             .slice(0, 8);
     });
 
@@ -77,7 +82,52 @@
     const exactExists = $derived(
         assetLibrary.tags.some((t) => t.name.toLowerCase() === query.trim().toLowerCase()),
     );
-    const canCreate = $derived(query.trim().length > 0 && !exactExists);
+    const canCreate = $derived(searching && !exactExists);
+
+    // ── Smart suggestions (empty query) ───────────────────────────────────────
+    // Shown when the field is focused but empty, the way Eagle's popover opens
+    // straight to something useful instead of a blank list.
+
+    const SUGGEST_LIMIT = 5;
+
+    /** Most recently applied tags anywhere in the library. */
+    const recent = $derived.by(() =>
+        assetLibrary.tags
+            .filter((t) => t.last_used && assignable(t))
+            .sort((a, b) => (b.last_used ?? "").localeCompare(a.last_used ?? ""))
+            .slice(0, SUGGEST_LIMIT),
+    );
+
+    /**
+     * Recommended: tags that SHARE A GROUP with a tag already on the selection
+     * (co-tagging affinity — "these usually go together"), then the most-used
+     * tags to fill out the list. Excludes anything already applied or already in
+     * the Recent list, so the two sections never repeat a tag.
+     */
+    const recommended = $derived.by(() => {
+        const recentIds = new Set(recent.map((t) => t.id));
+        const take = (t: Tag) => assignable(t) && !recentIds.has(t.id);
+
+        // Groups represented by tags currently on the selection.
+        const activeGroups = new Set(
+            assetLibrary.tags
+                .filter((t) => (counts.get(t.id) ?? 0) > 0 && t.group_id)
+                .map((t) => t.group_id),
+        );
+
+        const affinity = assetLibrary.tags
+            .filter((t) => take(t) && t.group_id && activeGroups.has(t.group_id))
+            .sort((a, b) => b.usage - a.usage);
+
+        const affinityIds = new Set(affinity.map((t) => t.id));
+        const popular = assetLibrary.tags
+            .filter((t) => take(t) && !affinityIds.has(t.id) && t.usage > 0)
+            .sort((a, b) => b.usage - a.usage);
+
+        return [...affinity, ...popular].slice(0, SUGGEST_LIMIT);
+    });
+
+    const hasSuggestions = $derived(recent.length > 0 || recommended.length > 0);
 
     /**
      * Toggle a tag across the whole selection. Always an add/remove DELTA: a
@@ -129,11 +179,11 @@
         }
     }
 
-    /** Enter takes the first suggestion, else creates. Escape closes the list. */
+    /** Enter takes the first match, else creates. Escape closes the list. */
     function onKey(e: KeyboardEvent) {
         if (e.key === "Enter") {
             e.preventDefault();
-            if (suggestions.length > 0) addExisting(suggestions[0]);
+            if (matches.length > 0) addExisting(matches[0]);
             else if (canCreate) createAndAdd();
         } else if (e.key === "Escape") {
             open = false;
@@ -197,38 +247,67 @@
                        focus:outline-none disabled:opacity-50"
             />
 
-            {#if open && (suggestions.length > 0 || canCreate)}
+            {#snippet suggestionRow(tag: Tag)}
+                <button
+                    type="button"
+                    onclick={() => addExisting(tag)}
+                    class="flex w-full items-center gap-2 px-2 py-1 text-left text-xs
+                           text-neutral-300 hover:bg-neutral-800"
+                >
+                    <span
+                        class="h-2 w-2 shrink-0 rounded-full"
+                        style="background-color: {swatch(tag)}"
+                    ></span>
+                    <span class="truncate">{tag.name}</span>
+                    <span class="ml-auto text-[10px] text-neutral-600">{tag.usage}</span>
+                    {#if stateOf(tag.id) === "some"}
+                        <span class="text-[10px] text-amber-600">partial</span>
+                    {/if}
+                </button>
+            {/snippet}
+
+            {#snippet sectionLabel(text: string)}
+                <div
+                    class="px-2 pb-0.5 pt-1.5 text-[10px] font-medium uppercase tracking-wide
+                           text-neutral-600"
+                >
+                    {text}
+                </div>
+            {/snippet}
+
+            {#if open && (searching ? matches.length > 0 || canCreate : hasSuggestions)}
                 <div
                     class="absolute z-10 mt-1 w-full overflow-hidden rounded border border-neutral-700
                            bg-neutral-900 shadow-xl"
                 >
-                    {#each suggestions as tag (tag.id)}
-                        <button
-                            type="button"
-                            onclick={() => addExisting(tag)}
-                            class="flex w-full items-center gap-2 px-2 py-1 text-left text-xs
-                                   text-neutral-300 hover:bg-neutral-800"
-                        >
-                            <span
-                                class="h-2 w-2 shrink-0 rounded-full"
-                                style="background-color: {swatch(tag)}"
-                            ></span>
-                            <span class="truncate">{tag.name}</span>
-                            <span class="ml-auto text-[10px] text-neutral-600">{tag.usage}</span>
-                            {#if stateOf(tag.id) === "some"}
-                                <span class="text-[10px] text-amber-600">partial</span>
-                            {/if}
-                        </button>
-                    {/each}
-                    {#if canCreate}
-                        <button
-                            type="button"
-                            onclick={createAndAdd}
-                            class="flex w-full items-center gap-1 border-t border-neutral-800 px-2 py-1
-                                   text-left text-xs text-blue-400 hover:bg-neutral-800"
-                        >
-                            Create <span class="font-medium">"{query.trim()}"</span>
-                        </button>
+                    {#if searching}
+                        {#each matches as tag (tag.id)}
+                            {@render suggestionRow(tag)}
+                        {/each}
+                        {#if canCreate}
+                            <button
+                                type="button"
+                                onclick={createAndAdd}
+                                class="flex w-full items-center gap-1 border-t border-neutral-800 px-2 py-1
+                                       text-left text-xs text-blue-400 hover:bg-neutral-800"
+                            >
+                                Create <span class="font-medium">"{query.trim()}"</span>
+                            </button>
+                        {/if}
+                    {:else}
+                        <!-- Empty query: open straight to what's useful. -->
+                        {#if recent.length > 0}
+                            {@render sectionLabel(`Recent (${recent.length})`)}
+                            {#each recent as tag (tag.id)}
+                                {@render suggestionRow(tag)}
+                            {/each}
+                        {/if}
+                        {#if recommended.length > 0}
+                            {@render sectionLabel(`Recommended (${recommended.length})`)}
+                            {#each recommended as tag (tag.id)}
+                                {@render suggestionRow(tag)}
+                            {/each}
+                        {/if}
                     {/if}
                 </div>
             {/if}
