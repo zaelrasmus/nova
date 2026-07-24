@@ -36,6 +36,8 @@
         assets: any[];
         folders: any[];
         path_links: { [key: string]: string };
+        /** Files whose bytes the library already held; skipped, not copied. */
+        duplicates: number;
     }
 
     // Tauri commands throw the serialized AppError string on failure.
@@ -158,8 +160,14 @@
 
         toast.promise<ImportResult>(importPromise, {
             loading: "Import in progress...",
-            success: (result) =>
-                `Imported ${result.assets.length} assets across ${result.folders.length} folders.`,
+            success: (result) => {
+                const base = `Imported ${result.assets.length} assets across ${result.folders.length} folders.`;
+                // Always say so when files were skipped — otherwise re-importing
+                // a folder looks like the import silently failed.
+                return result.duplicates > 0
+                    ? `${base} Skipped ${result.duplicates} already in the library.`
+                    : base;
+            },
             error: (e) => (typeof e === "string" ? e : "Import failed. Please try again."),
         });
         // We can't await toast.promise directly and also run finally,
@@ -442,6 +450,14 @@
                 >
                     🏷 Manage tags
                 </button>
+                <!-- SPIKE D0 — remove with src/routes/spike-dnd/ -->
+                <a
+                    href="/spike-dnd"
+                    class="rounded-lg border border-dashed border-amber-800 px-3 py-2 text-left
+                           text-sm text-amber-500 transition-colors hover:bg-amber-950/30"
+                >
+                    🧪 D0 DnD spike
+                </a>
             </div>
             <div class="flex-1 min-w-0">
                 <AssetGrid />

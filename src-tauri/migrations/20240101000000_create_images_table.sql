@@ -44,6 +44,20 @@ CREATE TABLE IF NOT EXISTS assets (
     -- the OS shell, and file:// or a custom protocol handler is a real vector.
     source_url TEXT,
 
+    -- BLAKE3 fingerprint of the file's bytes, hex-encoded. Import checks this
+    -- before copying: re-importing bytes the library already holds links the
+    -- EXISTING asset to wherever the duplicate was headed instead of writing a
+    -- second copy to disk. Matters most for drag & drop, where re-dropping the
+    -- same folder is a weekly accident rather than a deliberate act.
+    --
+    -- Nullable on purpose. Hashing is best-effort — a file we could not read
+    -- still imports (never drop a user's file), it just never participates in
+    -- dedup. Rows written before this column existed are NULL for the same
+    -- reason, which is why the index below is PARTIAL: a plain UNIQUE index
+    -- treats NULLs as distinct in SQLite, but being explicit documents that
+    -- "unhashed" is a real state rather than an oversight.
+    content_hash TEXT,
+
     -- TESTING Columns
     thumb_hash TEXT, -- base64 ThumbHash (NULL until generated)
     thumb_config TEXT, -- recipe tag, e.g. "webp:auto" (staleness marker)
@@ -187,6 +201,12 @@ CREATE TABLE IF NOT EXISTS assets_tags (
 -- operation — usage counts, filtering, merge, the whole manager — is tag ->
 -- assets, so it needs the reverse index or each one is a full scan.
 CREATE INDEX IF NOT EXISTS idx_assets_tags_reverse ON assets_tags (tag_id, asset_id);
+
+-- Dedup lookup, and the guarantee behind it: two rows can never claim the same
+-- bytes. PARTIAL so the unhashed rows described on the column are exempt rather
+-- than colliding with each other.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_assets_hash
+    ON assets (content_hash) WHERE content_hash IS NOT NULL;
 
 -- Membership indexes
 CREATE INDEX IF NOT EXISTS idx_folder_contents ON assets_folders(folder_id, added_at);

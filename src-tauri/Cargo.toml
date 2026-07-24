@@ -36,6 +36,10 @@ image = "0.25.10"
 webp = "0.3.1"
 thumbhash = "0.1.0"
 base64 = "0.22.1"
+# Content fingerprinting for import dedup. Chosen over SHA-256 because it runs at
+# roughly memory bandwidth — hashing is now on the import hot path, and this makes
+# it disappear next to the file copy that follows it.
+blake3 = "1.8.5"
 thiserror = "2.0.18"
 tracing = "0.1.44"
 tracing-subscriber = { version ="0.3.23", features = ["env-filter"] }

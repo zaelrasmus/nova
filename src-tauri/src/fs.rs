@@ -1,7 +1,49 @@
 use anyhow::{Context, Result};
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use tracing::{debug, instrument};
+use tracing::{debug, instrument, warn};
 use walkdir::WalkDir;
+
+/// Streaming read size for hashing. Large enough that syscall overhead vanishes,
+/// small enough that a 4 GB video costs a buffer rather than memory.
+const HASH_CHUNK: usize = 128 * 1024;
+
+/// BLAKE3 fingerprint of a file's bytes, hex-encoded — the identity import
+/// dedups on.
+///
+/// `None` on any read failure, which the caller treats as "import it, but never
+/// dedup it". A file we cannot hash is still the user's file; refusing to import
+/// it because a fingerprint failed would trade a duplicate for data loss.
+///
+/// Deliberately single-threaded per file. Callers hash files in parallel across
+/// Rayon's pool already, so blake3's own multithreading would oversubscribe the
+/// same cores it's competing for.
+pub fn hash_file(path: &Path) -> Option<String> {
+    let file = std::fs::File::open(path)
+        .inspect_err(|e| warn!(path = ?path, error = %e, "Could not open file to hash"))
+        .ok()?;
+
+    let mut reader = std::io::BufReader::with_capacity(HASH_CHUNK, file);
+    let mut hasher = blake3::Hasher::new();
+    let mut buf = vec![0u8; HASH_CHUNK];
+
+    loop {
+        match reader.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                hasher.update(&buf[..n]);
+            }
+            // A signal interrupted the read; the bytes are still there.
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => {
+                warn!(path = ?path, error = %e, "Read failed mid-hash; asset will skip dedup");
+                return None;
+            }
+        }
+    }
+
+    Some(hasher.finalize().to_hex().to_string())
+}
 
 /// Creates a directory and all missing parents if it does not already exist.
 #[instrument(fields(path = %path.display()))]

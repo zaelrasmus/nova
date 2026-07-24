@@ -337,6 +337,13 @@ pub struct AssetMetadata {
     #[sqlx(default)]
     pub source_url: Option<String>,
 
+    /// BLAKE3 of the file's bytes; `None` when hashing failed (see
+    /// `fs::hash_file`). Never leaves Rust — the frontend has no use for it and
+    /// shipping it would put a fingerprint of every file in the webview.
+    #[serde(skip)]
+    #[sqlx(default)]
+    pub content_hash: Option<String>,
+
     #[sqlx(default)]
     pub thumb_hash: Option<String>,
 
@@ -417,6 +424,10 @@ pub struct ImportResult {
     pub folders: Vec<Folder>,
     pub assets: Vec<AssetMetadata>,
     pub path_links: HashMap<String, String>,
+    /// Files skipped because the library already held their exact bytes. Worth
+    /// reporting rather than hiding: "imported 3 of 200" with no explanation
+    /// reads as a failure, and this is the explanation.
+    pub duplicates: usize,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -1408,8 +1419,8 @@ async fn persist_import(
 ) -> Result<()> {
     let start = std::time::Instant::now();
 
-    // SQLite caps bound parameters at 32766. With 15 columns per row, keep each
-    // multi-row INSERT well under that (15 * 1500 = 22500 params per statement)
+    // SQLite caps bound parameters at 32766. With 16 columns per row, keep each
+    // multi-row INSERT well under that (16 * 1500 = 24000 params per statement)
     const ROWS_PER_INSERT: usize = 1500;
 
     let mut tx = pool
@@ -1456,7 +1467,7 @@ async fn persist_import(
         let mut qb = QueryBuilder::new(
             "INSERT INTO assets (id, asset_type, filename, extension, path, \
                    width, height, file_size, manual_position, imported_date, creation_date, \
-                   modified_date, thumb_hash, thumb_config, is_animated) ",
+                   modified_date, content_hash, thumb_hash, thumb_config, is_animated) ",
         );
 
         qb.push_values(chunk, |mut b, asset| {
@@ -1472,6 +1483,7 @@ async fn persist_import(
                 .push_bind(&asset.imported_date)
                 .push_bind(&asset.creation_date)
                 .push_bind(&asset.modified_date)
+                .push_bind(asset.content_hash.as_deref())
                 .push_bind(asset.thumb_hash.as_deref())
                 .push_bind(asset.thumb_config.as_deref())
                 .push_bind(asset.is_animated);
@@ -1485,9 +1497,15 @@ async fn persist_import(
     }
 
     // 3. Menbership links last - each references a folder and asset inserted above
+    //
+    // OR IGNORE because dedup can route a link to an EXISTING asset that is
+    // already a member of that folder — re-importing a folder you've imported
+    // before. The (folder_id, asset_id) PK would otherwise abort the whole
+    // transaction over a row that is already correct.
     for chunk in links.chunks(ROWS_PER_INSERT) {
-        let mut qb =
-            QueryBuilder::new("INSERT INTO assets_folders (folder_id, asset_id, position) ");
+        let mut qb = QueryBuilder::new(
+            "INSERT OR IGNORE INTO assets_folders (folder_id, asset_id, position) ",
+        );
         qb.push_values(chunk, |mut b, l| {
             b.push_bind(&l.folder_id)
                 .push_bind(&l.asset_id)
@@ -1557,6 +1575,11 @@ fn build_asset_metadata(src: PathBuf) -> Option<AssetMetadata> {
             extract::ExtractedVisual::default()
         });
 
+    // Hashed here rather than at copy time because this stage is already a Rayon
+    // par_iter over files — the parallelism is free, and the result is needed
+    // BEFORE the copy stage so a duplicate never touches the disk at all.
+    let content_hash = crate::fs::hash_file(&src);
+
     Some(AssetMetadata {
         id,
         asset_type,
@@ -1574,11 +1597,83 @@ fn build_asset_metadata(src: PathBuf) -> Option<AssetMetadata> {
         // one. `source_url` will be filled in by the download path when it lands.
         notes: None,
         source_url: None,
+        content_hash,
         thumb_hash: None, // generated later by generate_pending_thumbnails
         thumb_config: None,
         is_animated: visual.is_animated,
         thumb_path: String::new(),
     })
+}
+
+/// Staged assets, partitioned by whether the library already holds their bytes.
+struct DedupSplit {
+    /// Genuinely new — copy these and insert rows for them.
+    fresh: Vec<AssetMetadata>,
+    /// Bytes we already have. Pairs the EXISTING asset's id with the staged
+    /// entry it displaced, because the staged entry still carries the
+    /// `source_path` that decides which folder the duplicate was headed for.
+    /// Dropping it silently would lose that organisational intent.
+    duplicates: Vec<(String, AssetMetadata)>,
+}
+
+/// Partition staged assets against the library's existing fingerprints.
+///
+/// Catches BOTH kinds of duplicate, which is why one pass builds a map rather
+/// than issuing a query per file:
+///   * already in the library — the re-drop case;
+///   * repeated within this very batch — one image sitting in two of the dropped
+///     folders. The first occurrence wins and the rest resolve to its id, so a
+///     batch can never insert two rows with the same hash and trip the unique
+///     index mid-transaction.
+///
+/// Unhashed assets (see `fs::hash_file`) always land in `fresh`: without a
+/// fingerprint there is nothing to compare, and refusing them would lose files.
+#[instrument(skip(pool, staged), fields(staged = staged.len()))]
+async fn split_duplicates(pool: &SqlitePool, staged: Vec<AssetMetadata>) -> Result<DedupSplit> {
+    let hashes: Vec<&str> = staged
+        .iter()
+        .filter_map(|a| a.content_hash.as_deref())
+        .collect();
+
+    // hash -> id of whichever asset owns those bytes.
+    let mut owner: HashMap<String, String> = HashMap::new();
+
+    for chunk in hashes.chunks(IDS_PER_QUERY) {
+        let mut qb = QueryBuilder::new("SELECT content_hash, id FROM assets WHERE content_hash IN (");
+        let mut separated = qb.separated(", ");
+        for h in chunk {
+            separated.push_bind(*h);
+        }
+        qb.push(")");
+        let rows: Vec<(String, String)> = qb
+            .build_query_as()
+            .fetch_all(pool)
+            .await
+            .context("Failed to look up existing content hashes")?;
+        owner.extend(rows);
+    }
+
+    let mut split = DedupSplit {
+        fresh: Vec::with_capacity(staged.len()),
+        duplicates: Vec::new(),
+    };
+
+    for asset in staged {
+        match asset.content_hash.as_deref() {
+            Some(hash) => match owner.get(hash) {
+                Some(existing) => split.duplicates.push((existing.clone(), asset)),
+                None => {
+                    // First sighting of these bytes — claim them, so later copies
+                    // in this same batch resolve here instead of duplicating.
+                    owner.insert(hash.to_string(), asset.id.clone());
+                    split.fresh.push(asset);
+                }
+            },
+            None => split.fresh.push(asset),
+        }
+    }
+
+    Ok(split)
 }
 
 /// Copy every staged original into the library, returning the ids whose copy
@@ -1718,17 +1813,31 @@ pub async fn import_assets(
     // Stage 3: Build metadata in parallel (CPU-bound via Rayon).
     let metadata_start = std::time::Instant::now();
 
-    let mut staged_assets: Vec<AssetMetadata> = discovered_files
+    let scanned: Vec<AssetMetadata> = discovered_files
         .into_par_iter()
         .filter(|p| !matches!(detect_asset_type(p), AssetType::Unknown))
         .filter_map(build_asset_metadata)
         .collect();
 
     info!(
-        count = staged_assets.len(),
+        count = scanned.len(),
         elapsed_ms = metadata_start.elapsed().as_millis(),
         "Metadata stage complete"
     );
+
+    // Stage 3b: drop anything whose bytes the library already holds. Done before
+    // the copy so a duplicate costs a hash comparison instead of a file write.
+    let DedupSplit {
+        fresh: mut staged_assets,
+        duplicates,
+    } = split_duplicates(&pool, scanned).await?;
+
+    if !duplicates.is_empty() {
+        info!(
+            count = duplicates.len(),
+            "Skipping files already in the library; linking the existing assets instead"
+        );
+    }
 
     reporter.report(ImportProgress {
         stage: ImportStage::CopyingFiles,
@@ -1754,17 +1863,27 @@ pub async fn import_assets(
     // directly under the import root have no scanned parent folder → they stay
     // free; `folder_id_by_path` is empty when importing without structure. Built
     // after the copy so a link never references a dropped asset.
+    // Duplicates join in here: the file wasn't copied, but the folder it sat in
+    // still says where the user wanted it, so the EXISTING asset picks up that
+    // membership. Re-dropping a folder you've already imported therefore
+    // organises rather than doing nothing.
     let links: Vec<FolderLink> = {
         let mut counters: HashMap<String, f64> = HashMap::new();
         staged_assets
             .iter()
-            .filter_map(|a| {
-                let parent = Path::new(&a.source_path).parent()?;
+            .map(|a| (a.id.as_str(), a.source_path.as_str()))
+            .chain(
+                duplicates
+                    .iter()
+                    .map(|(existing_id, staged)| (existing_id.as_str(), staged.source_path.as_str())),
+            )
+            .filter_map(|(asset_id, source_path)| {
+                let parent = Path::new(source_path).parent()?;
                 let folder_id = folder_id_by_path.get(parent)?;
                 let position = counters.entry(folder_id.clone()).or_insert(0.0);
                 let link = FolderLink {
                     folder_id: folder_id.clone(),
-                    asset_id: a.id.clone(),
+                    asset_id: asset_id.to_string(),
                     position: *position,
                 };
                 *position += 1.0;
@@ -1801,6 +1920,7 @@ pub async fn import_assets(
             .into_iter()
             .map(|(k, v)| (k.to_string_lossy().into_owned(), v))
             .collect(),
+        duplicates: duplicates.len(),
     })
 }
 
