@@ -12,6 +12,8 @@
     import { dropzone } from "$lib/dropzone.svelte";
     import { DROP_LIBRARY_ATTR, type DropTarget } from "$lib/droptarget";
     import { drag, draggable, DRAG_SCROLL_ATTR, type DropContext, type DragPayload } from "$lib/dragdrop.svelte";
+    import { viewer } from "$lib/viewer.svelte";
+    import ViewerOverlay from "./ViewerOverlay.svelte";
     import { computeJustified, visibleRows } from "$lib/justified";
     import { invoke } from "@tauri-apps/api/core";
     import { startDrag } from "@crabnebula/tauri-plugin-drag";
@@ -252,15 +254,26 @@
         shift: e.shiftKey,
     });
 
-    // Ctrl+A / Escape. Window-level so they work wherever focus sits in the grid.
+    // Ctrl+A / Escape / Space / F. Window-level so they work wherever focus sits.
     $effect(() => {
         const onKey = (e: KeyboardEvent) => {
-            // Never steal keys from a text field — the filter bar sits directly
-            // above this grid and Ctrl+A there must still mean "select all text".
+            // Never steal keys from a text field — the search/filter bars sit
+            // right above this grid and Space there must type a space.
             const t = e.target as HTMLElement | null;
             if (t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))) return;
 
-            if (e.key === "Escape") {
+            // The viewer owns the keyboard while it's open (nav, zoom, close);
+            // ViewerOverlay handles those. Don't double-handle here.
+            if (viewer.isOpen) return;
+
+            if (e.key === " ") {
+                // Space opens QuickLook on the current selection.
+                e.preventDefault();
+                viewer.toggleQuickLook();
+            } else if (e.key.toLowerCase() === "f" && !e.ctrlKey && !e.metaKey && !e.altKey) {
+                e.preventDefault();
+                viewer.toggleFullscreen();
+            } else if (e.key === "Escape") {
                 selection.clear();
             } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "a") {
                 e.preventDefault();
@@ -277,6 +290,16 @@
         };
         window.addEventListener("keydown", onKey);
         return () => window.removeEventListener("keydown", onKey);
+    });
+
+    // Keep the grid beneath in step with the viewer: scrolling the current asset
+    // into view means closing the viewer lands on it, and the virtualizer mounts
+    // the row that arrow-nav is pointing at. `scrollToIndex`, NOT scrollIntoView —
+    // the target row is usually unmounted, so there's no DOM node to scroll to.
+    $effect(() => {
+        if (!viewer.isOpen) return;
+        const index = viewer.index;
+        untrack(() => get(virtualizer).scrollToIndex(index, { align: "auto" }));
     });
 
     // ── Dragging assets out to the sidebar ────────────────────────────────────
@@ -618,7 +641,7 @@
                                     onPointerDown={(e) =>
                                         selection.pointerDownAsset(idsNow(), it.index, mods(e))}
                                     onClick={() => selection.clickAsset(light.id)}
-                                    onActivate={() => selection.selectOnlyAsset(light.id)}
+                                    onOpen={() => viewer.open(it.index, "quicklook")}
                                 />
                             {/each}
                         {/each}
@@ -639,13 +662,18 @@
                                 onPointerDown={(e) =>
                                     selection.pointerDownAsset(idsNow(), item.index, mods(e))}
                                 onClick={() => selection.clickAsset(light.id)}
-                                onActivate={() => selection.selectOnlyAsset(light.id)}
+                                onOpen={() => viewer.open(item.index, "quicklook")}
                             />
                         {/each}
                     {/if}
                 </div>
             </div>
         {/if}
+
+    <!-- The viewer. Mounted INSIDE the grid column so QuickLook (absolute) stays
+         scoped to the grid with the sidebars visible; Fullscreen (fixed) escapes
+         to cover the window. -->
+    <ViewerOverlay />
 
     <!-- Drop affordance. `pointer-events-none` is load-bearing, not cosmetic:
          `elementFromPoint` skips elements that ignore pointer events, so without

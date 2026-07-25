@@ -21,8 +21,8 @@
         onPointerDown?: (e: PointerEvent) => void;
         /** Release without a drag. Resolves what `onPointerDown` deferred. */
         onClick?: (e: MouseEvent) => void;
-        /** Keyboard activation — always selects this card alone. */
-        onActivate?: () => void;
+        /** Open this asset in the viewer — double-click, or Enter when focused. */
+        onOpen?: () => void;
     }
 
     let {
@@ -37,7 +37,7 @@
         dataIndex,
         onPointerDown,
         onClick,
-        onActivate,
+        onOpen,
     }: Props = $props();
 
     const placeholder = $derived(thumbHashUrl(thumbHash));
@@ -129,10 +129,13 @@
            {selected ? 'ring-2 ring-blue-500' : 'hover:ring-2 hover:ring-neutral-400'}"
     onpointerdown={onPointerDown}
     onclick={onClick}
+    ondblclick={onOpen}
     onkeydown={(e) => {
-        if (e.key === "Enter" || e.key === " ") {
-            e.preventDefault(); // Space would scroll the grid
-            onActivate?.();
+        // Enter opens the viewer (Finder-style). Space is deliberately left to
+        // bubble to the grid's global handler, where it means "QuickLook".
+        if (e.key === "Enter") {
+            e.preventDefault();
+            onOpen?.();
         }
     }}
 >
