@@ -23,6 +23,18 @@ export interface AppPreferences {
    */
   gridView: "waterfall" | "justified";
   animateGifsInGrid: boolean;
+
+  // ── Layout shell ────────────────────────────────────────────────────────
+  // Pane geometry is a preference, not session state: a user who narrows the
+  // inspector wants it narrow tomorrow too. Widths are written on pointer-up
+  // (not per mouse-move) so a drag is one disk write, not two hundred.
+  /** Sidebar width in px. `<= RAIL_W` means the icon rail (see layout.svelte.ts). */
+  sidebarWidth: number;
+  inspectorWidth: number;
+  /** Hidden is a separate axis from width — see the mode table in layout.svelte.ts. */
+  sidebarHidden: boolean;
+  inspectorHidden: boolean;
+
   // Add new fields here. They will be filled from DEFAULT_PREFERENCES on first
   // load so existing installations are never broken by a new field.
 }
@@ -49,6 +61,10 @@ const DEFAULT_PREFERENCES: AppPreferences = {
   gridColumns: 4,
   gridView: "waterfall",
   animateGifsInGrid: false,
+  sidebarWidth: 240,
+  inspectorWidth: 320,
+  sidebarHidden: false,
+  inspectorHidden: false,
 };
 
 const DEFAULT_LIBRARY_STATE: LibraryState = {

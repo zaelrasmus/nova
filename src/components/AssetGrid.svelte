@@ -2,9 +2,7 @@
     import { untrack } from "svelte";
     import { createVirtualizer } from "@tanstack/svelte-virtual";
     import AssetCard from "./AssetCard.svelte";
-    import SortControl from "./SortControl.svelte";
     import FilterBar from "./FilterBar.svelte";
-    import SearchBar from "./SearchBar.svelte";
     import {get} from "svelte/store";
     import { libraryManager, settings } from "../routes/settings.svelte";
     import { assetLibrary, type AssetLightRow } from "$lib/assets.svelte";
@@ -487,87 +485,17 @@
      than the scroll container so the header and empty states accept drops too —
      an empty library is exactly when you most want to drop files in. -->
 <div class="relative flex h-full flex-col" {...{ [DROP_LIBRARY_ATTR]: "" }}>
-    <div class="flex items-center justify-between px-4 py-2 border-b border-neutral-800 bg-white shrink-0">
-        <!-- Say "of N" when filtered, so a narrowed view never looks like a small
-             library. `manifest` is the filtered set, so N comes from the store. -->
-        <span class="text-xs text-neutral-400">
-            {assets.length} assets{assetLibrary.hasFilters || assetLibrary.nameFiltering
-                ? " (filtered)"
-                : ""}
-            {#if selection.assetCount > 0}
-                <span class="text-blue-600">· {selection.assetCount} selected</span>
-            {/if}
-        </span>
-        <div class="flex items-center gap-3">
-            <SortControl />
-
-            <!-- View switcher. Waterfall is disabled while sorting manually,
-                 because reading order is required for exact reorder; the title
-                 says why rather than the button just being dead. -->
-            <div class="flex overflow-hidden rounded border border-neutral-300">
-                <button
-                    type="button"
-                    onclick={() => settings.set("gridView", "waterfall")}
-                    disabled={manualSort}
-                    title={manualSort
-                        ? "Waterfall can't reorder exactly — Manual sort uses Justified"
-                        : "Waterfall view"}
-                    aria-pressed={effectiveView === "waterfall"}
-                    class="px-2 py-0.5 text-xs font-medium transition-colors disabled:opacity-40
-                           {effectiveView === 'waterfall'
-                        ? 'bg-blue-600 text-white'
-                        : 'bg-white text-neutral-500 hover:bg-neutral-100'}"
-                >
-                    Waterfall
-                </button>
-                <button
-                    type="button"
-                    onclick={() => settings.set("gridView", "justified")}
-                    title="Justified rows"
-                    aria-pressed={effectiveView === "justified"}
-                    class="border-l border-neutral-300 px-2 py-0.5 text-xs font-medium transition-colors
-                           {effectiveView === 'justified'
-                        ? 'bg-blue-600 text-white'
-                        : 'bg-white text-neutral-500 hover:bg-neutral-100'}"
-                >
-                    Justified
-                </button>
-            </div>
-
-            <button
-                type="button"
-                onclick={() =>
-                    settings.set("animateGifsInGrid", !settings.preferences.animateGifsInGrid)}
-                title="Animate GIFs in the grid"
-                aria-pressed={settings.preferences.animateGifsInGrid}
-                class="rounded px-2 py-0.5 text-xs font-medium transition-colors
-                       {settings.preferences.animateGifsInGrid
-                    ? 'bg-blue-600 text-white'
-                    : 'bg-neutral-200 text-neutral-500 hover:bg-neutral-300'}"
-            >
-                GIF
-            </button>
-            <div class="flex items-center gap-2">
-                <!-- In justified view the slider sets thumbnail SIZE (via target
-                     row height), not a fixed column count — the label follows. -->
-                <span class="text-xs text-neutral-500">{isJustified ? "Size" : "Columns"}</span>
-                <input type="range" min="2" max="8" step="1" bind:value={numColumns}
-                    onchange={() => settings.set("gridColumns", numColumns)}
-                    class="w-24 accent-neutral-400" />
-                {#if !isJustified}
-                    <span class="text-xs text-neutral-400 w-3 text-center">{numColumns}</span>
-                {/if}
-            </div>
+    <!-- LAYOUT: this component has no header any more. The asset count, the
+         search field and the view controls moved up into the grid pane's header
+         (+page.svelte + GridToolbar.svelte) so all three panes share one 44px
+         chrome strip and this is nothing but assets.
+         The FilterBar stays because it is CONDITIONAL — a chips row that only
+         exists while filters are active, so it costs no space when idle. -->
+    {#if assetLibrary.hasFilters}
+        <div class="shrink-0">
+            <FilterBar />
         </div>
-    </div>
-
-    <div class="shrink-0 border-b border-neutral-100 bg-white">
-        <SearchBar />
-    </div>
-
-    <div class="shrink-0">
-        <FilterBar />
-    </div>
+    {/if}
 
     {#if assetLibrary.isLoading && assets.length === 0}
             <div class="flex items-center justify-center h-32 text-sm text-neutral-500">Loading assets...</div>
@@ -613,7 +541,7 @@
                     if (!(e.target as HTMLElement).closest('[role="option"]')) selection.clear();
                 }}
                 class="relative flex-1 min-h-0 overflow-y-auto w-full
-                       [scrollbar-width:thin] [scrollbar-color:theme(colors.neutral.700)_transparent] bg-white"
+                       [scrollbar-width:thin] [scrollbar-color:theme(colors.neutral.700)_transparent]"
             >
                 <!-- svelte-ignore a11y_no_noninteractive_element_to_interactive_role -->
                 <div

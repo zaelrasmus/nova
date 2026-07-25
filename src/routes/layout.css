@@ -217,6 +217,121 @@
     --radius-4xl: calc(var(--radius) * 2.6);
 }
 
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   APP SHELL — the three-pane layout
+   ═══════════════════════════════════════════════════════════════════════════
+
+   Three blocks, no global header:
+
+     ┌────────────┬───────────────────────────┬──────────────┬────────┐
+     │ sidebar    │ grid                      │ inspector    │ ─ ▢ ✕ │
+     │  header    │  header                   │  header      │        │
+     ├────────────┼───────────────────────────┼──────────────┴────────┤
+     │  tree      │  assets                   │  metadata             │
+     └────────────┴───────────────────────────┴───────────────────────┘
+
+   Two rules make this work:
+
+   1. Every pane header is exactly --chrome-h tall, so the three of them line up
+      and read as one strip. That strip IS the titlebar (`decorations: false`),
+      and its empty space carries `data-tauri-drag-region`.
+
+   2. The window buttons are NOT in any pane. They're a fixed overlay pinned to
+      the window's top-right corner, always mounted — so hiding the inspector can
+      never take the close button away with it. The panes only reserve a gutter
+      (--wc-w) for them, and which pane reserves it depends on which one is
+      currently top-right.
+
+   Widths come from JS (src/lib/layout.svelte.ts) as inline --sidebar-col /
+   --inspector-col; everything else here is static.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+:root {
+    --chrome-h: 52px; /* every pane header — the fake titlebar's height */
+    --rail-w: 52px; /* collapsed sidebar (section icons) */
+    --wc-w: 138px; /* 3 × 46px window buttons (Windows metrics) */
+}
+
+html,
+body {
+    height: 100%;
+    overflow: hidden; /* only panes scroll — the window itself never does */
+}
+
+.layout {
+    display: grid;
+    /* minmax(0, 1fr) not 1fr: a plain 1fr refuses to shrink below its content,
+       which a 100k-asset virtualizer would happily make very wide. */
+    grid-template-columns: var(--sidebar-col, 240px) minmax(0, 1fr) var(--inspector-col, 320px);
+    height: 100vh;
+    overflow: hidden;
+    background-color: #0a0a0a;
+    color: #e5e5e5;
+}
+
+/* Animate the collapse, but never during a live drag — the handle has to track
+   the cursor 1:1 or it feels broken. */
+.layout:not([data-resizing]) {
+    transition: grid-template-columns 140ms ease;
+}
+
+.layout[data-resizing] {
+    cursor: col-resize;
+    user-select: none;
+}
+
+.pane {
+    display: flex;
+    flex-direction: column;
+    /* The two lines that stop a flex child from refusing to shrink. Without them
+       a wide grid pushes the whole layout past the window edge. */
+    min-width: 0;
+    min-height: 0;
+    overflow: hidden;
+    position: relative; /* resize handles are absolutely positioned inside */
+}
+
+.pane-header {
+    height: var(--chrome-h);
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+    padding-inline: 0.5rem;
+    /* Without this, dragging the window by its header selects the text in it. */
+    user-select: none;
+    position: relative; /* containing block for the drag underlay below */
+}
+
+/* ── Window drag surface ────────────────────────────────────────────────────
+   Tauri matches `data-tauri-drag-region` on the EXACT element under the cursor
+   (drag.js: `e.target.getAttribute(...)` — it never walks up to a parent). So
+   the drag region has to be a real element that genuinely sits under the
+   pointer, and a `flex-1` spacer is not enough: as soon as a header fills up
+   with controls the spacer collapses to 0px and that header stops dragging.
+
+   This is a full-bleed underlay instead. It covers the whole header; the
+   controls are lifted above it with z-index, so every pixel that isn't a
+   control — gaps, padding, the space behind labels — is drag surface. */
+.drag-region {
+    position: absolute;
+    inset: 0;
+}
+
+.pane-header > *:not(.drag-region) {
+    position: relative;
+    z-index: 1;
+}
+
+/* The window-control gutter, reserved by whichever pane is currently top-right. */
+.layout[data-inspector="shown"] .inspector > .pane-header {
+    padding-right: var(--wc-w);
+}
+.layout[data-inspector="hidden"] .grid-pane > .pane-header {
+    padding-right: var(--wc-w);
+}
+
 /* Loading skeleton for grid thumbnails that haven't been generated yet — a soft
    light sweep across a dark tile, so a pending card reads as "loading" rather
    than "empty/broken". Honors reduced-motion. */
