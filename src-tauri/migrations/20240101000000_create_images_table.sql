@@ -226,3 +226,30 @@ CREATE INDEX IF NOT EXISTS idx_assets_manual   ON assets (manual_position, id);
 -- COLLATE NOCASE must match the ORDER BY's collation or SQLite silently ignores
 -- this index and full-sorts instead.
 CREATE INDEX IF NOT EXISTS idx_assets_filename ON assets (filename COLLATE NOCASE, id);
+
+-- ── Full-text search ─────────────────────────────────────────────────────────
+--
+-- One denormalised row per asset holding every searchable field, so a search
+-- across name/note/url/folders/tags is ONE MATCH instead of a cross-table join
+-- (the "Option A" decision). The trigram tokenizer gives fast SUBSTRING/infix
+-- matching (not typo tolerance — proven in the fts5_probe tests). Scope toggles
+-- map onto FTS5 column filters (`{name note} : term`).
+--
+-- Kept in sync by `search::reindex_assets`, called from every Rust function that
+-- mutates searchable text; it's a derived cache, always rebuildable from the
+-- source tables via `rebuild_search_index`. `asset_id` is UNINDEXED — stored so
+-- a MATCH can return it, but not itself tokenised.
+--
+-- folder_text is the DIRECT folders' names only (not the ancestor chain), so a
+-- rename reindexes just that folder's members, not the whole subtree.
+CREATE VIRTUAL TABLE IF NOT EXISTS search_index USING fts5(
+    asset_id UNINDEXED,
+    name,
+    extension,
+    note,
+    url,
+    folder_text,  -- names of the asset's direct folders
+    folder_note,  -- notes of those folders (the "Folder description" scope)
+    tag_text,
+    tokenize = 'trigram'
+);

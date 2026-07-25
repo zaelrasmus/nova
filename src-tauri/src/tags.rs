@@ -265,7 +265,24 @@ pub async fn rename_tag(pool: &SqlitePool, id: &str, raw_name: &str) -> Result<(
     if res.rows_affected() == 0 {
         anyhow::bail!("Tag not found");
     }
+
+    // The name feeds every carrying asset's `tag_text`. Assignments are
+    // unchanged, so gathering them after the rename is fine.
+    reindex_tagged(pool, id).await;
     Ok(())
+}
+
+/// Reindex every asset carrying `tag_id`. Shared by the tag mutations that change
+/// a tag's searchable text; non-fatal, like the other reindex call sites.
+async fn reindex_tagged(pool: &SqlitePool, tag_id: &str) {
+    match crate::search::asset_ids_with_tag(pool, tag_id).await {
+        Ok(ids) => {
+            if let Err(e) = crate::search::reindex_assets(pool, &ids).await {
+                tracing::warn!(error = %e, "Reindex after tag change failed (non-fatal)");
+            }
+        }
+        Err(e) => tracing::warn!(error = %e, "Could not list tagged assets to reindex"),
+    }
 }
 
 /// Delete a tag globally. The `assets_tags` cascade drops every assignment. This
@@ -273,11 +290,21 @@ pub async fn rename_tag(pool: &SqlitePool, id: &str, raw_name: &str) -> Result<(
 /// even at zero usage.
 #[instrument(skip(pool))]
 pub async fn delete_tag(pool: &SqlitePool, id: &str) -> Result<()> {
+    // Capture carriers before the cascade drops the assignments — those assets
+    // survive but lose this tag from their `tag_text`.
+    let affected = crate::search::asset_ids_with_tag(pool, id)
+        .await
+        .unwrap_or_default();
+
     sqlx::query("DELETE FROM tags WHERE id = ?")
         .bind(id)
         .execute(pool)
         .await
         .context("Failed to delete tag")?;
+
+    if let Err(e) = crate::search::reindex_assets(pool, &affected).await {
+        tracing::warn!(error = %e, "Reindex after tag delete failed (non-fatal)");
+    }
     Ok(())
 }
 
@@ -302,6 +329,10 @@ pub async fn assign_tag(pool: &SqlitePool, tag_id: &str, asset_ids: &[String]) -
             .context("Failed to assign tag")?;
     }
     tx.commit().await.context("Failed to commit tag assignment")?;
+
+    if let Err(e) = crate::search::reindex_assets(pool, asset_ids).await {
+        tracing::warn!(error = %e, "Reindex after tag assign failed (non-fatal)");
+    }
     Ok(())
 }
 
@@ -327,6 +358,10 @@ pub async fn unassign_tag(pool: &SqlitePool, tag_id: &str, asset_ids: &[String])
             .context("Failed to remove tag")?;
     }
     tx.commit().await.context("Failed to commit tag removal")?;
+
+    if let Err(e) = crate::search::reindex_assets(pool, asset_ids).await {
+        tracing::warn!(error = %e, "Reindex after tag unassign failed (non-fatal)");
+    }
     Ok(())
 }
 
@@ -427,6 +462,14 @@ pub async fn merge_tags(pool: &SqlitePool, source: &str, target: &str) -> Result
     if source == target {
         anyhow::bail!("Cannot merge a tag into itself");
     }
+
+    // The source's carriers are exactly the assets whose `tag_text` changes: the
+    // source name leaves, the target name arrives. Captured before the merge, as
+    // the cascade will drop the source assignments.
+    let affected = crate::search::asset_ids_with_tag(pool, source)
+        .await
+        .unwrap_or_default();
+
     let mut tx = pool.begin().await.context("Failed to begin tag merge")?;
 
     sqlx::query(
@@ -450,6 +493,10 @@ pub async fn merge_tags(pool: &SqlitePool, source: &str, target: &str) -> Result
     }
 
     tx.commit().await.context("Failed to commit tag merge")?;
+
+    if let Err(e) = crate::search::reindex_assets(pool, &affected).await {
+        tracing::warn!(error = %e, "Reindex after tag merge failed (non-fatal)");
+    }
     Ok(())
 }
 

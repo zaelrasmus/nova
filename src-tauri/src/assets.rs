@@ -186,6 +186,12 @@ pub struct FilterSet {
     /// filters written before tags existed still parse — they just get `None`.
     #[serde(default)]
     pub tags: Option<crate::tags::TagFilter>,
+    /// Live full-text search; `None` = no text filtering. EPHEMERAL — stripped
+    /// before a filter is saved (see `save_filter`), so it never lands in the
+    /// stored JSON. Rides on `FilterSet` only so it flows through the one
+    /// `stream_manifest` query path with every other lens.
+    #[serde(default)]
+    pub text: Option<crate::search::query::TextSearch>,
 }
 
 /// Match assets containing a color close to `(r, g, b)`.
@@ -299,6 +305,10 @@ pub struct AssetLightRow {
     pub asset_type: AssetType,
     pub thumb_hash: Option<String>,
     pub is_animated: bool,
+    /// Display name, carried in the LIGHT row (not just the hydrated heavy row)
+    /// so name search can filter in the frontend instantly, no round trip — the
+    /// common-case half of the search hybrid. Short strings; cheap in the stream.
+    pub filename: String,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, FromRow)]
@@ -521,7 +531,7 @@ fn build_manifest_query<'a>(
     let in_folder = matches!(scope, Scope::Folder { .. });
 
     let mut qb = QueryBuilder::new(
-        "SELECT a.id, a.width, a.height, a.asset_type, a.thumb_hash, a.is_animated FROM assets a",
+        "SELECT a.id, a.width, a.height, a.asset_type, a.thumb_hash, a.is_animated, a.filename FROM assets a",
     );
     if in_folder {
         qb.push(" JOIN assets_folders af ON af.asset_id = a.id");
@@ -631,6 +641,34 @@ fn build_manifest_query<'a>(
         if tags.is_active() {
             conjunct(&mut qb, &mut written);
             tags.push_predicate(&mut qb);
+        }
+    }
+
+    // Full-text search. The parser (search::query) turns user input into a SAFE
+    // FTS5 MATCH string; we only ever bind that string, never raw input. An
+    // Include narrows to matching assets, an Exclude (the "-term" only case,
+    // which FTS5 can't express as a positive MATCH) removes them.
+    if let Some(text) = &filters.text {
+        if !text.is_blank() {
+            match text.compile() {
+                crate::search::query::Compiled::Empty => {}
+                crate::search::query::Compiled::Include(expr) => {
+                    conjunct(&mut qb, &mut written);
+                    qb.push(
+                        "a.id IN (SELECT asset_id FROM search_index WHERE search_index MATCH ",
+                    )
+                    .push_bind(expr)
+                    .push(")");
+                }
+                crate::search::query::Compiled::Exclude(expr) => {
+                    conjunct(&mut qb, &mut written);
+                    qb.push(
+                        "a.id NOT IN (SELECT asset_id FROM search_index WHERE search_index MATCH ",
+                    )
+                    .push_bind(expr)
+                    .push(")");
+                }
+            }
         }
     }
 
@@ -1004,7 +1042,13 @@ pub async fn create_saved_filter(
     filters: &FilterSet,
 ) -> Result<SavedFilter> {
     let id = uuid::Uuid::new_v4().to_string();
-    let query_json = serde_json::to_string(filters).context("Failed to serialize filter set")?;
+    // Search text is ephemeral — a saved filter is a durable lens, not a typed
+    // query. Strip it so it never persists, then serialize.
+    let to_store = FilterSet {
+        text: None,
+        ..filters.clone()
+    };
+    let query_json = serde_json::to_string(&to_store).context("Failed to serialize filter set")?;
     let position = sqlx::query_scalar::<_, Option<f64>>("SELECT MAX(position) FROM saved_filters")
         .fetch_one(pool)
         .await
@@ -1030,7 +1074,9 @@ pub async fn create_saved_filter(
         id,
         name: name.to_string(),
         position,
-        filters: filters.clone(),
+        // Return the STORED form (no ephemeral search), so the in-memory list
+        // matches what a reload would produce.
+        filters: to_store,
     })
 }
 
@@ -1209,7 +1255,12 @@ pub async fn update_asset(
         }
     }
 
+    // Name/notes/url are all searchable — refresh this asset's index row.
     let ids = [id.to_string()];
+    if let Err(e) = crate::search::reindex_assets(pool, &ids).await {
+        warn!(error = %e, asset = %id, "Reindex after asset edit failed (non-fatal)");
+    }
+
     fetch_assets_by_ids(pool, root, &ids)
         .await?
         .pop()
@@ -1427,6 +1478,16 @@ pub async fn update_folder(pool: &SqlitePool, id: &str, patch: FolderPatch) -> R
     if res.rows_affected() == 0 {
         anyhow::bail!("Folder not found");
     }
+
+    // The folder's name feeds the `folder_text` of its DIRECT members — reindex
+    // exactly those. (Notes aren't searchable, but a name change and a note edit
+    // arrive through the same patch, so reindexing on either is simplest and
+    // cheap.)
+    if let Ok(members) = crate::search::asset_ids_in_folder(pool, id).await {
+        if let Err(e) = crate::search::reindex_assets(pool, &members).await {
+            warn!(error = %e, "Reindex after folder edit failed (non-fatal)");
+        }
+    }
     Ok(())
 }
 
@@ -1548,6 +1609,14 @@ pub async fn delete_folders(pool: &SqlitePool, ids: &[String]) -> Result<()> {
     if ids.is_empty() {
         return Ok(());
     }
+
+    // Capture the affected assets BEFORE the delete cascades away the membership
+    // rows — these assets survive but lose these folders from their `folder_text`.
+    // Includes descendants, since the cascade removes those folders too.
+    let affected = crate::search::asset_ids_under_folders(pool, ids)
+        .await
+        .unwrap_or_default();
+
     let mut qb = QueryBuilder::new("DELETE FROM folders WHERE id IN (");
     let mut separated = qb.separated(", ");
     for id in ids {
@@ -1559,6 +1628,10 @@ pub async fn delete_folders(pool: &SqlitePool, ids: &[String]) -> Result<()> {
         .execute(pool)
         .await
         .context("Failed to delete folders")?;
+
+    if let Err(e) = crate::search::reindex_assets(pool, &affected).await {
+        warn!(error = %e, "Reindex after folder delete failed (non-fatal)");
+    }
     Ok(())
 }
 
@@ -1735,7 +1808,17 @@ pub async fn add_assets_to_folder(
     tx.commit()
         .await
         .context("Failed to commit membership transaction")?;
+
+    reindex_membership(pool, asset_ids).await;
     Ok(())
+}
+
+/// Reindex assets whose folder membership just changed. A tiny shared wrapper so
+/// the three membership mutations don't each repeat the non-fatal boilerplate.
+async fn reindex_membership(pool: &SqlitePool, asset_ids: &[String]) {
+    if let Err(e) = crate::search::reindex_assets(pool, asset_ids).await {
+        warn!(error = %e, "Reindex after membership change failed (non-fatal)");
+    }
 }
 
 /// Append assets to a folder inside a caller-owned transaction.
@@ -1819,6 +1902,8 @@ pub async fn move_assets_to_folder(
     tx.commit()
         .await
         .context("Failed to commit move transaction")?;
+
+    reindex_membership(pool, asset_ids).await;
     Ok(())
 }
 
@@ -1843,6 +1928,8 @@ pub async fn remove_assets_from_folder(
         .execute(pool)
         .await
         .context("Failed to remove assets from folder")?;
+
+    reindex_membership(pool, asset_ids).await;
     Ok(())
 }
 
@@ -2408,6 +2495,19 @@ pub async fn import_assets(
     if let Err(e) = persist_import(&pool, &staged_assets, &folders, &links).await {
         cleanup_orphans(&library_root, &staged_assets).await;
         return Err(e);
+    }
+
+    // Index the new assets AND the deduped ones — a duplicate wasn't copied but
+    // gained folder membership, so its `folder_text` changed. Non-fatal: a
+    // failed reindex leaves those rows findable only after the next rebuild, but
+    // the import itself stands.
+    let reindex_ids: Vec<String> = staged_assets
+        .iter()
+        .map(|a| a.id.clone())
+        .chain(duplicates.iter().map(|(existing_id, _)| existing_id.clone()))
+        .collect();
+    if let Err(e) = crate::search::reindex_assets(&pool, &reindex_ids).await {
+        warn!(error = %e, "Reindex after import failed (non-fatal)");
     }
 
     info!(

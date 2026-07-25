@@ -12,10 +12,12 @@ export interface AssetLightRow {
   asset_type: "image" | "audio" | "video" | "unknown";
   thumb_hash: string | null;
   is_animated: boolean;
+  /** Display name — carried in the light row so name search filters instantly
+   *  in the frontend, no backend round trip (the common half of the hybrid). */
+  filename: string;
 }
 
 export interface AssetMetadata extends AssetLightRow {
-  filename: string;
   extension: string;
   dest_path: string;
   file_size: number;
@@ -180,6 +182,37 @@ export const emptyTagFilter = (): TagFilter => ({
 export const isTagFilterEmpty = (t: TagFilter): boolean =>
   !t.untagged && t.include.length === 0 && t.exclude.length === 0;
 
+/**
+ * Which columns a text search looks in — the seven scope toggles. Field names
+ * are camelCase to match the Rust `SearchScopes` (serde `rename_all`).
+ */
+export interface SearchScopes {
+  name: boolean;
+  extension: boolean;
+  note: boolean;
+  url: boolean;
+  folderName: boolean;
+  folderNote: boolean;
+  tags: boolean;
+}
+
+/** Every scope on — the default a fresh search starts from. */
+export const allScopes = (): SearchScopes => ({
+  name: true,
+  extension: true,
+  note: true,
+  url: true,
+  folderName: true,
+  folderNote: true,
+  tags: true,
+});
+
+/** A live text search: query plus active scopes. Ephemeral — never saved. */
+export interface TextSearch {
+  query: string;
+  scopes: SearchScopes;
+}
+
 /** Ephemeral narrowing of the current scope. Dimensions AND together. */
 export interface FilterSet {
   asset_types: AssetTypeFilter[];
@@ -188,6 +221,8 @@ export interface FilterSet {
   size: SizeRange | null;
   color: ColorFilter | null;
   tags: TagFilter | null;
+  /** Live full-text search; `null` = none. Stripped before a filter is saved. */
+  text: TextSearch | null;
 }
 
 /** A fresh empty set — a function, so no two call sites share one object. */
@@ -198,6 +233,7 @@ export const emptyFilters = (): FilterSet => ({
   size: null,
   color: null,
   tags: null,
+  text: null,
 });
 
 /**
@@ -557,6 +593,35 @@ class AssetLibrary {
   isLoading = $state(false);
   error = $state<string | null>(null);
 
+  /**
+   * Instant name-filter — the frontend half of the search hybrid. A name-only
+   * search filters the already-loaded manifest in memory (0ms, no round trip)
+   * instead of going through the backend FTS. `null` = inactive. Every other
+   * search goes through `filters.text` and is already baked into `manifest`.
+   */
+  #nameFilter = $state<string | null>(null);
+
+  /** The manifest the GRID renders: `manifest`, narrowed by the instant name
+   *  filter when one is active. Every consumer reads THIS, so selection, count,
+   *  and layout all see the same filtered set. */
+  get displayed(): AssetLightRow[] {
+    const q = this.#nameFilter;
+    if (q === null) return this.manifest;
+    const needle = q.toLowerCase();
+    return this.manifest.filter((r) => r.filename.toLowerCase().includes(needle));
+  }
+
+  /** True while the instant name filter is hiding some rows — for the "filtered"
+   *  hint, since this narrowing isn't part of `filters`/`hasFilters`. */
+  get nameFiltering(): boolean {
+    return this.#nameFilter !== null;
+  }
+
+  /** Set/clear the instant name filter. Blank normalises to `null`. */
+  setNameFilter(query: string | null): void {
+    this.#nameFilter = query && query.trim() !== "" ? query.trim() : null;
+  }
+
   /** The slice of the library currently shown (drives which folder is active). */
   scope = $state<ManifestScope>({ kind: "all" });
   /** The sort the CURRENT manifest was built with — always what the query did. */
@@ -686,25 +751,44 @@ class AssetLibrary {
       this.#indexById.clear();
     }
 
+    // Quiet loads buffer into `streamed` and swap once the old rows can be
+    // replaced — but only UNTIL the swap. Channel messages can arrive AFTER the
+    // invoke promise resolves (see the append branch), so once we've swapped we
+    // must keep appending live, or those late rows are dropped and the grid ends
+    // up empty. `swapped` gates that handoff.
+    let swapped = false;
+
+    const appendLive = (chunk: AssetLightRow[]) => {
+      // Build the id->index map incrementally, in lock-step with the manifest.
+      const base = this.manifest.length;
+      for (let i = 0; i < chunk.length; i++) this.#indexById.set(chunk[i].id, base + i);
+      // Push in place (reactive under $state) — O(chunk), not the O(n) full-array
+      // copy `slice()` did per chunk (which was O(n²) over a large library).
+      this.manifest.push(...chunk);
+    };
+
     try {
       const channel = new Channel<AssetLightRow[]>();
       channel.onmessage = (chunk) => {
         if (token !== this.#loadToken) return; // a newer load superseded this one
-        if (quiet) {
+        // Quiet AND not yet swapped → hold the chunk; the old rows stay visible.
+        // Everything else (non-quiet, or a late chunk after the swap) appends
+        // straight to the live manifest.
+        if (quiet && !swapped) {
           streamed.push(...chunk);
-          return;
+        } else {
+          appendLive(chunk);
         }
-        // Build the id->index map incrementally, in lock-step with the manifest.
-        // (Channel messages can arrive AFTER the invoke promise resolves, so a
-        // one-shot rebuild after `await` would run on an empty manifest.)
-        const base = this.manifest.length;
-        for (let i = 0; i < chunk.length; i++) this.#indexById.set(chunk[i].id, base + i);
-        // Push in place (reactive under $state) — O(chunk), not the O(n) full-array
-        // copy `slice()` did per chunk (which was O(n²) over a large library).
-        this.manifest.push(...chunk);
       };
       await invoke("stream_manifest", { query: { scope, filters, sort }, onChunk: channel });
-      if (quiet && token === this.#loadToken) this.#swapManifest(streamed);
+      // Swap in whatever streamed before the invoke resolved. Zero chunks is a
+      // legitimate empty result set — the swap must still happen so a no-match
+      // search shows empty rather than keeping stale rows. Late chunks now flow
+      // through `appendLive`.
+      if (quiet && token === this.#loadToken) {
+        this.#swapManifest(streamed);
+        swapped = true;
+      }
     } catch (e) {
       if (token === this.#loadToken) {
         this.error = typeof e === "string" ? e : "Failed to load assets.";
@@ -744,6 +828,7 @@ class AssetLibrary {
     // the same reason filters aren't persisted: landing in a fresh library that
     // silently shows a subset reads as "my import didn't work".
     this.filters = emptyFilters();
+    this.#nameFilter = null;
   }
 
   /**
@@ -774,13 +859,31 @@ class AssetLibrary {
       f.date !== null ||
       f.size !== null ||
       f.color !== null ||
-      f.tags !== null
+      f.tags !== null ||
+      f.text !== null
     );
   }
 
-  /** Replace the whole filter set and reload. Filters are never persisted. */
+  /**
+   * Set (or clear) the live text search and reload. A blank query normalises to
+   * `null`, so an empty search bar isn't a filter — same rule as the range
+   * dimensions. The scopes ride along so a scope toggle re-runs the search.
+   */
+  setSearch(text: TextSearch | null): Promise<void> {
+    const normalised = text && text.query.trim() !== "" ? text : null;
+    return this.setFilters({ ...this.filters, text: normalised });
+  }
+
+  /**
+   * Replace the whole filter set and reload. Filters are never persisted.
+   *
+   * Quiet reload — a filter change narrows the SAME scope, so the old rows stay
+   * on screen and the new set swaps in one frame. Without this, live search
+   * blanked the grid on every keystroke (each load emptied `manifest` before
+   * restreaming), which read as a black flash.
+   */
   setFilters(filters: FilterSet): Promise<void> {
-    return this.load(this.scope, this.sort, filters);
+    return this.load(this.scope, this.sort, filters, { quiet: true });
   }
 
   clearFilters(): Promise<void> {

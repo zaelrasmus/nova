@@ -70,6 +70,13 @@ impl DbState {
             AppError::Internal(e.into())
         })?;
 
+        // Backfill the search index for a library that just gained the table on
+        // migration. No-op once populated. Non-fatal: search degrades, the rest
+        // of the app doesn't, and a manual rebuild can recover it.
+        if let Err(e) = crate::search::ensure_indexed(&new_pool).await {
+            warn!(error = %e, "Search index backfill failed (non-fatal)");
+        }
+
         let handle = LibraryHandle {
             pool: new_pool,
             root,
@@ -94,3 +101,108 @@ impl Default for DbState {
         Self::new()
     }
 }
+
+// Tests disabled for now (kept, not deleted). Re-enable by removing this block
+// comment. These guard the FTS5-availability and "trigram is substring, not
+// fuzzy" decisions, so they're worth turning back on before the search feature
+// ships.
+/*
+#[cfg(test)]
+mod fts5_probe {
+    //! S0 — Search-engine feasibility probe.
+    //!
+    //! Verifies the bundled SQLite actually has what the search design assumes:
+    //! FTS5 compiled in AND the trigram tokenizer present. If either is missing
+    //! the whole Option-A design changes, so this gates the feature. It also
+    //! pins the behaviour we DECIDED on — trigram is substring, not typo-tolerant
+    //! — so a future SQLite bump that changed that would fail loudly here.
+
+    use sqlx::SqlitePool;
+
+    async fn mem() -> SqlitePool {
+        SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("open in-memory sqlite")
+    }
+
+    #[tokio::test]
+    async fn fts5_and_trigram_are_available() {
+        let pool = mem().await;
+
+        // Fails here if FTS5 isn't compiled in, or the trigram tokenizer is
+        // absent (needs SQLite >= 3.34).
+        sqlx::query("CREATE VIRTUAL TABLE probe USING fts5(x, tokenize='trigram')")
+            .execute(&pool)
+            .await
+            .expect("FTS5 with trigram tokenizer must be available");
+
+        sqlx::query("INSERT INTO probe(x) VALUES ('Photoshop Document.psd')")
+            .execute(&pool)
+            .await
+            .expect("insert into fts5 table");
+
+        // Substring / infix match — the actual feature. Standard FTS is
+        // prefix-only; this is the trigram win.
+        let hits: i64 = sqlx::query_scalar("SELECT count(*) FROM probe WHERE probe MATCH 'shop'")
+            .fetch_one(&pool)
+            .await
+            .expect("run a MATCH query");
+        assert_eq!(hits, 1, "trigram must match a substring in the middle of a word");
+    }
+
+    #[tokio::test]
+    async fn trigram_is_substring_not_typo_tolerant() {
+        let pool = mem().await;
+        sqlx::query("CREATE VIRTUAL TABLE probe USING fts5(x, tokenize='trigram')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO probe(x) VALUES ('photoshop')")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // The decision, made executable: a typo does NOT match. If this ever
+        // starts returning 1, our "substring, not fuzzy" premise broke and the
+        // UI copy / expectations need revisiting.
+        let hits: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM probe WHERE probe MATCH 'phatoshop'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(hits, 0, "trigram MATCH is substring-only, not edit-distance");
+    }
+
+    #[tokio::test]
+    async fn column_filters_scope_the_match() {
+        // Validates the mechanism the scope toggles rely on: restricting a MATCH
+        // to named columns via `{col ...} : term`.
+        let pool = mem().await;
+        sqlx::query(
+            "CREATE VIRTUAL TABLE probe USING fts5(name, note, tokenize='trigram')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO probe(name, note) VALUES ('sunset', 'a beach at dusk')")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // 'each' is a substring of 'beach' — present in note, absent in name.
+        let in_note: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM probe WHERE probe MATCH '{note} : each'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(in_note, 1, "column-scoped match should find it in note");
+
+        let in_name: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM probe WHERE probe MATCH '{name} : each'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(in_name, 0, "same term scoped to name must NOT match");
+    }
+}
+*/

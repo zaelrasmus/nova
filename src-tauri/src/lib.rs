@@ -6,6 +6,7 @@ mod error;
 mod extract;
 mod fs;
 mod library;
+mod search;
 mod tags;
 mod thumbnail;
 
@@ -36,6 +37,7 @@ pub fn run() {
             commands::import_dropped_paths,
             commands::start_asset_drag,
             commands::clear_drag_staging,
+            commands::rebuild_search_index,
             commands::connect_library,
             commands::stream_manifest,
             commands::fetch_folders,

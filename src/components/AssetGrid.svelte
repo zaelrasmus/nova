@@ -4,6 +4,7 @@
     import AssetCard from "./AssetCard.svelte";
     import SortControl from "./SortControl.svelte";
     import FilterBar from "./FilterBar.svelte";
+    import SearchBar from "./SearchBar.svelte";
     import {get} from "svelte/store";
     import { libraryManager, settings } from "../routes/settings.svelte";
     import { assetLibrary, type AssetLightRow } from "$lib/assets.svelte";
@@ -18,7 +19,10 @@
 
 
     // Manifest = layout source of truth (id, width, height, asset_type).
-    const assets = $derived(assetLibrary.manifest);
+    // `displayed`, not `manifest`: the instant name-filter (search hybrid)
+    // narrows in the frontend. Everything here — count, selection, layout —
+    // reads this one filtered view.
+    const assets = $derived(assetLibrary.displayed);
 
     // User-controlled column count, persisted in preferences. Local mirror so the
     // slider drags smoothly; we persist on release (onchange). A $effect re-syncs
@@ -460,7 +464,9 @@
         <!-- Say "of N" when filtered, so a narrowed view never looks like a small
              library. `manifest` is the filtered set, so N comes from the store. -->
         <span class="text-xs text-neutral-400">
-            {assets.length} assets{assetLibrary.hasFilters ? " (filtered)" : ""}
+            {assets.length} assets{assetLibrary.hasFilters || assetLibrary.nameFiltering
+                ? " (filtered)"
+                : ""}
             {#if selection.assetCount > 0}
                 <span class="text-blue-600">· {selection.assetCount} selected</span>
             {/if}
@@ -528,6 +534,10 @@
         </div>
     </div>
 
+    <div class="shrink-0 border-b border-neutral-100 bg-white">
+        <SearchBar />
+    </div>
+
     <div class="shrink-0">
         <FilterBar />
     </div>
@@ -536,17 +546,22 @@
             <div class="flex items-center justify-center h-32 text-sm text-neutral-500">Loading assets...</div>
         {:else if assetLibrary.error}
             <div class="flex items-center justify-center h-32 text-sm text-red-400">{assetLibrary.error}</div>
-        {:else if assets.length === 0 && assetLibrary.hasFilters}
+        {:else if assets.length === 0 && (assetLibrary.hasFilters || assetLibrary.nameFiltering)}
             <!-- Distinguish "narrowed to nothing" from "nothing imported" — the
-                 fix for one is a click, for the other it's an import. -->
+                 fix for one is a click, for the other it's an import. The name
+                 filter counts here too, so a no-match search doesn't read as an
+                 empty library. -->
             <div class="flex flex-col items-center justify-center gap-2 h-32 text-sm text-neutral-500">
-                <span>No assets match these filters.</span>
+                <span>No assets match your search.</span>
                 <button
                     type="button"
-                    onclick={() => assetLibrary.clearFilters()}
+                    onclick={() => {
+                        assetLibrary.clearFilters();
+                        assetLibrary.setNameFilter(null);
+                    }}
                     class="rounded px-2 py-0.5 text-xs font-medium text-blue-700 hover:bg-blue-100"
                 >
-                    ✕ Clear filters
+                    ✕ Clear
                 </button>
             </div>
         {:else if assets.length === 0}

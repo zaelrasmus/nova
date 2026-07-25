@@ -579,6 +579,18 @@ pub async fn delete_folders(
         .map_err(AppError::from)
 }
 
+/// Rebuild the full-text search index from scratch. The recovery path if the
+/// derived index ever drifts from the source tables — the maintenance tool.
+#[instrument(skip_all)]
+#[tauri::command]
+pub async fn rebuild_search_index(state: tauri::State<'_, DbState>) -> Result<(), AppError> {
+    let pool = state.acquire_pool().await?;
+    crate::search::rebuild_search_index(&pool)
+        .await
+        .inspect_err(|e| tracing::error!(error = %e, "rebuild_search_index failed"))
+        .map_err(AppError::from)
+}
+
 /// Stage the given assets for an outbound OS drag and return the absolute staged
 /// paths. The frontend hands these to the drag plugin's `startDrag`.
 ///
