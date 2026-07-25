@@ -133,6 +133,10 @@ pub fn scan_directories(
                 // by hand. (The source's own timestamp isn't a property of the folder
                 // as the library understands it.)
                 created_at: crate::assets::now_stamp(),
+                // Scanned folders arrive unpinned: an import of 200 directories
+                // must not fill the sidebar's curated list.
+                color: None,
+                pin_position: None,
             });
             *position += 1.0;
 

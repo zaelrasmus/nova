@@ -1,5 +1,5 @@
 <script lang="ts">
-    import { assetLibrary, type Folder, type ManifestScope } from "$lib/assets.svelte";
+    import { assetLibrary, type Folder } from "$lib/assets.svelte";
     import { RangeSelection, selection } from "$lib/selection.svelte";
     import { dropzone } from "$lib/dropzone.svelte";
     import {
@@ -9,15 +9,68 @@
         type DropContext,
     } from "$lib/dragdrop.svelte";
     import { DROP_FOLDER_ATTR, DROP_FOLDER_NAME_ATTR, type DropTarget } from "$lib/droptarget";
+    import { pinColorVar } from "$lib/pins";
+    import FolderContextMenu from "./FolderContextMenu.svelte";
     import { toast } from "svelte-sonner";
+
+    /**
+     * Where the tree starts.
+     *
+     * `null` is the library root — the sidebar's full tree. Passing a folder id
+     * renders that folder's subtree instead, which is what a pinned folder's
+     * hover flyout shows. Same component either way: the drag, drop, rename and
+     * context-menu machinery is identical, only the starting node differs.
+     */
+    interface Props {
+        rootId?: string | null;
+    }
+
+    const { rootId = null }: Props = $props();
+
+    /** Right-click target, with the viewport point the menu opens at. */
+    let menu = $state<{ folder: Folder; x: number; y: number } | null>(null);
 
     const folders = $derived(assetLibrary.folders);
     const active = $derived(assetLibrary.scope);
+
+    /**
+     * Name filter for the tree.
+     *
+     * A plain substring match over folder names, NOT the FTS5 path: folder names
+     * are already in memory and the list is small, while `search` is an asset
+     * index whose text lives in `FilterSet.text`. Routing this through it would
+     * fight the asset search for the same state.
+     */
+    let filterText = $state("");
+    const filtering = $derived(filterText.trim().length > 0);
+
+    /**
+     * Ids to render while filtering: every match, plus each match's ancestors —
+     * without the ancestors a deep hit would have nothing to hang from and the
+     * tree would collapse into a flat list that lies about the structure.
+     */
+    const visibleIds = $derived.by(() => {
+        if (!filtering) return null;
+        const needle = filterText.trim().toLowerCase();
+        const byId = new Map(folders.map((f) => [f.id, f]));
+        const keep = new Set<string>();
+        for (const f of folders) {
+            if (!f.name.toLowerCase().includes(needle)) continue;
+            keep.add(f.id);
+            let cursor = f.parent_id;
+            while (cursor && !keep.has(cursor)) {
+                keep.add(cursor);
+                cursor = byId.get(cursor)?.parent_id ?? null;
+            }
+        }
+        return keep;
+    });
 
     // parent_id -> children[], preserving the backend's position order.
     const childrenByParent = $derived.by(() => {
         const map = new Map<string | null, Folder[]>();
         for (const f of folders) {
+            if (visibleIds && !visibleIds.has(f.id)) continue;
             const arr = map.get(f.parent_id) ?? [];
             arr.push(f);
             map.set(f.parent_id, arr);
@@ -38,7 +91,9 @@
                 walk(f.id);
             }
         };
-        walk(null);
+        // Scoped to the rendered subtree, so a shift-range in a pin's flyout
+        // can't select rows that aren't on screen.
+        walk(rootId);
         return out;
     });
 
@@ -74,6 +129,9 @@
     }
 
     function pressFolder(e: PointerEvent, index: number) {
+        // Left button only. A right-click is aiming at the context menu, and
+        // must not collapse a multi-selection the user built to delete.
+        if (e.pointerType === "mouse" && e.button !== 0) return;
         treeSel.pointerDown(orderedIds(), index, mods(e));
         syncInspector();
     }
@@ -89,13 +147,6 @@
         if (!e.ctrlKey && !e.metaKey && !e.shiftKey) {
             assetLibrary.setScope({ kind: "folder", id: folder.id });
         }
-    }
-
-    /** The default views: navigate, and drop every selection — they own nothing. */
-    function selectView(scope: ManifestScope) {
-        treeSel.clear();
-        selection.clear();
-        return assetLibrary.setScope(scope);
     }
 
     const isScope = (id: string) => active.kind === "folder" && active.id === id;
@@ -246,25 +297,21 @@
     }}
     class="flex flex-col gap-0.5 rounded-lg border border-neutral-800 bg-neutral-900/40 p-2 text-sm"
 >
-    <button
-        type="button"
-        onclick={() => selectView({ kind: "all" })}
-        class="rounded px-2 py-1 text-left transition-colors
-            {active.kind === 'all' ? 'bg-blue-600 text-white' : 'text-neutral-300 hover:bg-neutral-800'}"
-    >
-        All assets
-    </button>
-    <button
-        type="button"
-        onclick={() => selectView({ kind: "uncategorized" })}
-        class="rounded px-2 py-1 text-left transition-colors
-            {active.kind === 'uncategorized' ? 'bg-blue-600 text-white' : 'text-neutral-400 hover:bg-neutral-800'}"
-    >
-        Uncategorized
-    </button>
-
-    {#if folders.length > 0}
-        <div class="my-1 h-px bg-neutral-800"></div>
+    <!-- "All assets" and "Uncategorized" used to sit here. They're smart views,
+         not folders, so they live in SystemViews.svelte now — the sidebar draws
+         the line between what the library computes and what the user built. -->
+    {#if !rootId && folders.length > 4}
+        <!-- The filter earns its row only once the tree is big enough to need
+             it; on a five-folder library, or in a single folder's subtree, it
+             would be pure chrome. -->
+        <input
+            type="text"
+            bind:value={filterText}
+            placeholder="Filter folders…"
+            class="mb-1 w-full rounded border border-neutral-800 bg-neutral-950 px-2 py-1 text-xs
+                   text-neutral-200 placeholder:text-neutral-600 focus:border-neutral-700
+                   focus:outline-none"
+        />
     {/if}
 
     {#snippet tree(parentId: string | null, depth: number)}
@@ -306,16 +353,31 @@
                     title={folder.name}
                     onpointerdown={(e) => pressFolder(e, index)}
                     onclick={(e) => clickFolder(e, folder)}
+                    oncontextmenu={(e) => {
+                        e.preventDefault();
+                        menu = { folder, x: e.clientX, y: e.clientY };
+                    }}
                     aria-pressed={treeSel.has(folder.id)}
                     aria-current={isScope(folder.id) ? "true" : undefined}
-                    class="flex-1 truncate rounded px-2 py-1 text-left transition-colors
+                    class="flex min-w-0 flex-1 items-center gap-1.5 rounded px-2 py-1 text-left
+                        transition-colors
                         {treeSel.has(folder.id)
                         ? 'bg-blue-600 text-white'
                         : isScope(folder.id)
                           ? 'bg-neutral-800 text-neutral-100'
                           : 'text-neutral-300 hover:bg-neutral-800'}"
                 >
-                    {folder.name}
+                    <!-- Pin marker. Pinning must read as "marked", not "moved
+                         somewhere else" — without a badge here the folder looks
+                         like it left the tree for the pinned list. -->
+                    {#if folder.pin_position !== null}
+                        <span
+                            class="h-1.5 w-1.5 shrink-0 rounded-full"
+                            style="background-color: {pinColorVar(folder.color)}"
+                            title="Pinned to the sidebar"
+                        ></span>
+                    {/if}
+                    <span class="truncate">{folder.name}</span>
                 </button>
                 <div class="flex shrink-0 opacity-0 transition-opacity group-hover:opacity-100">
                     <button
@@ -347,7 +409,11 @@
         {/each}
     {/snippet}
 
-    {@render tree(null, 0)}
+    {@render tree(rootId, 0)}
+
+    {#if rootId && (childrenByParent.get(rootId) ?? []).length === 0}
+        <p class="px-2 py-1 text-xs text-neutral-600">No subfolders.</p>
+    {/if}
 
     {#if treeSel.size > 1}
         <!-- Multi-select is invisible unless something says so: the row actions
@@ -366,11 +432,32 @@
         </div>
     {/if}
 
+    <!-- Creates at the level being shown: the library root in the full tree, the
+         pinned folder in its own flyout. -->
     <button
         type="button"
-        onclick={() => newFolder(null)}
+        onclick={() => newFolder(rootId)}
         class="mt-1 rounded px-2 py-1 text-left text-xs text-neutral-500 transition-colors hover:bg-neutral-800 hover:text-neutral-300"
     >
-        ＋ New folder
+        ＋ {rootId ? "New subfolder" : "New folder"}
     </button>
 </div>
+
+{#if menu}
+    <!-- `target` still reads through `menu` lazily, which is only safe because
+         the menu runs an action BEFORE closing itself (see the invariant in
+         FolderContextMenu). Close-then-act would evaluate this against null. -->
+    {@const target = menu.folder}
+    <!-- The structural actions are handed in rather than living in the menu:
+         deleting from the tree can take the whole multi-selection with it, which
+         only this component knows about. -->
+    <FolderContextMenu
+        folder={target}
+        x={menu.x}
+        y={menu.y}
+        onclose={() => (menu = null)}
+        onNewSubfolder={() => newFolder(target.id)}
+        onRename={() => renameFolder(target)}
+        onDelete={() => deleteFolders(target)}
+    />
+{/if}

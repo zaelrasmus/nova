@@ -7,22 +7,14 @@
     import { tweened } from "svelte/motion";
     import { QueryClient, QueryClientProvider } from "@tanstack/svelte-query";
     import { toast } from "svelte-sonner";
-    import {
-        PanelLeft,
-        PanelRight,
-        Settings,
-        FolderTree as FolderTreeIcon,
-        Filter,
-        Tag,
-        Download,
-    } from "@lucide/svelte";
+    import { PanelLeft, PanelRight, Settings, Download } from "@lucide/svelte";
 
     import { assetLibrary, type ManifestScope } from "$lib/assets.svelte";
     import { dropzone } from "$lib/dropzone.svelte";
     import type { DropTarget } from "$lib/droptarget";
     import { drag, DRAG_SCROLL_ATTR } from "$lib/dragdrop.svelte";
     import { selection } from "$lib/selection.svelte";
-    import { layout, type RailSection } from "$lib/layout.svelte";
+    import { layout } from "$lib/layout.svelte";
 
     import AssetGrid from "$components/AssetGrid.svelte";
     import FolderTree from "$components/FolderTree.svelte";
@@ -31,6 +23,8 @@
     import TagManager from "$components/TagManager.svelte";
     import SearchBar from "$components/SearchBar.svelte";
     import GridToolbar from "$components/GridToolbar.svelte";
+    import SystemViews from "$components/SystemViews.svelte";
+    import PinnedFolders from "$components/PinnedFolders.svelte";
     import WindowControls from "$components/layout/WindowControls.svelte";
     import ResizeHandle from "$components/layout/ResizeHandle.svelte";
     import SidebarRail from "$components/layout/SidebarRail.svelte";
@@ -292,13 +286,6 @@
 
     // ── Layout ──────────────────────────────────────────────────────────────
 
-    /** Sections of the sidebar. Same list the icon rail shows, in the same order. */
-    const SECTIONS: { id: RailSection; icon: typeof Tag; label: string }[] = [
-        { id: "folders", icon: FolderTreeIcon, label: "Folders" },
-        { id: "filters", icon: Filter, label: "Saved filters" },
-        { id: "tags", icon: Tag, label: "Tags" },
-    ];
-
     // Header label for the current place. A scope is a place, so it reads like
     // one — the count is what changes when a filter narrows it.
     const scopeLabel = $derived.by(() => {
@@ -380,52 +367,61 @@
             {#if layout.sidebarMode === "rail"}
                 <SidebarRail onManageTags={() => (tagManagerOpen = true)} />
             {:else}
-                <!-- Section switcher: the rail's icons, laid out horizontally so
-                     an expanded sidebar can change section too. -->
-                <div class="flex shrink-0 gap-1 px-2 pb-2">
-                    {#each SECTIONS as section (section.id)}
-                        {@const Icon = section.icon}
-                        <button
-                            type="button"
-                            title={section.label}
-                            aria-label={section.label}
-                            aria-pressed={layout.railSection === section.id}
-                            onclick={() => layout.showSection(section.id)}
-                            class="grid h-7 flex-1 place-items-center rounded transition-colors
-                                   {layout.railSection === section.id
-                                ? 'bg-neutral-800 text-neutral-100'
-                                : 'text-neutral-500 hover:bg-neutral-800/60 hover:text-neutral-300'}"
-                        >
-                            <Icon class="h-4 w-4" />
-                        </button>
-                    {/each}
-                </div>
+                <!-- EXPANDED — the same hierarchy the rail implies, spelled out.
+                     Curated things first (smart views, then pins), the exhaustive
+                     tree last where it can take the remaining height. That order
+                     is what Finder, Notion and VS Code all settle on: the
+                     shortlist above the structure.
 
-                <!-- Auto-scrolls while a drag hovers its edges: the folder you
+                     Note the tree and the pins swap places between the two modes.
+                     The rule is consistent even though the picture isn't: fixed
+                     controls sit in the top group, and the ONE variable-length
+                     list takes the space that's left. In the rail the tree is a
+                     button; here it's a panel.
+
+                     Auto-scrolls while a drag hovers its edges: the folder you
                      want is often below the fold, and there's no way to scroll a
                      sidebar with a pointer already holding something. -->
                 <nav
-                    class="flex-1 overflow-y-auto px-2 pb-2 [scrollbar-width:thin]"
+                    class="flex min-h-0 flex-1 flex-col overflow-y-auto pb-2 [scrollbar-width:thin]"
                     {...{ [DRAG_SCROLL_ATTR]: "" }}
                 >
-                    {#if layout.railSection === "folders"}
+                    <SystemViews variant="expanded" />
+
+                    <div class="mx-3 my-2 h-px shrink-0 bg-neutral-800"></div>
+
+                    <p
+                        class="px-3 pb-1 text-[10px] font-semibold uppercase tracking-wider
+                               text-neutral-600"
+                    >
+                        Pinned
+                    </p>
+                    <PinnedFolders variant="expanded" />
+
+                    <div class="mx-3 my-2 h-px shrink-0 bg-neutral-800"></div>
+
+                    <p
+                        class="px-3 pb-1 text-[10px] font-semibold uppercase tracking-wider
+                               text-neutral-600"
+                    >
+                        Folders
+                    </p>
+                    <div class="px-2">
                         <FolderTree />
-                    {:else if layout.railSection === "filters"}
+                    </div>
+
+                    <button
+                        type="button"
+                        onclick={() => (tagManagerOpen = true)}
+                        class="mx-2 mt-2 rounded px-2 py-1.5 text-left text-sm text-neutral-400
+                               transition-colors hover:bg-neutral-800 hover:text-neutral-200"
+                    >
+                        Manage tags…
+                    </button>
+
+                    <div class="mt-2 px-2">
                         <SavedFilters />
-                    {:else}
-                        <!-- ANTICIPATED: a real sidebar tag list lives here. It's
-                             the prerequisite for drag-to-tag (see backlog); until
-                             then this section is the door to the Tag Manager. -->
-                        <button
-                            type="button"
-                            onclick={() => (tagManagerOpen = true)}
-                            class="w-full rounded-lg border border-neutral-800 bg-neutral-900/40 px-3
-                                   py-2 text-left text-sm text-neutral-300 transition-colors
-                                   hover:bg-neutral-800"
-                        >
-                            Manage tags…
-                        </button>
-                    {/if}
+                    </div>
                 </nav>
             {/if}
 

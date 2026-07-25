@@ -54,6 +54,8 @@ export interface AssetPatch {
 export interface FolderPatch {
   name?: string;
   notes?: string;
+  /** Pin accent token. `""` clears it, like every other free-text field here. */
+  color?: string;
 }
 
 /** "photo.jpg" -> "photo". The extension is shown separately and isn't editable. */
@@ -493,6 +495,25 @@ export interface SavedFilter {
   filters: FilterSet;
 }
 
+/**
+ * Accent colours a pinned folder can wear. Token names, not hex — the values
+ * live in layout.css as `--pin-*`, so a theme change retints every pin without
+ * touching the database. Mirrors `PIN_COLORS` in assets.rs; the backend rejects
+ * anything not in this list.
+ */
+export const PIN_COLORS = [
+  "slate",
+  "blue",
+  "cyan",
+  "emerald",
+  "lime",
+  "amber",
+  "rose",
+  "violet",
+] as const;
+
+export type PinColor = (typeof PIN_COLORS)[number];
+
 export interface Folder {
   id: string;
   name: string;
@@ -503,6 +524,10 @@ export interface Folder {
   notes: string | null;
   /** When the folder entered this library (RFC 3339, UTC). */
   created_at: string;
+  /** Sidebar accent token. Survives unpinning, so re-pinning restores the look. */
+  color: PinColor | null;
+  /** Rank among pinned folders. `null` = not pinned. */
+  pin_position: number | null;
 }
 
 /** Exact totals for a set of assets, computed by the DB rather than estimated. */
@@ -1290,6 +1315,35 @@ class AssetLibrary {
   ): Promise<void> {
     await invoke("reorder_folder", { id, newParentId, afterId });
     await this.loadFolders();
+  }
+
+  // ── Pinned folders ──────────────────────────────────────────────────────
+  //
+  // A pin is a shortcut, not a place: none of these touch the tree, the scope,
+  // or what a folder contains. `loadFolders` is the only refresh they need,
+  // because pin state rides on the folder rows the sidebar already reads.
+
+  /** The pinned folders, in their user-defined order. */
+  get pinned(): Folder[] {
+    return this.folders
+      .filter((f) => f.pin_position !== null)
+      .sort((a, b) => (a.pin_position ?? 0) - (b.pin_position ?? 0));
+  }
+
+  async setFolderPinned(id: string, pinned: boolean): Promise<void> {
+    await invoke("set_folder_pinned", { id, pinned });
+    await this.loadFolders();
+  }
+
+  /** Drag-to-reorder within the pinned list. `afterId: null` means first. */
+  async reorderPin(id: string, afterId: string | null): Promise<void> {
+    await invoke("reorder_pin", { id, afterId });
+    await this.loadFolders();
+  }
+
+  /** Set or clear a pin's accent. `null` clears it (sent as "" — see FolderPatch). */
+  async setFolderColor(id: string, color: PinColor | null): Promise<void> {
+    await this.updateFolder(id, { color: color ?? "" });
   }
 
   /** Add assets to a folder; reload the manifest if the change affects the view. */

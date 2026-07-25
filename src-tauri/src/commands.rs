@@ -535,6 +535,36 @@ pub async fn reorder_assets(
         .map_err(AppError::from)
 }
 
+/// Pin or unpin a folder in the sidebar. Pinning appends to the end of the list.
+#[instrument(skip_all)]
+#[tauri::command]
+pub async fn set_folder_pinned(
+    id: String,
+    pinned: bool,
+    state: tauri::State<'_, DbState>,
+) -> Result<(), AppError> {
+    let pool = state.acquire_pool().await?;
+    assets::set_folder_pinned(&pool, &id, pinned)
+        .await
+        .inspect_err(|e| tracing::error!(error = %e, "set_folder_pinned failed"))
+        .map_err(AppError::from)
+}
+
+/// Drag-to-reorder inside the pinned list. `afterId: null` means first.
+#[instrument(skip_all)]
+#[tauri::command]
+pub async fn reorder_pin(
+    id: String,
+    after_id: Option<String>,
+    state: tauri::State<'_, DbState>,
+) -> Result<(), AppError> {
+    let pool = state.acquire_pool().await?;
+    assets::reorder_pin(&pool, &id, after_id.as_deref())
+        .await
+        .inspect_err(|e| tracing::error!(error = %e, "reorder_pin failed"))
+        .map_err(AppError::from)
+}
+
 #[instrument(skip_all)]
 #[tauri::command]
 pub async fn update_folder(

@@ -49,9 +49,6 @@ const SIDEBAR_RESTORE = 240;
 const INSPECTOR_MIN = 200;
 const INSPECTOR_MAX = 480;
 
-/** Sections reachable from the icon rail. Clicking one expands the sidebar to it. */
-export type RailSection = "folders" | "filters" | "tags";
-
 export type SidebarMode = "expanded" | "rail" | "hidden";
 
 class LayoutState {
@@ -63,9 +60,6 @@ class LayoutState {
     inspectorWidth = $state(320);
     sidebarHidden = $state(false);
     inspectorHidden = $state(false);
-
-    /** Which section the sidebar shows. Only meaningful for the rail. */
-    railSection = $state<RailSection>("folders");
 
     /** True while a resize handle is being dragged — kills the column transition. */
     resizing = $state(false);
@@ -125,13 +119,12 @@ class LayoutState {
     }
 
     /**
-     * Click a rail icon: select the section and, if we're in the rail, expand.
-     * A rail icon is a shortcut INTO a section, not a filter applied in place —
-     * a folder tree has no icon-only form, so there is nothing to show at 52px.
+     * Give the sidebar its width back — the click half of "hover looks, click
+     * stays". The expanded sidebar shows every section at once, so there's no
+     * section to select: clicking any rail icon means the same thing.
      */
-    showSection(section: RailSection): void {
-        this.railSection = section;
-        if (this.sidebarHidden) this.sidebarHidden = false;
+    expand(): void {
+        this.sidebarHidden = false;
         if (this.sidebarWidth <= RAIL_W) this.sidebarWidth = SIDEBAR_RESTORE;
         this.persist();
     }

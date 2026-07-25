@@ -427,7 +427,24 @@ pub struct Folder {
     pub notes: Option<String>,
     #[sqlx(default)]
     pub created_at: String,
+    /// Sidebar accent, as a palette token name (see [`PIN_COLORS`]). `None` =
+    /// unstyled; only meaningful while pinned, but kept independently so
+    /// unpinning and re-pinning doesn't lose the colour the user chose.
+    #[sqlx(default)]
+    pub color: Option<String>,
+    /// Rank among pinned folders. `None` = not pinned.
+    #[sqlx(default)]
+    pub pin_position: Option<f64>,
 }
+
+/// The pin accent palette — token names, resolved to colours by the frontend.
+///
+/// Kept short and well-separated on purpose: a pin's colour exists to be
+/// recognised at a glance in a 52px rail, and twenty near-neighbours would be
+/// no more legible than the grey wall the colours are there to prevent.
+pub const PIN_COLORS: [&str; 8] = [
+    "slate", "blue", "cyan", "emerald", "lime", "amber", "rose", "violet",
+];
 
 /// Everything an import needs that the file tree cannot tell it.
 ///
@@ -959,7 +976,8 @@ async fn write_manual_position(
 #[instrument(skip(pool))]
 pub async fn fetch_folders(pool: &SqlitePool) -> Result<Vec<Folder>> {
     let folders = sqlx::query_as::<_, Folder>(
-        "SELECT id, name, parent_id, position, order_by, is_ascending, notes, created_at
+        "SELECT id, name, parent_id, position, order_by, is_ascending, notes, created_at,
+                color, pin_position
          FROM folders
          ORDER BY parent_id, position, name",
     )
@@ -1172,6 +1190,8 @@ pub struct AssetPatch {
 pub struct FolderPatch {
     pub name: Option<String>,
     pub notes: Option<String>,
+    /// Pin accent. `Some("")` clears it, like every other free-text field here.
+    pub color: Option<String>,
 }
 
 /// Trim, and treat an empty result as NULL. Used for every free-text field, so a
@@ -1301,6 +1321,10 @@ pub async fn create_folder(
         is_ascending: true,
         notes: None,
         created_at,
+        // A new folder is never pinned or coloured — pinning is always an
+        // explicit act by the user, never a side effect of creating something.
+        color: None,
+        pin_position: None,
     })
 }
 
@@ -1452,7 +1476,23 @@ pub async fn update_folder(pool: &SqlitePool, id: &str, patch: FolderPatch) -> R
     };
     let notes = patch.notes.map(|s| blank_to_null(&s));
 
-    if name.is_none() && notes.is_none() {
+    // Validate here rather than trusting the caller: the column is the source of
+    // truth for what the sidebar renders, and an unknown token would resolve to
+    // no colour at all — a pin that silently loses its accent.
+    let color = match patch.color {
+        Some(raw) => {
+            let cleaned = blank_to_null(&raw);
+            if let Some(c) = &cleaned {
+                if !PIN_COLORS.contains(&c.as_str()) {
+                    anyhow::bail!("Unknown folder colour");
+                }
+            }
+            Some(cleaned)
+        }
+        None => None,
+    };
+
+    if name.is_none() && notes.is_none() && color.is_none() {
         return Ok(());
     }
 
@@ -1465,6 +1505,10 @@ pub async fn update_folder(pool: &SqlitePool, id: &str, patch: FolderPatch) -> R
         }
         if let Some(v) = &notes {
             sep.push("notes = ");
+            sep.push_bind_unseparated(v);
+        }
+        if let Some(v) = &color {
+            sep.push("color = ");
             sep.push_bind_unseparated(v);
         }
     }
@@ -1765,6 +1809,135 @@ pub async fn reorder_folder(
     tx.commit()
         .await
         .context("Failed to commit reorder transaction")?;
+    Ok(())
+}
+
+// ── Pinned folders ────────────────────────────────────────────────────────────
+//
+// A pin is a SHORTCUT, not a place: pinning doesn't move a folder, change its
+// parent, or affect what it contains — it only adds a row to the sidebar's
+// curated list. That's why pin state lives on the folder itself rather than in a
+// join table, and why unpinning is lossless.
+//
+// Pins are library data (they name folder ids), so they live here in library.db
+// and not in the app-global settings file — otherwise switching libraries would
+// show pins pointing at folders that don't exist.
+
+/// Pin or unpin a folder. Pinning appends to the end of the list; unpinning
+/// clears the rank but keeps the colour, so re-pinning restores the look.
+#[instrument(skip(pool))]
+pub async fn set_folder_pinned(pool: &SqlitePool, id: &str, pinned: bool) -> Result<()> {
+    // Read first so "folder doesn't exist" and "already in that state" are
+    // distinguishable — with a bare UPDATE both look like 0 rows affected.
+    let current: Option<Option<f64>> = sqlx::query_scalar("SELECT pin_position FROM folders WHERE id = ?")
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+        .context("Failed to read folder pin state")?;
+
+    let Some(pin_position) = current else {
+        anyhow::bail!("Folder not found");
+    };
+    if pin_position.is_some() == pinned {
+        return Ok(()); // idempotent: re-pinning must not shuffle the order
+    }
+
+    if pinned {
+        sqlx::query(
+            "UPDATE folders
+                SET pin_position = COALESCE(
+                    (SELECT MAX(pin_position) + 1.0 FROM folders WHERE pin_position IS NOT NULL),
+                    0.0
+                )
+              WHERE id = ?",
+        )
+    } else {
+        sqlx::query("UPDATE folders SET pin_position = NULL WHERE id = ?")
+    }
+    .bind(id)
+    .execute(pool)
+    .await
+    .context("Failed to update folder pin")?;
+
+    Ok(())
+}
+
+/// Drag-to-reorder within the pinned list. `after` is the pin the folder lands
+/// behind; `None` means it becomes the first pin.
+///
+/// Same fractional-rank scheme as [`reorder_folder`], minus the tree: pins are
+/// one flat list, so there are no siblings to scope to and no cycle to check.
+#[instrument(skip(pool))]
+pub async fn reorder_pin(pool: &SqlitePool, id: &str, after: Option<&str>) -> Result<()> {
+    let mut tx = pool
+        .begin()
+        .await
+        .context("Failed to begin pin reorder transaction")?;
+
+    // The other pins in display order. Excluding the one being moved, because
+    // its current slot is not a neighbour of where it's going.
+    let pins: Vec<(String, f64)> = sqlx::query_as(
+        "SELECT id, pin_position FROM folders
+         WHERE pin_position IS NOT NULL AND id <> ?
+         ORDER BY pin_position",
+    )
+    .bind(id)
+    .fetch_all(&mut *tx)
+    .await
+    .context("Failed to read pinned folders")?;
+
+    // An `after` that isn't in the list (a stale sidebar) appends rather than
+    // failing — the same forgiving rule the folder tree uses.
+    let insert_at = match after {
+        Some(a) => pins
+            .iter()
+            .position(|(pid, _)| pid == a)
+            .map(|i| i + 1)
+            .unwrap_or(pins.len()),
+        None => 0,
+    };
+
+    let prev = insert_at.checked_sub(1).and_then(|i| pins.get(i)).map(|(_, p)| *p);
+    let next = pins.get(insert_at).map(|(_, p)| *p);
+
+    let position = match (prev, next) {
+        (None, None) => 0.0,
+        (None, Some(n)) => n - 1.0,
+        (Some(p), None) => p + 1.0,
+        (Some(p), Some(n)) if n - p > POSITION_EPSILON => (p + n) / 2.0,
+        // Gap exhausted — renumber 0,1,2…, leaving a hole for the arriving pin.
+        (Some(_), Some(_)) => {
+            tracing::info!("Pin positions exhausted; renumbering");
+            for (rank, (pid, _)) in pins.iter().enumerate() {
+                let renumbered = if rank < insert_at {
+                    rank as f64
+                } else {
+                    rank as f64 + 1.0
+                };
+                sqlx::query("UPDATE folders SET pin_position = ? WHERE id = ?")
+                    .bind(renumbered)
+                    .bind(pid)
+                    .execute(&mut *tx)
+                    .await
+                    .context("Failed to renumber pinned folders")?;
+            }
+            insert_at as f64
+        }
+    };
+
+    let res = sqlx::query("UPDATE folders SET pin_position = ? WHERE id = ? AND pin_position IS NOT NULL")
+        .bind(position)
+        .bind(id)
+        .execute(&mut *tx)
+        .await
+        .context("Failed to reorder pin")?;
+    if res.rows_affected() == 0 {
+        anyhow::bail!("Folder is not pinned");
+    }
+
+    tx.commit()
+        .await
+        .context("Failed to commit pin reorder transaction")?;
     Ok(())
 }
 

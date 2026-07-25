@@ -11,9 +11,11 @@
     } from "$lib/assets.svelte";
     import { selection } from "$lib/selection.svelte";
     import { formatAspectRatio, formatBytes, formatTimestamp } from "$lib/format";
+    import { Pin, PinOff } from "@lucide/svelte";
     import PaletteSection from "./PaletteSection.svelte";
     import FolderMembership from "./FolderMembership.svelte";
     import TagEditor from "./TagEditor.svelte";
+    import PinSwatches from "./PinSwatches.svelte";
 
     // The inspector renders the selection; it never owns it. Every mode below is
     // a branch of one union, so "3 assets and a folder" can't be reached.
@@ -370,6 +372,36 @@
         </label>
 
         {@render notesField()}
+
+        <div class="h-px bg-neutral-800"></div>
+
+        <!-- Pinning lives here as well as in the right-click menu, because the
+             inspector is where you land after clicking a folder — and "put this
+             in my sidebar" is a property of the folder you're looking at, not a
+             command you should have to remember to right-click for. -->
+        <div class="flex flex-col gap-2">
+            <span class={legendClass}>Sidebar</span>
+            <button
+                type="button"
+                onclick={() =>
+                    assetLibrary.setFolderPinned(folder.id, folder.pin_position === null)}
+                class="flex items-center gap-2 self-start rounded border border-neutral-800 px-2
+                       py-1 text-xs transition-colors hover:bg-neutral-800
+                       {folder.pin_position !== null
+                    ? 'text-neutral-200'
+                    : 'text-neutral-400'}"
+            >
+                {#if folder.pin_position !== null}
+                    <PinOff class="h-3.5 w-3.5" /> Unpin
+                {:else}
+                    <Pin class="h-3.5 w-3.5" /> Pin to sidebar
+                {/if}
+            </button>
+
+            {#if folder.pin_position !== null}
+                <PinSwatches folderId={folder.id} />
+            {/if}
+        </div>
 
         <div class="h-px bg-neutral-800"></div>
 

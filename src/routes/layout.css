@@ -251,6 +251,22 @@
     --chrome-h: 52px; /* every pane header — the fake titlebar's height */
     --rail-w: 52px; /* collapsed sidebar (section icons) */
     --wc-w: 138px; /* 3 × 46px window buttons (Windows metrics) */
+
+    /* Pinned-folder accents. The DB stores the TOKEN NAME ('blue'), never a hex
+       value, so retinting for a light theme happens here and nowhere else.
+       Eight hues, deliberately: a pin's colour exists to be recognised at a
+       glance in a 52px rail, and twenty near-neighbours would be no more
+       legible than the grey wall the colours are there to prevent. */
+    --pin-slate: oklch(0.7 0.03 250);
+    --pin-blue: oklch(0.68 0.16 255);
+    --pin-cyan: oklch(0.72 0.12 210);
+    --pin-emerald: oklch(0.72 0.15 160);
+    --pin-lime: oklch(0.78 0.16 130);
+    --pin-amber: oklch(0.78 0.15 75);
+    --pin-rose: oklch(0.68 0.18 15);
+    --pin-violet: oklch(0.68 0.17 300);
+    /* No accent chosen yet: pins still have to be legible undyed. */
+    --pin-none: oklch(0.55 0 0);
 }
 
 html,

@@ -50,6 +50,8 @@ pub fn run() {
             commands::delete_folders,
             commands::move_folder,
             commands::reorder_folder,
+            commands::set_folder_pinned,
+            commands::reorder_pin,
             commands::reorder_assets,
             commands::add_assets_to_folder,
             commands::move_assets_to_folder,

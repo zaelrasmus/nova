@@ -12,6 +12,14 @@ CREATE TABLE IF NOT EXISTS folders (
    order_by TEXT NOT NULL DEFAULT 'manual',
    is_ascending INTEGER NOT NULL DEFAULT 1, -- 0 = false, 1 = true
 
+   -- Sidebar pin accent. Stores a palette TOKEN NAME ('blue', 'emerald', …),
+   -- never a hex value, so a theme change retints every pinned folder without
+   -- rewriting the database. Validated against assets::PIN_COLORS on write.
+   color TEXT,
+   -- Rank among pinned folders (fractional, same scheme as `position`).
+   -- NULL = not pinned. One nullable column rather than a boolean + a rank,
+   -- because that makes "pinned without a place in the order" unrepresentable.
+   pin_position REAL,
 
    FOREIGN KEY(parent_id) REFERENCES folders(id) ON DELETE CASCADE
 );
@@ -212,6 +220,11 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_assets_hash
 CREATE INDEX IF NOT EXISTS idx_folder_contents ON assets_folders(folder_id, added_at);
 CREATE INDEX IF NOT EXISTS idx_folders_position ON assets_folders (folder_id, position); -- Serve a folder's assets already ordered by manual position
 CREATE INDEX IF NOT EXISTS idx_folders_tree ON folders(parent_id, position);
+-- Partial: the sidebar reads the pinned folders on every load, and pins are a
+-- handful of rows out of potentially thousands. Indexing only the non-NULLs
+-- keeps it tiny and makes the ordered read an index scan.
+CREATE INDEX IF NOT EXISTS idx_folders_pinned
+    ON folders(pin_position) WHERE pin_position IS NOT NULL;
 
 
 -- Sort indexes: one composite (sortcol, id) per exposed sort mode. The trailing

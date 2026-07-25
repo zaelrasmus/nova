@@ -1,26 +1,31 @@
 <script lang="ts">
-    import { FolderTree as FolderTreeIcon, Filter, Tag } from "@lucide/svelte";
-    import { layout, type RailSection } from "$lib/layout.svelte";
+    import { Layers, Filter, Tag, FolderTree as FolderTreeIcon } from "@lucide/svelte";
+    import { layout } from "$lib/layout.svelte";
     import { DRAG_SCROLL_ATTR } from "$lib/dragdrop.svelte";
     import FolderTree from "../FolderTree.svelte";
     import SavedFilters from "../SavedFilters.svelte";
+    import SystemViews from "../SystemViews.svelte";
+    import PinnedFolders from "../PinnedFolders.svelte";
 
     /**
-     * The collapsed sidebar: section icons, plus a hover flyout.
+     * The collapsed sidebar.
      *
-     * LAYOUT NOTE — a rail is not "the sidebar, narrower". A folder tree has no
-     * icon-only form (you can't read nesting at 52px), so the rail shows the
-     * sidebar's SECTIONS, and hovering one opens the real section in a floating
-     * panel beside it. That's what makes the rail usable rather than merely
-     * small: you can browse folders without giving the sidebar its width back.
+     *   ▤  Library        smart views (All assets, Uncategorized)
+     *   ⚗  Saved filters
+     *   🏷 Tags
+     *  ─────────────────  the one separator: chrome above, folders below
+     *   📁 Folder tree     hover to peek · click to expand
+     *   ▪  pinned folders  flex-1, scrolls
      *
-     * Click still expands the sidebar for good — hover is for a look, click is
-     * for a stay.
+     * WHY THIS SHAPE — a rail earns its keep through spatial memory: few icons,
+     * stable positions, each distinguishable. So the exhaustive folder tree stays
+     * behind ONE icon (hovering it shows every name at once, which beats hunting
+     * through identical glyphs), and only the user's own shortlist gets icons of
+     * its own, told apart by an accent colour.
      *
-     * The panel is `position: fixed`, not absolute: `.pane` is `overflow: hidden`
-     * (it has to be, or a wide tree would push the grid), which would clip any
-     * absolutely-positioned child. Fixed elements aren't clipped by an ancestor's
-     * overflow, so the flyout escapes the 52px column.
+     * Note the top group holds a LIBRARY glyph, not a folder one. Two folder
+     * icons meaning different things is exactly the discrimination problem the
+     * pins are designed to avoid.
      */
     interface Props {
         onManageTags: () => void;
@@ -28,22 +33,24 @@
 
     const { onManageTags }: Props = $props();
 
-    const SECTIONS: { id: RailSection; icon: typeof Tag; label: string }[] = [
-        { id: "folders", icon: FolderTreeIcon, label: "Folders" },
+    type Flyout = "library" | "filters" | "tags" | "tree";
+
+    const SECTIONS: { id: Flyout; icon: typeof Tag; label: string }[] = [
+        { id: "library", icon: Layers, label: "Library" },
         { id: "filters", icon: Filter, label: "Saved filters" },
         { id: "tags", icon: Tag, label: "Tags" },
     ];
 
-    /** Which section's flyout is open, if any. */
-    let hovered = $state<RailSection | null>(null);
+    /** Which flyout is open, if any. */
+    let hovered = $state<Flyout | null>(null);
     /** Viewport y of the flyout, aligned to the icon that opened it. */
     let flyoutTop = $state(0);
 
-    const FLYOUT_H = 420;
+    const FLYOUT_H = 460;
     const FLYOUT_W = 260;
 
-    // A grace period on close, so the diagonal move from the icon to the panel
-    // doesn't dismiss it. Without this the flyout is unusable with a mouse.
+    // A grace period on close, so the diagonal move from icon to panel doesn't
+    // dismiss it. Without this the flyout is unusable with a mouse.
     let closeTimer: ReturnType<typeof setTimeout> | null = null;
 
     function cancelClose() {
@@ -58,7 +65,7 @@
         closeTimer = setTimeout(() => (hovered = null), 150);
     }
 
-    function openFlyout(section: RailSection, anchor: HTMLElement) {
+    function openFlyout(section: Flyout, anchor: HTMLElement) {
         cancelClose();
         const rect = anchor.getBoundingClientRect();
         // Align to the icon, but never let the panel run off the bottom.
@@ -68,7 +75,9 @@
 
     $effect(() => cancelClose);
 
-    const label = $derived(SECTIONS.find((s) => s.id === hovered)?.label ?? "");
+    const label = $derived(
+        hovered === "tree" ? "Folders" : (SECTIONS.find((s) => s.id === hovered)?.label ?? ""),
+    );
 </script>
 
 <svelte:window
@@ -77,31 +86,66 @@
     }}
 />
 
-<nav class="flex flex-1 flex-col items-center gap-1 py-2" onpointerleave={scheduleClose}>
-    {#each SECTIONS as section (section.id)}
-        {@const Icon = section.icon}
+<!-- The leave handler is on the whole rail, not each button: moving between two
+     icons must not flicker the flyout closed and open again. -->
+<!-- svelte-ignore a11y_no_static_element_interactions -->
+<div class="flex min-h-0 flex-1 flex-col" onpointerleave={scheduleClose}>
+    <!-- Chrome: fixed destinations that never move. -->
+    <nav class="flex shrink-0 flex-col items-center gap-1 py-1">
+        {#each SECTIONS as section (section.id)}
+            {@const Icon = section.icon}
+            <button
+                type="button"
+                title={section.label}
+                aria-label={section.label}
+                aria-expanded={hovered === section.id}
+                onpointerenter={(e) => openFlyout(section.id, e.currentTarget)}
+                onfocus={(e) => openFlyout(section.id, e.currentTarget)}
+                onclick={() => {
+                    hovered = null;
+                    layout.expand();
+                }}
+                class="grid h-9 w-9 place-items-center rounded-md transition-colors
+                       {hovered === section.id
+                    ? 'bg-neutral-800 text-neutral-100'
+                    : 'text-neutral-500 hover:bg-neutral-800/60 hover:text-neutral-300'}"
+            >
+                <Icon class="h-4 w-4" strokeWidth={1.5} />
+            </button>
+        {/each}
+    </nav>
+
+    <div class="mx-3 my-1 h-px shrink-0 bg-neutral-800"></div>
+
+    <!-- Folder-land: the tree behind one icon, then the user's shortlist. -->
+    <div class="flex shrink-0 flex-col items-center pb-1">
         <button
             type="button"
-            title={section.label}
-            aria-label={section.label}
-            aria-expanded={hovered === section.id}
-            onpointerenter={(e) => openFlyout(section.id, e.currentTarget)}
-            onfocus={(e) => openFlyout(section.id, e.currentTarget)}
+            title="Folders"
+            aria-label="Folders"
+            aria-expanded={hovered === "tree"}
+            onpointerenter={(e) => openFlyout("tree", e.currentTarget)}
+            onfocus={(e) => openFlyout("tree", e.currentTarget)}
             onclick={() => {
                 hovered = null;
-                layout.showSection(section.id);
+                layout.expand();
             }}
             class="grid h-9 w-9 place-items-center rounded-md transition-colors
-                   {layout.railSection === section.id || hovered === section.id
+                   {hovered === 'tree'
                 ? 'bg-neutral-800 text-neutral-100'
                 : 'text-neutral-500 hover:bg-neutral-800/60 hover:text-neutral-300'}"
         >
-            <Icon class="h-4 w-4" />
+            <FolderTreeIcon class="h-4 w-4" strokeWidth={1.5} />
         </button>
-    {/each}
-</nav>
+    </div>
+
+    <PinnedFolders variant="rail" />
+</div>
 
 {#if hovered}
+    <!-- Fixed, not absolute: `.pane` is `overflow: hidden` (it has to be, or a
+         collapsing pane would paint over the grid), which would clip an
+         absolutely-positioned child. Fixed escapes the 52px column. -->
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <div
         class="fixed z-40 flex flex-col overflow-hidden rounded-r-lg rounded-bl-lg border
@@ -110,30 +154,29 @@
         onpointerenter={cancelClose}
         onpointerleave={scheduleClose}
     >
-        <div
-            class="flex shrink-0 items-center justify-between border-b border-neutral-800 px-3 py-2"
-        >
+        <div class="flex shrink-0 items-center justify-between border-b border-neutral-800 px-3 py-2">
             <span class="text-[11px] font-semibold uppercase tracking-wider text-neutral-500">
                 {label}
             </span>
             <button
                 type="button"
                 onclick={() => {
-                    const section = hovered;
                     hovered = null;
-                    if (section) layout.showSection(section);
+                    layout.expand();
                 }}
                 class="rounded px-1.5 py-0.5 text-[11px] text-neutral-500 transition-colors
                        hover:bg-neutral-800 hover:text-neutral-200"
             >
-                Pin
+                Pin open
             </button>
         </div>
 
         <!-- Same DRAG_SCROLL_ATTR as the expanded sidebar: a drag hovering the
              panel's edges still needs to be able to scroll it. -->
         <div class="flex-1 overflow-y-auto p-2 [scrollbar-width:thin]" {...{ [DRAG_SCROLL_ATTR]: "" }}>
-            {#if hovered === "folders"}
+            {#if hovered === "library"}
+                <SystemViews variant="expanded" />
+            {:else if hovered === "tree"}
                 <FolderTree />
             {:else if hovered === "filters"}
                 <SavedFilters />
