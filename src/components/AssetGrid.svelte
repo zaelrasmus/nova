@@ -119,10 +119,14 @@
     const isJustified = $derived(effectiveView === "justified");
 
     // ── Waterfall layout (TanStack lanes) ─────────────────────────────────────
+    // Seed values only — kept live by the setOptions $effect below. `untrack`
+    // makes "I want the current value, not a reactive dependency" explicit (and
+    // silences state_referenced_locally, which is right: these must NOT re-create
+    // the virtualizer).
     const virtualizer = createVirtualizer<HTMLDivElement, HTMLDivElement>({
-      count: assets.length,
+      count: untrack(() => assets.length),
       getScrollElement: () => scrollEl,
-      lanes: numColumns,
+      lanes: untrack(() => numColumns),
       estimateSize: (index) => {
         const a = assets[index];
         const ratio = a?.width && a?.height ? a.width / a.height : 1;

@@ -389,6 +389,7 @@
                     <!-- Content panels — each section gets its own Tabs.Content -->
                     <div class="flex flex-col flex-1 min-w-0 overflow-hidden h-full">
                         {#each SETTINGS_SECTIONS as section}
+                            {@const SectionComponent = sectionComponents[section.id]}
                             <Tabs.Content
                                 value={section.id}
                                 class="flex flex-col flex-1 overflow-hidden mt-0"
@@ -399,7 +400,7 @@
                                     </h2>
                                 </div>
                                 <div class="flex-1 overflow-y-auto px-6 py-5 text-neutral-200">
-                                    <svelte:component this={sectionComponents[section.id]} />
+                                    <SectionComponent />
                                 </div>
                             </Tabs.Content>
                         {/each}
