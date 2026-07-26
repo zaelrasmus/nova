@@ -1,3 +1,4 @@
+mod actions;
 mod assets;
 mod color;
 mod commands;
@@ -99,6 +100,15 @@ pub fn run() {
             commands::rename_saved_filter,
             commands::update_saved_filter,
             commands::delete_saved_filter,
+            commands::fetch_quick_actions,
+            commands::create_quick_action,
+            commands::update_quick_action,
+            commands::delete_quick_action,
+            commands::preview_action_run,
+            commands::run_quick_action,
+            commands::undo_action_run,
+            commands::fetch_action_runs,
+            commands::preview_rename,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

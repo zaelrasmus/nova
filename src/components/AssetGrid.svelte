@@ -64,6 +64,8 @@
         assetLibrary.loadSmartFolders();
         assetLibrary.loadSmartFolderGroups();
         assetLibrary.loadPins();
+        assetLibrary.loadQuickActions();
+        assetLibrary.loadActionRuns();
         assetLibrary.loadColorCoverage();
         assetLibrary.loadTags();
         assetLibrary.loadTagGroups();

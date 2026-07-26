@@ -1,3 +1,4 @@
+use crate::actions;
 use crate::assets::{
     self, AssetLightRow, AssetMetadata, ImportProgress, ImportResult, ProgressReporter,
 };
@@ -1146,4 +1147,137 @@ pub async fn apply_preference(key: String, _value: serde_json::Value) -> Result<
         }
     }
     Ok(())
+}
+
+// ── Quick actions ─────────────────────────────────────────────────────────────
+//
+// Note what these commands do NOT do: none of them derives the selection. The
+// asset ids come from the frontend, snapshotted at the moment the user
+// triggered the run. An action that changes what matches the current scope makes
+// assets disappear from the grid while it runs, so re-reading the selection
+// anywhere in here would apply the pipeline to a set the user never chose.
+
+#[instrument(skip_all)]
+#[tauri::command]
+pub async fn fetch_quick_actions(
+    state: tauri::State<'_, DbState>,
+) -> Result<Vec<actions::QuickAction>, AppError> {
+    let pool = state.acquire_pool().await?;
+    actions::fetch_quick_actions(&pool)
+        .await
+        .inspect_err(|e| tracing::error!(error = %e, "fetch_quick_actions failed"))
+        .map_err(AppError::from)
+}
+
+#[instrument(skip_all, fields(name = %draft.name))]
+#[tauri::command]
+pub async fn create_quick_action(
+    draft: actions::QuickActionDraft,
+    state: tauri::State<'_, DbState>,
+) -> Result<actions::QuickAction, AppError> {
+    let pool = state.acquire_pool().await?;
+    actions::create_quick_action(&pool, draft)
+        .await
+        .inspect_err(|e| tracing::error!(error = %e, "create_quick_action failed"))
+        .map_err(AppError::from)
+}
+
+#[instrument(skip_all)]
+#[tauri::command]
+pub async fn update_quick_action(
+    id: String,
+    draft: actions::QuickActionDraft,
+    state: tauri::State<'_, DbState>,
+) -> Result<(), AppError> {
+    let pool = state.acquire_pool().await?;
+    actions::update_quick_action(&pool, &id, draft)
+        .await
+        .inspect_err(|e| tracing::error!(error = %e, "update_quick_action failed"))
+        .map_err(AppError::from)
+}
+
+#[instrument(skip_all)]
+#[tauri::command]
+pub async fn delete_quick_action(
+    id: String,
+    state: tauri::State<'_, DbState>,
+) -> Result<(), AppError> {
+    let pool = state.acquire_pool().await?;
+    actions::delete_quick_action(&pool, &id)
+        .await
+        .inspect_err(|e| tracing::error!(error = %e, "delete_quick_action failed"))
+        .map_err(AppError::from)
+}
+
+/// The dry run behind the confirmation dialog. Read-only.
+#[instrument(skip_all, fields(count = asset_ids.len()))]
+#[tauri::command]
+pub async fn preview_action_run(
+    action_id: String,
+    asset_ids: Vec<String>,
+    state: tauri::State<'_, DbState>,
+) -> Result<actions::RunPreview, AppError> {
+    let pool = state.acquire_pool().await?;
+    actions::preview_run(&pool, &action_id, &asset_ids)
+        .await
+        .inspect_err(|e| tracing::error!(error = %e, "preview_action_run failed"))
+        .map_err(AppError::from)
+}
+
+#[instrument(skip_all, fields(count = asset_ids.len()))]
+#[tauri::command]
+pub async fn run_quick_action(
+    action_id: String,
+    asset_ids: Vec<String>,
+    state: tauri::State<'_, DbState>,
+) -> Result<actions::RunSummary, AppError> {
+    let pool = state.acquire_pool().await?;
+    actions::run_action(&pool, &action_id, &asset_ids)
+        .await
+        .inspect_err(|e| tracing::error!(error = %e, "run_quick_action failed"))
+        .map_err(AppError::from)
+}
+
+#[instrument(skip_all)]
+#[tauri::command]
+pub async fn undo_action_run(
+    run_id: String,
+    state: tauri::State<'_, DbState>,
+) -> Result<actions::UndoSummary, AppError> {
+    let pool = state.acquire_pool().await?;
+    actions::undo_run(&pool, &run_id)
+        .await
+        .inspect_err(|e| tracing::error!(error = %e, "undo_action_run failed"))
+        .map_err(AppError::from)
+}
+
+/// Run history, newest first. Read on connect so an undo offer survives a reload
+/// rather than living only in the toast that announced it.
+#[instrument(skip_all)]
+#[tauri::command]
+pub async fn fetch_action_runs(
+    state: tauri::State<'_, DbState>,
+) -> Result<Vec<actions::ActionRun>, AppError> {
+    let pool = state.acquire_pool().await?;
+    actions::fetch_recent_runs(&pool)
+        .await
+        .inspect_err(|e| tracing::error!(error = %e, "fetch_action_runs failed"))
+        .map_err(AppError::from)
+}
+
+/// Live rename preview for the pattern box. Read-only, and safe to call on
+/// every keystroke — a bad pattern comes back as `error`, not as a failure.
+#[instrument(skip_all, fields(count = asset_ids.len()))]
+#[tauri::command]
+pub async fn preview_rename(
+    step: actions::Step,
+    asset_ids: Vec<String>,
+    limit: usize,
+    state: tauri::State<'_, DbState>,
+) -> Result<actions::RenamePreview, AppError> {
+    let pool = state.acquire_pool().await?;
+    actions::preview_rename(&pool, &step, &asset_ids, limit)
+        .await
+        .inspect_err(|e| tracing::error!(error = %e, "preview_rename failed"))
+        .map_err(AppError::from)
 }

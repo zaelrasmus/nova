@@ -10,6 +10,7 @@
     import { PanelLeft, PanelRight, Settings, Download } from "@lucide/svelte";
 
     import { assetLibrary, type ManifestScope } from "$lib/assets.svelte";
+    import { runAction } from "../components/actions/run";
     import { dropzone } from "$lib/dropzone.svelte";
     import type { DropTarget } from "$lib/droptarget";
     import { drag, DRAG_SCROLL_ATTR } from "$lib/dragdrop.svelte";
@@ -324,6 +325,18 @@
         const el = e.target as HTMLElement | null;
         if (el?.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(el?.tagName ?? "")) return;
         if (!e.ctrlKey && !e.metaKey) return;
+
+        // Ctrl+Shift+1..9 runs the action bound to that digit. Checked before the
+        // unshifted bindings because `e.key` is the digit either way and only the
+        // modifier tells them apart.
+        if (e.shiftKey && /^[1-9]$/.test(e.key)) {
+            const action = assetLibrary.quickActions.find((a) => a.shortcut === +e.key);
+            if (action) {
+                e.preventDefault();
+                void runAction(action);
+            }
+            return;
+        }
 
         if (e.key === "b") {
             e.preventDefault();

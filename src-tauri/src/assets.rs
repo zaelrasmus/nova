@@ -277,9 +277,10 @@ impl ColorFilter {
 /// Trimming them to `Imported`/`Creation`/`Modified` would break that symmetry
 /// for a style rule.
 #[allow(clippy::enum_variant_names)]
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum DateField {
+    #[default]
     ImportedDate,
     CreationDate,
     ModifiedDate,
@@ -1822,7 +1823,7 @@ fn blank_to_null(raw: &str) -> Option<String> {
 /// path separators and control characters would render as garbage and would
 /// break a future "export under the display name". An all-whitespace name is
 /// rejected outright — a nameless row is unreadable in every list that shows it.
-fn clean_name(raw: &str) -> Result<String> {
+pub(crate) fn clean_name(raw: &str) -> Result<String> {
     let cleaned: String = raw
         .chars()
         .filter(|c| !c.is_control() && !matches!(c, '/' | '\\'))
@@ -2698,6 +2699,31 @@ pub async fn move_folder(pool: &SqlitePool, id: &str, new_parent_id: Option<&str
     Ok(())
 }
 
+// ── Composable mutations ─────────────────────────────────────────────────────
+//
+// Each mutation below exists twice, on purpose:
+//
+//   `foo(pool, …)`    — the complete unit of work. Opens its own transaction,
+//                       commits, then runs the post-commit side effects (the
+//                       reindex, which is deliberately non-fatal). A Tauri
+//                       command calls this one.
+//   `foo_in(conn, …)` — the SQL alone, inside a transaction the CALLER owns,
+//                       with no side effects whatsoever.
+//
+// A transaction boundary is a claim about the USE CASE, not about the data
+// operation. One command is one atomic act, so owning the boundary is right for
+// the outer form; a quick action sequences several of these and needs them to
+// commit or fail as one, so it needs the inner form.
+//
+// `move_assets_to_folder` is the evidence this split was already overdue: it
+// exists as its own function purely because add + remove could not share a
+// transaction from a caller, and every future "X and Y together" would have
+// needed the same hand-fusing.
+//
+// The contract for an `_in` function is SQL and nothing else — no `begin()` (it
+// has no pool to begin from, so the signature makes that unrepresentable), no
+// reindex, and no logging of a commit that hasn't happened yet.
+
 /// Add assets to a folder, appended after its existing members. `INSERT OR IGNORE`
 /// makes re-adding an already-present asset a no-op (keeps its current position).
 #[instrument(skip(pool, asset_ids), fields(count = asset_ids.len()))]
@@ -2713,7 +2739,7 @@ pub async fn add_assets_to_folder(
         .begin()
         .await
         .context("Failed to begin membership transaction")?;
-    link_assets(&mut tx, folder_id, asset_ids).await?;
+    add_assets_to_folder_in(&mut tx, folder_id, asset_ids).await?;
     tx.commit()
         .await
         .context("Failed to commit membership transaction")?;
@@ -2732,11 +2758,10 @@ async fn reindex_membership(pool: &SqlitePool, asset_ids: &[String]) {
 
 /// Append assets to a folder inside a caller-owned transaction.
 ///
-/// Split out of `add_assets_to_folder` so a MOVE can add and remove atomically.
 /// `INSERT OR IGNORE` keeps an already-present asset at the position it has, so
 /// re-adding never reshuffles a folder the user has arranged by hand.
-async fn link_assets(
-    tx: &mut sqlx::SqliteConnection,
+pub(crate) async fn add_assets_to_folder_in(
+    conn: &mut sqlx::SqliteConnection,
     folder_id: &str,
     asset_ids: &[String],
 ) -> Result<()> {
@@ -2744,7 +2769,7 @@ async fn link_assets(
         "SELECT MAX(position) FROM assets_folders WHERE folder_id = ?",
     )
     .bind(folder_id)
-    .fetch_one(&mut *tx)
+    .fetch_one(&mut *conn)
     .await
     .context("Failed to compute membership position")?
     .map(|m| m + 1.0)
@@ -2757,10 +2782,57 @@ async fn link_assets(
         .bind(folder_id)
         .bind(id)
         .bind(position)
-        .execute(&mut *tx)
+        .execute(&mut *conn)
         .await
         .context("Failed to add asset to folder")?;
         position += 1.0;
+    }
+    Ok(())
+}
+
+/// Drop folder membership inside a caller-owned transaction.
+///
+/// Chunked, unlike the single statement this replaced: a quick action can run
+/// over a Ctrl+A selection, and SQLite caps bound parameters at 32766.
+pub(crate) async fn remove_assets_from_folder_in(
+    conn: &mut sqlx::SqliteConnection,
+    folder_id: &str,
+    asset_ids: &[String],
+) -> Result<()> {
+    for chunk in asset_ids.chunks(IDS_PER_QUERY) {
+        let mut qb = QueryBuilder::new("DELETE FROM assets_folders WHERE folder_id = ");
+        qb.push_bind(folder_id);
+        qb.push(" AND asset_id IN (");
+        let mut separated = qb.separated(", ");
+        for id in chunk {
+            separated.push_bind(id);
+        }
+        qb.push(")");
+        qb.build()
+            .execute(&mut *conn)
+            .await
+            .context("Failed to remove assets from folder")?;
+    }
+    Ok(())
+}
+
+/// Move assets between folders inside a caller-owned transaction.
+///
+/// Same `source == target` no-op as the outer form: it's a drag the user
+/// aborted onto its own origin, and a step configured that way is not an error
+/// either.
+pub(crate) async fn move_assets_to_folder_in(
+    conn: &mut sqlx::SqliteConnection,
+    source: Option<&str>,
+    target: &str,
+    asset_ids: &[String],
+) -> Result<()> {
+    if source == Some(target) {
+        return Ok(());
+    }
+    add_assets_to_folder_in(conn, target, asset_ids).await?;
+    if let Some(source) = source {
+        remove_assets_from_folder_in(conn, source, asset_ids).await?;
     }
     Ok(())
 }
@@ -2791,22 +2863,7 @@ pub async fn move_assets_to_folder(
         .await
         .context("Failed to begin move transaction")?;
 
-    link_assets(&mut tx, target, asset_ids).await?;
-
-    if let Some(source) = source {
-        let mut qb = QueryBuilder::new("DELETE FROM assets_folders WHERE folder_id = ");
-        qb.push_bind(source);
-        qb.push(" AND asset_id IN (");
-        let mut separated = qb.separated(", ");
-        for id in asset_ids {
-            separated.push_bind(id);
-        }
-        qb.push(")");
-        qb.build()
-            .execute(&mut *tx)
-            .await
-            .context("Failed to remove assets from the source folder")?;
-    }
+    move_assets_to_folder_in(&mut tx, source, target, asset_ids).await?;
 
     tx.commit()
         .await
@@ -2825,18 +2882,14 @@ pub async fn remove_assets_from_folder(
     if asset_ids.is_empty() {
         return Ok(());
     }
-    let mut qb = QueryBuilder::new("DELETE FROM assets_folders WHERE folder_id = ");
-    qb.push_bind(folder_id);
-    qb.push(" AND asset_id IN (");
-    let mut separated = qb.separated(", ");
-    for id in asset_ids {
-        separated.push_bind(id);
-    }
-    qb.push(")");
-    qb.build()
-        .execute(pool)
+    let mut tx = pool
+        .begin()
         .await
-        .context("Failed to remove assets from folder")?;
+        .context("Failed to begin membership transaction")?;
+    remove_assets_from_folder_in(&mut tx, folder_id, asset_ids).await?;
+    tx.commit()
+        .await
+        .context("Failed to commit membership transaction")?;
 
     reindex_membership(pool, asset_ids).await;
     Ok(())

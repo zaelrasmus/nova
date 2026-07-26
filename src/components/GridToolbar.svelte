@@ -1,6 +1,7 @@
 <script lang="ts">
     import { SlidersHorizontal } from "@lucide/svelte";
     import SortControl from "./SortControl.svelte";
+    import QuickActionsMenu from "./actions/QuickActionsMenu.svelte";
     import { settings } from "../routes/settings.svelte";
     import { assetLibrary } from "$lib/assets.svelte";
     import { layout } from "$lib/layout.svelte";
@@ -48,6 +49,9 @@
             <span class="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-blue-500"></span>
         {/if}
     </button>
+
+    <!-- The verb, next to the controls that also act on the current view. -->
+    <QuickActionsMenu />
 
     <SortControl />
 

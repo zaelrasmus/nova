@@ -316,22 +316,33 @@ pub async fn assign_tag(pool: &SqlitePool, tag_id: &str, asset_ids: &[String]) -
     if asset_ids.is_empty() {
         return Ok(());
     }
-    let ids = unique_ids(asset_ids);
     let mut tx = pool.begin().await.context("Failed to begin tag assignment")?;
+    assign_tag_in(&mut tx, tag_id, asset_ids).await?;
+    tx.commit().await.context("Failed to commit tag assignment")?;
+
+    if let Err(e) = crate::search::reindex_assets(pool, asset_ids).await {
+        tracing::warn!(error = %e, "Reindex after tag assign failed (non-fatal)");
+    }
+    Ok(())
+}
+
+/// Apply a tag inside a caller-owned transaction. See the `_in` contract in
+/// `assets.rs`: SQL only, no transaction of its own and no reindex.
+pub(crate) async fn assign_tag_in(
+    conn: &mut sqlx::SqliteConnection,
+    tag_id: &str,
+    asset_ids: &[String],
+) -> Result<()> {
+    let ids = unique_ids(asset_ids);
     for chunk in ids.chunks(IDS_PER_QUERY) {
         let mut qb = QueryBuilder::new("INSERT OR IGNORE INTO assets_tags (asset_id, tag_id) ");
         qb.push_values(chunk, |mut b, id| {
             b.push_bind(*id).push_bind(tag_id);
         });
         qb.build()
-            .execute(&mut *tx)
+            .execute(&mut *conn)
             .await
             .context("Failed to assign tag")?;
-    }
-    tx.commit().await.context("Failed to commit tag assignment")?;
-
-    if let Err(e) = crate::search::reindex_assets(pool, asset_ids).await {
-        tracing::warn!(error = %e, "Reindex after tag assign failed (non-fatal)");
     }
     Ok(())
 }
@@ -342,8 +353,23 @@ pub async fn unassign_tag(pool: &SqlitePool, tag_id: &str, asset_ids: &[String])
     if asset_ids.is_empty() {
         return Ok(());
     }
-    let ids = unique_ids(asset_ids);
     let mut tx = pool.begin().await.context("Failed to begin tag removal")?;
+    unassign_tag_in(&mut tx, tag_id, asset_ids).await?;
+    tx.commit().await.context("Failed to commit tag removal")?;
+
+    if let Err(e) = crate::search::reindex_assets(pool, asset_ids).await {
+        tracing::warn!(error = %e, "Reindex after tag unassign failed (non-fatal)");
+    }
+    Ok(())
+}
+
+/// Remove a tag inside a caller-owned transaction. Never touches the tag row.
+pub(crate) async fn unassign_tag_in(
+    conn: &mut sqlx::SqliteConnection,
+    tag_id: &str,
+    asset_ids: &[String],
+) -> Result<()> {
+    let ids = unique_ids(asset_ids);
     for chunk in ids.chunks(IDS_PER_QUERY) {
         let mut qb = QueryBuilder::new("DELETE FROM assets_tags WHERE tag_id = ");
         qb.push_bind(tag_id).push(" AND asset_id IN (");
@@ -353,14 +379,9 @@ pub async fn unassign_tag(pool: &SqlitePool, tag_id: &str, asset_ids: &[String])
         }
         qb.push(")");
         qb.build()
-            .execute(&mut *tx)
+            .execute(&mut *conn)
             .await
             .context("Failed to remove tag")?;
-    }
-    tx.commit().await.context("Failed to commit tag removal")?;
-
-    if let Err(e) = crate::search::reindex_assets(pool, asset_ids).await {
-        tracing::warn!(error = %e, "Reindex after tag unassign failed (non-fatal)");
     }
     Ok(())
 }

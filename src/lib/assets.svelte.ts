@@ -5,6 +5,16 @@ import { SvelteMap } from "svelte/reactivity";
 import { thumbHashToDataURL } from "thumbhash";
 import { selection } from "./selection.svelte";
 import { fromRuleTree, isActive, toRuleTree, type RuleNode } from "./rules";
+import type {
+  ActionRun,
+  QuickAction,
+  QuickActionDraft,
+  RenamePreview,
+  RunPreview,
+  RunSummary,
+  Step,
+  UndoSummary,
+} from "./actions";
 
 export interface AssetLightRow {
   id: string;
@@ -1618,6 +1628,103 @@ class AssetLibrary {
   /** A few of a rule set's current matches, for the sidebar preview. */
   previewMatches(rules: RuleNode, limit = 9): Promise<AssetLightRow[]> {
     return invoke<AssetLightRow[]>("preview_matches", { rules, limit });
+  }
+
+  // ── Quick actions ─────────────────────────────────────────────────────────
+
+  quickActions = $state<QuickAction[]>([]);
+  /** Run history, newest first. Backs the menu's "Undo" entry. */
+  actionRuns = $state<ActionRun[]>([]);
+
+  /** tag id -> name, for rendering steps that reference tags by id. */
+  get tagNames(): ReadonlyMap<string, string> {
+    return new Map(this.tags.map((t) => [t.id, t.name]));
+  }
+
+  async loadQuickActions(): Promise<void> {
+    try {
+      this.quickActions = await invoke<QuickAction[]>("fetch_quick_actions");
+    } catch (e) {
+      console.error("Failed to load quick actions:", e);
+      this.quickActions = [];
+    }
+  }
+
+  async loadActionRuns(): Promise<void> {
+    try {
+      this.actionRuns = await invoke<ActionRun[]>("fetch_action_runs");
+    } catch (e) {
+      console.error("Failed to load the run history:", e);
+      this.actionRuns = [];
+    }
+  }
+
+  async createQuickAction(draft: QuickActionDraft): Promise<void> {
+    await invoke<QuickAction>("create_quick_action", { draft });
+    await this.loadQuickActions();
+  }
+
+  async updateQuickAction(id: string, draft: QuickActionDraft): Promise<void> {
+    await invoke("update_quick_action", { id, draft });
+    await this.loadQuickActions();
+  }
+
+  async deleteQuickAction(id: string): Promise<void> {
+    await invoke("delete_quick_action", { id });
+    await this.loadQuickActions();
+    // A run outlives the action that produced it (ON DELETE SET NULL), so the
+    // history is still there and still undoable — but its `action_id` changed.
+    await this.loadActionRuns();
+  }
+
+  /** The dry run behind the confirmation dialog. Never mutates. */
+  previewActionRun(actionId: string, assetIds: string[]): Promise<RunPreview> {
+    return invoke<RunPreview>("preview_action_run", { actionId, assetIds });
+  }
+
+  /**
+   * Render a rename step against real assets, for the editor's pattern box.
+   *
+   * Safe to call on every keystroke: a half-typed pattern comes back as
+   * `error`, not as a rejected promise.
+   */
+  previewRename(step: Step, assetIds: string[], limit = 3): Promise<RenamePreview> {
+    return invoke<RenamePreview>("preview_rename", { step, assetIds, limit });
+  }
+
+  /**
+   * Apply an action to a selection snapshot.
+   *
+   * `assetIds` is passed in by the caller and never read from `selection` here:
+   * the ids must be the ones the user saw when they triggered the run, not the
+   * ones that survive whatever the run itself does to the current view.
+   */
+  async runQuickAction(actionId: string, assetIds: string[]): Promise<RunSummary> {
+    const summary = await invoke<RunSummary>("run_quick_action", { actionId, assetIds });
+    await this.#afterActionWrite();
+    return summary;
+  }
+
+  async undoActionRun(runId: string): Promise<UndoSummary> {
+    const summary = await invoke<UndoSummary>("undo_action_run", { runId });
+    await this.#afterActionWrite();
+    return summary;
+  }
+
+  /**
+   * Refresh what a run can have changed.
+   *
+   * A step can now move assets between folders, so the manifest is re-streamed
+   * whenever the current view is anything NARROWER than the whole library — a
+   * folder can lose members, Uncategorized can gain them, and a smart folder's
+   * rules can reference the tags just edited. In unfiltered "All" nothing can
+   * leave the view, so the common "tag while browsing everything" path still
+   * doesn't re-stream a 100k-asset library.
+   */
+  async #afterActionWrite(): Promise<void> {
+    await this.loadTags();
+    await this.loadActionRuns();
+    if (this.scope.kind !== "all" || this.hasFilters) await this.reload();
   }
 
   /** Add assets to a folder; reload the manifest if the change affects the view. */

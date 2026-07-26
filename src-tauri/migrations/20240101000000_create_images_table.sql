@@ -334,3 +334,82 @@ CREATE VIRTUAL TABLE IF NOT EXISTS search_index USING fts5(
     tag_text,
     tokenize = 'trigram'
 );
+
+-- ── Quick Actions ────────────────────────────────────────────────────────────
+--
+-- A quick action is a MACRO: a named, ordered pipeline of mutation steps applied
+-- to a snapshotted selection.
+--
+-- Where a smart folder is a PLACE and a saved filter is a LENS, an action is a
+-- VERB — it changes assets rather than describing them. That's why it lives in
+-- the grid toolbar (with search, filter and sort, which also act on the current
+-- view) and never in the sidebar, which is navigation.
+--
+-- `steps_json` is a document for the same reason `rule_sets.query_json` is: the
+-- Rust enum IS the step language, serde round-trips it for free, and the wire
+-- shape is pinned by tests. A normalised steps/step_values pair would need a
+-- hand-written encode/decode/validate layer kept in sync by discipline alone,
+-- and its `value TEXT` column would be untyped either way.
+CREATE TABLE IF NOT EXISTS quick_actions (
+    id TEXT PRIMARY KEY NOT NULL UNIQUE,
+    name TEXT NOT NULL,
+    -- Lucide icon name, so the menu shows intent before the label is read.
+    icon TEXT,
+    -- Palette TOKEN ('blue', 'emerald', …), never a hex value — same convention
+    -- as folders.color, so a theme change retints without rewriting rows.
+    color TEXT,
+    -- 1..9, bound to Ctrl+Shift+<n>. NULL = no shortcut.
+    shortcut INTEGER,
+    position REAL NOT NULL DEFAULT 0,
+    steps_json TEXT NOT NULL,
+    -- Bumped when the step language changes shape. An action written by a newer
+    -- Nova must refuse to run rather than silently drop a step it cannot parse:
+    -- a macro that quietly does less than it says is worse than one that stops.
+    version INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+-- Two actions can never claim one chord. The conflict rule is "you can't",
+-- enforced here rather than left to whichever keydown handler registers first.
+-- PARTIAL because SQLite treats NULLs as distinct: unbound actions don't collide.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_quick_actions_shortcut
+    ON quick_actions (shortcut) WHERE shortcut IS NOT NULL;
+
+-- One row per EXECUTION. Gives undo something to name in the toast ("Tagged
+-- 4,231 assets · Undo") and lets the log be pruned by age without parsing
+-- payloads.
+CREATE TABLE IF NOT EXISTS action_runs (
+    id TEXT PRIMARY KEY NOT NULL UNIQUE,
+    -- ON DELETE SET NULL, not CASCADE: deleting an action must not destroy the
+    -- ability to undo a run of it. The run already happened and its inverse is
+    -- self-contained, so it outlives the definition that produced it.
+    action_id TEXT REFERENCES quick_actions(id) ON DELETE SET NULL,
+    -- The name AS IT WAS when it ran. Denormalised on purpose — renaming an
+    -- action must not retitle history.
+    name TEXT NOT NULL,
+    ran_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    asset_count INTEGER NOT NULL DEFAULT 0,
+    -- 0 when the inverse exceeded the payload budget. Stored rather than derived
+    -- from "has no undo rows", because that would be ambiguous: a run where every
+    -- asset already carried the tag has an empty inverse and IS undoable (as a
+    -- no-op). This distinguishes "nothing to undo" from "we declined to record".
+    is_undoable INTEGER NOT NULL DEFAULT 1
+);
+
+CREATE INDEX IF NOT EXISTS idx_action_runs_recent ON action_runs (ran_at DESC);
+
+-- The inverse of ONE step, as data.
+--
+-- Deliberately not a before/after snapshot of each asset. The inverse of "add
+-- tag t to 10,000 assets" is "remove t from the ids that did not already have
+-- it" — an id list, not a copy of 10,000 rows. Cost is proportional to the
+-- DELTA, which is what keeps a large run measured in hundreds of kilobytes and
+-- lets the log live on disk instead of in memory.
+CREATE TABLE IF NOT EXISTS action_undo (
+    run_id TEXT NOT NULL REFERENCES action_runs(id) ON DELETE CASCADE,
+    -- Position in the pipeline. Undo walks these DESCENDING, because the inverse
+    -- of (A then B) is (B⁻¹ then A⁻¹).
+    seq INTEGER NOT NULL,
+    payload_json TEXT NOT NULL,
+    PRIMARY KEY (run_id, seq)
+) WITHOUT ROWID;
