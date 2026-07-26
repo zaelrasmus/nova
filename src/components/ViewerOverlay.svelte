@@ -212,9 +212,19 @@
 
 {#if viewer.isOpen && current}
     <!-- QuickLook is absolute → stays within the grid column. Fullscreen is fixed
-         → covers the window. -->
+         → covers the window.
+
+         The two need DIFFERENT depths, and the reason is the point of QuickLook:
+         it stays inside the grid so the sidebar and inspector remain usable, so a
+         sidebar flyout (z-85) has to sit ON TOP of it. Fullscreen is the opposite
+         — it's modal, and covers everything including the menus.
+
+         App depth scale: 60 QuickLook · 85 rail flyouts · 90 context menus ·
+         100 fullscreen viewer · 110 drag previews. -->
     <div
-        class="z-[80] {fullscreen ? 'fixed inset-0 bg-black' : 'absolute inset-0 bg-black/90'}"
+        class={fullscreen
+            ? "fixed inset-0 z-[100] bg-black"
+            : "absolute inset-0 z-[60] bg-black/90"}
     >
         {#if isImage}
             <!-- Pan/zoom stage. Click the empty area (not the image) to close;

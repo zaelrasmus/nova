@@ -23,9 +23,15 @@
      */
     interface Props {
         variant: "rail" | "expanded";
+        /**
+         * A pin's flyout just opened. The rail uses this to close its own
+         * section flyout — only one panel may occupy the space beside the rail,
+         * or the two overlap and the newer one is unreadable.
+         */
+        onFlyoutOpen?: () => void;
     }
 
-    const { variant }: Props = $props();
+    const { variant, onFlyoutOpen }: Props = $props();
 
     const pins = $derived(assetLibrary.pinned);
     const scope = $derived(assetLibrary.scope);
@@ -91,6 +97,13 @@
             folder,
             top: Math.max(8, Math.min(rect.top - 4, window.innerHeight - FLYOUT_H - 8)),
         };
+        onFlyoutOpen?.();
+    }
+
+    /** Close from outside, when the rail's own flyout is taking over the space. */
+    export function closeFlyout() {
+        cancelClose();
+        flyout = null;
     }
 
     $effect(() => cancelClose);
@@ -285,7 +298,8 @@
          absolutely-positioned child inside the 52px rail. -->
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <div
-        class="fixed z-40 flex flex-col overflow-hidden rounded-r-lg rounded-bl-lg border
+        data-rail-flyout
+        class="fixed z-[85] flex flex-col overflow-hidden rounded-r-lg rounded-bl-lg border
                border-neutral-800 bg-neutral-900 shadow-2xl"
         style="left: var(--rail-w); top: {flyout.top}px; width: {FLYOUT_W}px;
                max-height: {FLYOUT_H}px"

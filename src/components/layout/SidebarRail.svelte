@@ -14,8 +14,8 @@
      *   ⚗  Saved filters
      *   🏷 Tags
      *  ─────────────────  the one separator: chrome above, folders below
-     *   📁 Folder tree     hover to peek · click to expand
-     *   ▪  pinned folders  flex-1, scrolls
+     *   📁 Folder tree     hover to peek · click to keep the peek open
+     *   ▪  pinned folders  flex-1, scrolls; each one peeks at its own subtree
      *
      * WHY THIS SHAPE — a rail earns its keep through spatial memory: few icons,
      * stable positions, each distinguishable. So the exhaustive folder tree stays
@@ -45,6 +45,18 @@
     let hovered = $state<Flyout | null>(null);
     /** Viewport y of the flyout, aligned to the icon that opened it. */
     let flyoutTop = $state(0);
+    /**
+     * The flyout was opened by a CLICK and stays until dismissed.
+     *
+     * Clicking a rail icon used to expand the sidebar, which was backwards:
+     * being in the rail is a choice the user made, and a click shouldn't undo
+     * it. Now hover peeks, click keeps that peek open, and expanding is its own
+     * explicit button in the flyout header.
+     */
+    let sticky = $state(false);
+
+    /** The pinned list, so its flyout can be dismissed when a section takes over. */
+    let pinsRef = $state<{ closeFlyout: () => void } | null>(null);
 
     const FLYOUT_H = 460;
     const FLYOUT_W = 260;
@@ -61,16 +73,37 @@
     }
 
     function scheduleClose() {
+        if (sticky) return; // a clicked-open panel outlives the pointer
         cancelClose();
         closeTimer = setTimeout(() => (hovered = null), 150);
     }
 
+    function dismiss() {
+        cancelClose();
+        sticky = false;
+        hovered = null;
+    }
+
     function openFlyout(section: Flyout, anchor: HTMLElement) {
         cancelClose();
+        // Hovering a DIFFERENT icon demotes a stuck panel back to a peek —
+        // otherwise one click would leave the rail permanently pinned open.
+        if (hovered !== section) sticky = false;
         const rect = anchor.getBoundingClientRect();
         // Align to the icon, but never let the panel run off the bottom.
         flyoutTop = Math.max(8, Math.min(rect.top - 4, window.innerHeight - FLYOUT_H - 8));
         hovered = section;
+        pinsRef?.closeFlyout();
+    }
+
+    /** Click: keep this peek open, or close it if it already is. */
+    function toggleSticky(section: Flyout, anchor: HTMLElement) {
+        if (hovered === section && sticky) {
+            dismiss();
+            return;
+        }
+        openFlyout(section, anchor);
+        sticky = true;
     }
 
     $effect(() => cancelClose);
@@ -82,14 +115,21 @@
 
 <svelte:window
     onkeydown={(e) => {
-        if (e.key === "Escape") hovered = null;
+        if (e.key === "Escape") dismiss();
+    }}
+    onclick={(e) => {
+        // A clicked-open panel ignores pointerleave, so it needs a click-away.
+        if (!sticky) return;
+        const el = e.target as HTMLElement | null;
+        if (el?.closest("[data-rail],[data-rail-flyout]")) return;
+        dismiss();
     }}
 />
 
 <!-- The leave handler is on the whole rail, not each button: moving between two
      icons must not flicker the flyout closed and open again. -->
 <!-- svelte-ignore a11y_no_static_element_interactions -->
-<div class="flex min-h-0 flex-1 flex-col" onpointerleave={scheduleClose}>
+<div class="flex min-h-0 flex-1 flex-col" data-rail onpointerleave={scheduleClose}>
     <!-- Chrome: fixed destinations that never move. -->
     <nav class="flex shrink-0 flex-col items-center gap-1 py-1">
         {#each SECTIONS as section (section.id)}
@@ -101,10 +141,7 @@
                 aria-expanded={hovered === section.id}
                 onpointerenter={(e) => openFlyout(section.id, e.currentTarget)}
                 onfocus={(e) => openFlyout(section.id, e.currentTarget)}
-                onclick={() => {
-                    hovered = null;
-                    layout.expand();
-                }}
+                onclick={(e) => toggleSticky(section.id, e.currentTarget)}
                 class="grid h-9 w-9 place-items-center rounded-md transition-colors
                        {hovered === section.id
                     ? 'bg-neutral-800 text-neutral-100'
@@ -126,10 +163,7 @@
             aria-expanded={hovered === "tree"}
             onpointerenter={(e) => openFlyout("tree", e.currentTarget)}
             onfocus={(e) => openFlyout("tree", e.currentTarget)}
-            onclick={() => {
-                hovered = null;
-                layout.expand();
-            }}
+            onclick={(e) => toggleSticky("tree", e.currentTarget)}
             class="grid h-9 w-9 place-items-center rounded-md transition-colors
                    {hovered === 'tree'
                 ? 'bg-neutral-800 text-neutral-100'
@@ -139,7 +173,17 @@
         </button>
     </div>
 
-    <PinnedFolders variant="rail" />
+    <!-- The two panels are mutually exclusive: they occupy the same strip beside
+         the rail, so whichever opens closes the other. -->
+    <PinnedFolders
+        bind:this={pinsRef}
+        variant="rail"
+        onFlyoutOpen={() => {
+            cancelClose();
+            sticky = false;
+            hovered = null;
+        }}
+    />
 </div>
 
 {#if hovered}
@@ -148,7 +192,8 @@
          absolutely-positioned child. Fixed escapes the 52px column. -->
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <div
-        class="fixed z-40 flex flex-col overflow-hidden rounded-r-lg rounded-bl-lg border
+        data-rail-flyout
+        class="fixed z-[85] flex flex-col overflow-hidden rounded-r-lg rounded-bl-lg border
                border-neutral-800 bg-neutral-900 shadow-2xl"
         style="left: var(--rail-w); top: {flyoutTop}px; width: {FLYOUT_W}px; max-height: {FLYOUT_H}px"
         onpointerenter={cancelClose}
@@ -158,16 +203,19 @@
             <span class="text-[11px] font-semibold uppercase tracking-wider text-neutral-500">
                 {label}
             </span>
+            <!-- The ONLY thing that gives the sidebar its width back. Expanding
+                 is a deliberate act now, not a side effect of clicking an icon. -->
             <button
                 type="button"
+                title="Expand the sidebar"
                 onclick={() => {
-                    hovered = null;
+                    dismiss();
                     layout.expand();
                 }}
                 class="rounded px-1.5 py-0.5 text-[11px] text-neutral-500 transition-colors
                        hover:bg-neutral-800 hover:text-neutral-200"
             >
-                Pin open
+                Expand
             </button>
         </div>
 
