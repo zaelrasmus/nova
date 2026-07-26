@@ -4,6 +4,7 @@ import { invoke, Channel } from "@tauri-apps/api/core";
 import { SvelteMap } from "svelte/reactivity";
 import { thumbHashToDataURL } from "thumbhash";
 import { selection } from "./selection.svelte";
+import { fromRuleTree, isActive, toRuleTree, type RuleNode } from "./rules";
 
 export interface AssetLightRow {
   id: string;
@@ -71,11 +72,16 @@ export function filenameStem(filename: string, extension: string): string {
 export type ManifestScope =
   | { kind: "all" }
   | { kind: "folder"; id: string }
-  | { kind: "uncategorized" };
+  | { kind: "uncategorized" }
+  /** A smart folder: a place whose membership is a query. See lib/rules.ts. */
+  | { kind: "smart"; id: string }
+  /** A group of smart folders, browsed as the union of its members. */
+  | { kind: "smart_group"; id: string };
 
 /** Do two scopes name the same place? Scopes are rebuilt per click, so `===` won't do. */
 export const sameScope = (a: ManifestScope, b: ManifestScope): boolean =>
-  a.kind === b.kind && (a.kind !== "folder" || a.id === (b as { id: string }).id);
+  a.kind === b.kind &&
+  (!("id" in a) || a.id === (b as { id: string }).id);
 
 export type OrderBy =
   | "imported_date"
@@ -84,7 +90,8 @@ export type OrderBy =
   | "filename"
   | "file_size"
   | "resolution"
-  | "manual";
+  | "manual"
+  | "added_date";
 
 export interface Sort {
   order_by: OrderBy;
@@ -94,9 +101,22 @@ export interface Sort {
 /** Mirrors Rust's DEFAULT_SORT — newest first. */
 export const DEFAULT_SORT: Sort = { order_by: "imported_date", is_ascending: false };
 
-/** Sort dropdown options, in display order. */
-export const ORDER_BY_LABELS: { value: OrderBy; label: string }[] = [
-  { value: "imported_date", label: "Date added" },
+/**
+ * Sort dropdown options, in display order.
+ *
+ * `imported_date` is "Date imported", NOT "Date added" — those became two
+ * different questions the moment folders could answer the second one precisely.
+ * Imported = when it entered the library; Added = when it was filed into THIS
+ * folder, which can be months later.
+ *
+ * `folderOnly` options are hidden outside a folder scope. They'd still work
+ * (both scope-relative sorts fall back to an asset-level column), but offering
+ * "Date added to folder" while browsing All assets promises a precision the
+ * fallback doesn't have.
+ */
+export const ORDER_BY_LABELS: { value: OrderBy; label: string; folderOnly?: true }[] = [
+  { value: "imported_date", label: "Date imported" },
+  { value: "added_date", label: "Date added to folder", folderOnly: true },
   { value: "creation_date", label: "Date created" },
   { value: "modified_date", label: "Date modified" },
   { value: "filename", label: "Name" },
@@ -484,15 +504,59 @@ export function shapeKey(shape: Shape | null): string {
 }
 
 /**
- * A named, reusable FilterSet. A saved filter is a LENS — it narrows whatever
- * scope you're currently in — so it has no parent, no sort and no place in the
- * folder tree. (A smart folder would be the opposite: a scope of its own.)
+ * A named, reusable rule set applied as a LENS — it narrows whatever scope
+ * you're currently in, so it has no sort and no place in the folder tree.
+ *
+ * Stored in `rule_sets` with `kind = 'filter'`. A smart folder is the same row
+ * with `kind = 'smart'`: same document, same compiler, different affordance.
  */
 export interface SavedFilter {
   id: string;
   name: string;
   position: number;
-  filters: FilterSet;
+  /** The stored rule tree. See lib/rules.ts. */
+  rules: RuleNode;
+}
+
+/**
+ * The same stored row as a `SavedFilter`, used as a PLACE.
+ *
+ * A smart folder owns a persisted sort (under `view_settings` key `smart:<id>`)
+ * and can be grouped and pinned; a filter owns none of that. That difference —
+ * place versus lens — is the whole reason both exist in the UI when they share
+ * one table, one document format and one compiler underneath.
+ */
+export interface SmartFolder {
+  id: string;
+  name: string;
+  notes: string | null;
+  group_id: string | null;
+  position: number;
+  rules: RuleNode;
+  color: PinColor | null;
+  pin_position: number | null;
+}
+
+/** Partial update; omitted fields are left alone. */
+export interface SmartFolderPatch {
+  name?: string;
+  notes?: string;
+  rules?: RuleNode;
+}
+
+/**
+ * A sidebar container for smart folders that is ALSO a place: clicking one
+ * browses the union of its members.
+ *
+ * It owns a sort (under `view_settings` key `smartgroup:<id>`) — every mode
+ * except manual, which a union of several independently-ordered folders has no
+ * answer for.
+ */
+export interface SmartFolderGroup {
+  id: string;
+  name: string;
+  notes: string | null;
+  position: number;
 }
 
 /**
@@ -513,6 +577,29 @@ export const PIN_COLORS = [
 ] as const;
 
 export type PinColor = (typeof PIN_COLORS)[number];
+
+/**
+ * Which kind of thing a pin points at. Mirrors `PinKind` in assets.rs, whose
+ * spelling is pinned by `pin_wire_tests` — it crosses three boundaries (the SQL
+ * literal, serde, and this file), so it is not a name to guess at.
+ */
+export type PinKind = "folder" | "smart";
+
+/**
+ * One entry in the sidebar's shortlist.
+ *
+ * Folders and smart folders share ONE order the user arranges freely, which is
+ * why this is a single list with a discriminant rather than two lists rendered
+ * back to back — those would interleave by accident of independent numbering
+ * rather than by choice.
+ */
+export interface PinnedItem {
+  kind: PinKind;
+  id: string;
+  name: string;
+  color: PinColor | null;
+  position: number;
+}
 
 export interface Folder {
   id: string;
@@ -662,6 +749,17 @@ class AssetLibrary {
   folders = $state<Folder[]>([]);
   /** Named filter combinations for this library, refreshed on library switch. */
   savedFilters = $state<SavedFilter[]>([]);
+  smartFolders = $state<SmartFolder[]>([]);
+  smartFolderGroups = $state<SmartFolderGroup[]>([]);
+
+  /**
+   * A rule tree that overrides the flat dimensions for the next query.
+   *
+   * Only set by applying a saved filter the bar can't draw. Cleared by every
+   * dimension change (see `setFilters`), so it can never linger as an invisible
+   * constraint the user has no control for.
+   */
+  #rulesOverride = $state<RuleNode | null>(null);
   /**
    * Every tag in the library with its usage count, alphabetical. Refreshed on
    * library switch and after any tag mutation, so usage counts and the inspector
@@ -805,7 +903,23 @@ class AssetLibrary {
           appendLive(chunk);
         }
       };
-      await invoke("stream_manifest", { query: { scope, filters, sort }, onChunk: channel });
+      // The one place the UI's flat dimensions become the rule tree the engine
+      // actually speaks. `#rulesOverride` wins when a saved filter said
+      // something the filter bar can't draw — see `applySavedFilter`.
+      // `$state.snapshot` before crossing the IPC boundary, as every other
+      // invoke in this file does: what goes over the wire must be plain data,
+      // not reactive proxies.
+      const plain = $state.snapshot(filters) as FilterSet;
+      const wire = {
+        rules: this.#rulesOverride
+          ? ($state.snapshot(this.#rulesOverride) as RuleNode)
+          : toRuleTree(plain),
+        text: plain.text,
+      };
+      await invoke("stream_manifest", {
+        query: { scope, filters: wire, sort },
+        onChunk: channel,
+      });
       // Swap in whatever streamed before the invoke resolved. Zero chunks is a
       // legitimate empty result set — the swap must still happen so a no-match
       // search shows empty rather than keeping stale rows. Late chunks now flow
@@ -879,6 +993,7 @@ class AssetLibrary {
   get hasFilters(): boolean {
     const f = this.filters;
     return (
+      (this.#rulesOverride !== null && isActive(this.#rulesOverride)) ||
       f.asset_types.length > 0 ||
       f.shape !== null ||
       f.date !== null ||
@@ -907,7 +1022,11 @@ class AssetLibrary {
    * blanked the grid on every keystroke (each load emptied `manifest` before
    * restreaming), which read as a black flash.
    */
-  setFilters(filters: FilterSet): Promise<void> {
+  setFilters(filters: FilterSet, rules: RuleNode | null = null): Promise<void> {
+    // Defaulting to null is what makes the flat dimensions authoritative: every
+    // control funnels through here, so touching any of them drops a tree the bar
+    // couldn't have produced rather than silently ANDing with it.
+    this.#rulesOverride = rules;
     return this.load(this.scope, this.sort, filters, { quiet: true });
   }
 
@@ -1002,21 +1121,42 @@ class AssetLibrary {
     }
   }
 
+  /** The active lens as the engine sees it: a tree, never the flat view model. */
+  #currentRules(): { rules: RuleNode | null; text: null } {
+    // `text` is deliberately null, not omitted: the live search box is a typed
+    // query, not a durable lens. It structurally can't reach storage now that
+    // it lives outside the tree, and sending null says so at the boundary too.
+    return { rules: this.#rulesOverride ?? toRuleTree($state.snapshot(this.filters)), text: null };
+  }
+
   /** Store the CURRENT filter set under `name`. */
   async saveCurrentFilters(name: string): Promise<void> {
-    await invoke("create_saved_filter", { name, filters: $state.snapshot(this.filters) });
+    await invoke("create_saved_filter", { name, filters: this.#currentRules() });
     await this.loadSavedFilters();
   }
 
   /**
    * Apply a saved filter to the current scope — it's a lens, so the scope and
-   * sort are untouched. The stored set is deep-copied so tweaking the filters
+   * sort are untouched. The stored tree is deep-copied so tweaking the filters
    * afterwards doesn't quietly rewrite the saved definition.
+   *
+   * A tree the filter bar can't display (nested groups, `none`, text
+   * conditions) is applied to the QUERY regardless — dropping conditions we
+   * can't draw would show more assets than the user asked for. The bar's own
+   * controls just read as empty until Phase 2's rule editor can show them.
    */
   applySavedFilter(id: string): Promise<void> {
     const saved = this.savedFilters.find((f) => f.id === id);
     if (!saved) return Promise.resolve();
-    return this.setFilters($state.snapshot(saved.filters));
+    const rules = $state.snapshot(saved.rules) as RuleNode;
+    const dimensions = fromRuleTree(rules);
+    // Representable: let the bar own it, so its controls show what's active and
+    // the user can adjust one dimension without losing the rest. Otherwise keep
+    // the tree as the override — the query must be exact even when the bar has
+    // no control that can display it.
+    return dimensions
+      ? this.setFilters({ ...emptyFilters(), ...dimensions })
+      : this.setFilters(emptyFilters(), rules);
   }
 
   async renameSavedFilter(id: string, name: string): Promise<void> {
@@ -1026,13 +1166,106 @@ class AssetLibrary {
 
   /** Overwrite a saved filter with whatever is active now. */
   async updateSavedFilter(id: string): Promise<void> {
-    await invoke("update_saved_filter", { id, filters: $state.snapshot(this.filters) });
+    await invoke("update_saved_filter", { id, filters: this.#currentRules() });
     await this.loadSavedFilters();
   }
 
   async deleteSavedFilter(id: string): Promise<void> {
     await invoke("delete_saved_filter", { id });
     await this.loadSavedFilters();
+  }
+
+  // ── Smart folders ──────────────────────────────────────────────────────────
+  //
+  // Same stored rows as saved filters, used as PLACES: a smart folder's tree
+  // becomes the scope predicate, so a lens still applies on top of it.
+
+  /** Refresh this library's smart folders. Non-fatal on failure. */
+  async loadSmartFolders(): Promise<void> {
+    try {
+      this.smartFolders = await invoke<SmartFolder[]>("fetch_smart_folders");
+    } catch (e) {
+      console.error("Failed to load smart folders:", e);
+      this.smartFolders = [];
+    }
+  }
+
+  async createSmartFolder(name: string, rules: RuleNode): Promise<SmartFolder> {
+    const created = await invoke<SmartFolder>("create_smart_folder", { name, rules });
+    await this.loadSmartFolders();
+    return created;
+  }
+
+  /**
+   * Patch a smart folder. Reloads the manifest when the edited folder is the
+   * one on screen — changing its rules changes what it contains, and leaving
+   * the old rows up would show assets that no longer belong here.
+   */
+  async updateSmartFolder(id: string, patch: SmartFolderPatch): Promise<void> {
+    await invoke("update_smart_folder", { id, patch });
+    await this.loadSmartFolders();
+    if (this.scope.kind === "smart" && this.scope.id === id) await this.reload();
+  }
+
+  /**
+   * Delete a smart folder, leaving it if we're standing in it.
+   *
+   * Same rule as deleting the folder you're browsing: the scope has to go
+   * somewhere, and "All assets" is the only place guaranteed to exist.
+   */
+  async deleteSmartFolder(id: string): Promise<void> {
+    await invoke("delete_smart_folder", { id });
+    await this.loadSmartFolders();
+    if (this.scope.kind === "smart" && this.scope.id === id) {
+      await this.setScope({ kind: "all" });
+    }
+  }
+
+  /** Live "Found N items" for the rule editor. Callers debounce. */
+  countMatching(rules: RuleNode): Promise<number> {
+    return invoke<number>("count_matching", { rules });
+  }
+
+  // ── Smart folder groups ────────────────────────────────────────────────────
+
+  async loadSmartFolderGroups(): Promise<void> {
+    try {
+      this.smartFolderGroups = await invoke<SmartFolderGroup[]>("fetch_smart_folder_groups");
+    } catch (e) {
+      console.error("Failed to load smart folder groups:", e);
+      this.smartFolderGroups = [];
+    }
+  }
+
+  async createSmartFolderGroup(name: string): Promise<void> {
+    await invoke("create_smart_folder_group", { name });
+    await this.loadSmartFolderGroups();
+  }
+
+  async renameSmartFolderGroup(id: string, name: string): Promise<void> {
+    await invoke("rename_smart_folder_group", { id, name });
+    await this.loadSmartFolderGroups();
+  }
+
+  /**
+   * Delete a group. Its members are ungrouped, never deleted — so this leaves
+   * the scope only when you were browsing the group itself.
+   */
+  async deleteSmartFolderGroup(id: string): Promise<void> {
+    await invoke("delete_smart_folder_group", { id });
+    await this.loadSmartFolderGroups();
+    await this.loadSmartFolders();
+    if (this.scope.kind === "smart_group" && this.scope.id === id) {
+      await this.setScope({ kind: "all" });
+    }
+  }
+
+  /** Move a smart folder into a group; `null` ungroups it. */
+  async setSmartFolderGroup(id: string, groupId: string | null): Promise<void> {
+    await invoke("set_smart_folder_group", { id, groupId });
+    await this.loadSmartFolders();
+    // A group's contents just changed, so its union did too.
+    if (this.scope.kind === "smart_group") await this.reload();
   }
 
   /** Change the sort for the CURRENT scope, persist it, and reload. */
@@ -1323,27 +1556,58 @@ class AssetLibrary {
   // or what a folder contains. `loadFolders` is the only refresh they need,
   // because pin state rides on the folder rows the sidebar already reads.
 
-  /** The pinned folders, in their user-defined order. */
-  get pinned(): Folder[] {
-    return this.folders
-      .filter((f) => f.pin_position !== null)
-      .sort((a, b) => (a.pin_position ?? 0) - (b.pin_position ?? 0));
+  /**
+   * The pinned list, in the user's order, across folders AND smart folders.
+   *
+   * Loaded rather than derived: it spans two tables, and merging them here would
+   * mean re-implementing the shared rank comparison the backend already does.
+   */
+  pins = $state<PinnedItem[]>([]);
+
+  async loadPins(): Promise<void> {
+    try {
+      this.pins = await invoke<PinnedItem[]>("fetch_pins");
+    } catch (e) {
+      console.error("Failed to load pins:", e);
+      this.pins = [];
+    }
   }
 
-  async setFolderPinned(id: string, pinned: boolean): Promise<void> {
-    await invoke("set_folder_pinned", { id, pinned });
-    await this.loadFolders();
+  async setPinned(kind: PinKind, id: string, pinned: boolean): Promise<void> {
+    await invoke("set_pinned", { kind, id, pinned });
+    await this.loadPins();
+    // The tree's pin badges and the smart folder list read from their own
+    // caches, so both need to hear about it.
+    if (kind === "folder") await this.loadFolders();
+    else await this.loadSmartFolders();
   }
 
-  /** Drag-to-reorder within the pinned list. `afterId: null` means first. */
-  async reorderPin(id: string, afterId: string | null): Promise<void> {
-    await invoke("reorder_pin", { id, afterId });
-    await this.loadFolders();
+  /** Drag-to-reorder across the whole pinned list. A null `after` means first. */
+  async reorderPin(
+    kind: PinKind,
+    id: string,
+    after: { kind: PinKind; id: string } | null,
+  ): Promise<void> {
+    await invoke("reorder_pin", {
+      kind,
+      id,
+      afterKind: after?.kind ?? null,
+      afterId: after?.id ?? null,
+    });
+    await this.loadPins();
   }
 
-  /** Set or clear a pin's accent. `null` clears it (sent as "" — see FolderPatch). */
-  async setFolderColor(id: string, color: PinColor | null): Promise<void> {
-    await this.updateFolder(id, { color: color ?? "" });
+  /** Set or clear a pin's accent. `null` clears it. */
+  async setPinColor(kind: PinKind, id: string, color: PinColor | null): Promise<void> {
+    await invoke("set_pin_color", { kind, id, color });
+    await this.loadPins();
+    if (kind === "folder") await this.loadFolders();
+    else await this.loadSmartFolders();
+  }
+
+  /** A few of a rule set's current matches, for the sidebar preview. */
+  previewMatches(rules: RuleNode, limit = 9): Promise<AssetLightRow[]> {
+    return invoke<AssetLightRow[]>("preview_matches", { rules, limit });
   }
 
   /** Add assets to a folder; reload the manifest if the change affects the view. */

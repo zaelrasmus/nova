@@ -49,7 +49,7 @@
     }
 
     function togglePin() {
-        void assetLibrary.setFolderPinned(folder.id, !pinned);
+        void assetLibrary.setPinned("folder", folder.id, !pinned);
         onclose();
     }
 </script>
@@ -102,7 +102,7 @@
              Picking one deliberately does NOT close the menu — trying two greens
              against each other is the normal way to choose. -->
         <div class="px-2 py-2">
-            <PinSwatches folderId={folder.id} />
+            <PinSwatches kind="folder" id={folder.id} />
         </div>
     {/if}
 

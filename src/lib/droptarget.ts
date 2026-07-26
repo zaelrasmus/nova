@@ -22,6 +22,16 @@ export const DROP_FOLDER_ATTR = "data-drop-folder";
 export const DROP_FOLDER_NAME_ATTR = "data-drop-folder-name";
 /** Marks the neutral import surface (the grid, its header, its empty states). */
 export const DROP_LIBRARY_ATTR = "data-drop-library";
+/**
+ * Marks a pinned SMART folder — a target that exists only to be refused.
+ *
+ * Nothing can be dropped into a query. But resolving it as a real target (rather
+ * than leaving it unmarked, so drops silently do nothing) is what lets the drag
+ * preview say WHY, which is the difference between a rule the user learns and a
+ * gesture that mysteriously fails.
+ */
+export const DROP_SMART_ATTR = "data-drop-smart";
+export const DROP_SMART_NAME_ATTR = "data-drop-smart-name";
 
 /**
  * Where a drag would land.
@@ -33,7 +43,9 @@ export const DROP_LIBRARY_ATTR = "data-drop-library";
  */
 export type DropTarget =
   | { kind: "library" }
-  | { kind: "folder"; id: string; name: string; zone: DropZone };
+  | { kind: "folder"; id: string; name: string; zone: DropZone }
+  /** A pinned smart folder: always refused, never silently. */
+  | { kind: "smart"; id: string; name: string };
 
 /**
  * Where within a folder row the cursor sits.
@@ -85,6 +97,17 @@ export function resolveDropTarget(cssX: number, cssY: number): DropTarget | null
       id: folder.getAttribute(DROP_FOLDER_ATTR) ?? "",
       name: folder.getAttribute(DROP_FOLDER_NAME_ATTR) ?? "folder",
       zone,
+    };
+  }
+
+  // Checked before `library` so a pin sitting over the neutral surface still
+  // reads as "you can't drop here", not as a plain import.
+  const smart = el.closest(`[${DROP_SMART_ATTR}]`);
+  if (smart) {
+    return {
+      kind: "smart",
+      id: smart.getAttribute(DROP_SMART_ATTR) ?? "",
+      name: smart.getAttribute(DROP_SMART_NAME_ATTR) ?? "smart folder",
     };
   }
 

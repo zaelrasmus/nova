@@ -380,6 +380,20 @@ fn too_short(term: &str) -> bool {
     term.chars().count() < MIN_TERM_LEN
 }
 
+/// A MATCH expression restricted to ONE column, for a rule's `contains`.
+///
+/// `None` when the term is shorter than the trigram tokenizer can index — the
+/// caller must fall back to `LIKE`, because an under-length term doesn't match
+/// nothing, it can't be *asked* here at all.
+///
+/// Separate from `compile_query` on purpose: that one parses user search syntax
+/// (`-`, `OR`, phrases) across the active scope columns. A rule condition has
+/// already decided its column and operator, so its needle is one literal phrase.
+pub fn column_phrase(column: &str, term: &str) -> Option<String> {
+    let term = term.trim();
+    (!too_short(term)).then(|| format!("{{{column}}} : {}", quote(term)))
+}
+
 /// Compile user input into a `Compiled` against the active scope `columns`
 /// (the FTS5 column names — `name`, `note`, `folder_text`, …).
 ///
@@ -454,11 +468,10 @@ pub fn compile_query(input: &str, columns: &[&str]) -> Compiled {
 }
 
 } // mod query
-
-// Tests disabled for now (kept, not deleted). Re-enable by removing this block
-// comment. They cover the reindex denormalisation, idempotency, and the
-// descendant closure — pure DB logic worth re-running before search ships.
-/*
+// Pure DB logic — the reindex denormalisation, its idempotency, and the
+// descendant closure. Re-enabled alongside the rule compiler tests: between
+// them they cover every path that can silently return the WRONG assets rather
+// than fail loudly.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -468,11 +481,14 @@ mod tests {
         let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
         for stmt in [
             "CREATE TABLE assets (id TEXT PRIMARY KEY, filename TEXT, extension TEXT, notes TEXT, source_url TEXT)",
-            "CREATE TABLE folders (id TEXT PRIMARY KEY, name TEXT, parent_id TEXT)",
+            // `notes` here because INDEX_SELECT flattens folder notes too — this
+            // fixture must track the real migration's columns, not a subset that
+            // happened to be enough when it was written.
+            "CREATE TABLE folders (id TEXT PRIMARY KEY, name TEXT, parent_id TEXT, notes TEXT)",
             "CREATE TABLE assets_folders (folder_id TEXT, asset_id TEXT)",
             "CREATE TABLE tags (id TEXT PRIMARY KEY, name TEXT)",
             "CREATE TABLE assets_tags (asset_id TEXT, tag_id TEXT)",
-            "CREATE VIRTUAL TABLE search_index USING fts5(asset_id UNINDEXED, name, extension, note, url, folder_text, tag_text, tokenize='trigram')",
+            "CREATE VIRTUAL TABLE search_index USING fts5(asset_id UNINDEXED, name, extension, note, url, folder_text, folder_note, tag_text, tokenize='trigram')",
         ] {
             sqlx::query(stmt).execute(&pool).await.unwrap();
         }
@@ -492,7 +508,7 @@ mod tests {
         let pool = schema().await;
         sqlx::query("INSERT INTO assets VALUES ('a1','Sunset.png','png','a nice note',NULL)")
             .execute(&pool).await.unwrap();
-        sqlx::query("INSERT INTO folders VALUES ('f1','Landscapes',NULL)").execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO folders (id, name, parent_id) VALUES ('f1','Landscapes',NULL)").execute(&pool).await.unwrap();
         sqlx::query("INSERT INTO assets_folders VALUES ('f1','a1')").execute(&pool).await.unwrap();
         sqlx::query("INSERT INTO tags VALUES ('t1','vector')").execute(&pool).await.unwrap();
         sqlx::query("INSERT INTO assets_tags VALUES ('a1','t1')").execute(&pool).await.unwrap();
@@ -533,8 +549,8 @@ mod tests {
     async fn descendant_closure_finds_nested_members() {
         let pool = schema().await;
         // parent > child, an asset only in the child.
-        sqlx::query("INSERT INTO folders VALUES ('p','Parent',NULL)").execute(&pool).await.unwrap();
-        sqlx::query("INSERT INTO folders VALUES ('c','Child','p')").execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO folders (id, name, parent_id) VALUES ('p','Parent',NULL)").execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO folders (id, name, parent_id) VALUES ('c','Child','p')").execute(&pool).await.unwrap();
         sqlx::query("INSERT INTO assets VALUES ('a1','x.png','png',NULL,NULL)").execute(&pool).await.unwrap();
         sqlx::query("INSERT INTO assets_folders VALUES ('c','a1')").execute(&pool).await.unwrap();
 
@@ -543,4 +559,3 @@ mod tests {
         assert_eq!(ids, vec!["a1"]);
     }
 }
-*/

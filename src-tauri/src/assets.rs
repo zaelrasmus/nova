@@ -40,6 +40,32 @@ pub enum Scope {
     All,
     Folder { id: String },
     Uncategorized,
+    /// A smart folder: a place whose membership is a QUERY rather than a list.
+    ///
+    /// Its rule tree becomes the scope predicate, which is what makes it a place
+    /// and not a saved filter — you can be *inside* it and still apply a lens on
+    /// top, and clearing that lens leaves you where you were.
+    Smart { id: String },
+    /// A group of smart folders, browsed as the UNION of its members.
+    ///
+    /// Compiles to one OR of the member trees inside the SAME query — no UNION,
+    /// no temp table, and no dedup pass, because we select rows from `assets`
+    /// and an asset matching two members is still one row.
+    SmartGroup { id: String },
+}
+
+impl Scope {
+    /// The `view_settings.view_key` a non-folder scope persists its sort under.
+    /// Folders keep theirs on their own row, so they have no key here.
+    fn view_key(&self) -> Option<String> {
+        match self {
+            Scope::All => Some("all".into()),
+            Scope::Uncategorized => Some("uncategorized".into()),
+            Scope::Smart { id } => Some(format!("smart:{id}")),
+            Scope::SmartGroup { id } => Some(format!("smartgroup:{id}")),
+            Scope::Folder { .. } => None,
+        }
+    }
 }
 
 /// A sort criterion plus direction, persisted per scope (see `resolve_sort`).
@@ -83,7 +109,7 @@ impl Shape {
     ///
     /// Nothing here divides: the ratio test multiplies both sides by `height *
     /// den`, so there is no divide-by-zero and no float equality in any predicate.
-    fn push_predicate(self, qb: &mut QueryBuilder<'_, Sqlite>) {
+    pub(crate) fn push_predicate(self, qb: &mut QueryBuilder<'_, Sqlite>) {
         match self {
             Shape::Horizontal => {
                 qb.push("a.width > a.height");
@@ -153,39 +179,28 @@ pub fn now_stamp() -> String {
 /// so audio (and anything whose dimensions failed to extract) is 0×0 — without
 /// this, `width = height` would report every audio file as "square". Excluding
 /// them is also the correct answer: a sound file has no shape.
-const DIMENSIONED: &str = "a.width > 0 AND a.height > 0";
+pub(crate) const DIMENSIONED: &str = "a.width > 0 AND a.height > 0";
 
-/// Ephemeral, multi-dimensional narrowing of a scope. Deliberately NOT persisted:
-/// a filter that survives a restart is the classic "my library is empty, the app
-/// is broken" bug. Saved filter sets are an explicit, named feature (Phase 4).
+/// Ephemeral narrowing of a scope. Deliberately NOT persisted as a whole: a
+/// filter that survives a restart is the classic "my library is empty, the app
+/// is broken" bug.
 ///
-/// Every dimension is optional and they AND together. An empty `FilterSet` adds
-/// no SQL at all, so the unfiltered path stays exactly as fast as before.
+/// Two halves, because they have different lifetimes:
 ///
-/// `Serialize` is load-bearing, not incidental: this type IS the stored form of
-/// a saved filter (`saved_filters.query_json`), which is why there's no separate
-/// hand-written schema for persisted filters to drift out of sync with.
+///   * `rules` — a structured tree (see the `rules` module). This IS the stored
+///     form of a saved filter, so the filter bar and a smart folder speak the
+///     same language and compile through the same engine.
+///   * `text` — the live search box. Ephemeral even within a session's saved
+///     filter: stripped before saving, and rides here only so it flows through
+///     the one `stream_manifest` path with every other lens.
+///
+/// An empty `FilterSet` adds no SQL at all, so the unfiltered path stays exactly
+/// as fast as before.
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct FilterSet {
-    /// Types to include. Empty = no constraint. Multiple types OR together.
+    /// Structured conditions. `None` = no structural narrowing.
     #[serde(default)]
-    pub asset_types: Vec<AssetType>,
-    /// Shape constraint; `None` = any.
-    #[serde(default)]
-    pub shape: Option<Shape>,
-    /// Calendar-day range over one date column; `None` = no date filtering.
-    #[serde(default)]
-    pub date: Option<DateFilter>,
-    /// Byte-size range; `None` = no size filtering.
-    #[serde(default)]
-    pub size: Option<SizeRange>,
-    /// Dominant-color proximity; `None` = no color filtering.
-    #[serde(default)]
-    pub color: Option<ColorFilter>,
-    /// Tag constraint; `None` = no tag filtering. `#[serde(default)]` means saved
-    /// filters written before tags existed still parse — they just get `None`.
-    #[serde(default)]
-    pub tags: Option<crate::tags::TagFilter>,
+    pub rules: Option<crate::rules::RuleNode>,
     /// Live full-text search; `None` = no text filtering. EPHEMERAL — stripped
     /// before a filter is saved (see `save_filter`), so it never lands in the
     /// stored JSON. Rides on `FilterSet` only so it flows through the one
@@ -215,6 +230,45 @@ pub struct ColorFilter {
     pub min_coverage: f64,
 }
 
+impl ColorFilter {
+    /// Append this colour's proximity test. Lives here rather than inline in the
+    /// manifest query so the rule tree and the filter bar compile colour the
+    /// same way — one piece of colour science, one predicate.
+    pub(crate) fn push_predicate<'a>(
+        &self,
+        qb: &mut QueryBuilder<'a, Sqlite>,
+    ) {
+        let target = crate::color::srgb_to_lab(self.r, self.g, self.b);
+        // Squared distance vs squared tolerance: no sqrt, so the whole predicate
+        // is multiply-and-add and needs no SQLite math extension. The lightness
+        // weight is computed from the TARGET's chroma (see color::lightness_weight)
+        // so "red" matches dark and pale reds, while a grey search still
+        // distinguishes grey from black and white.
+        let l_weight = crate::color::lightness_weight(target) as f64;
+        let tol_sq = self.tolerance.max(0.0).powi(2);
+
+        qb.push("EXISTS (SELECT 1 FROM asset_colors c WHERE c.asset_id = a.id AND c.ratio >= ")
+            .push_bind(self.min_coverage)
+            .push(" AND ")
+            .push_bind(l_weight)
+            .push(" * (c.l - ")
+            .push_bind(target.l as f64)
+            .push(") * (c.l - ")
+            .push_bind(target.l as f64)
+            .push(") + (c.a - ")
+            .push_bind(target.a as f64)
+            .push(") * (c.a - ")
+            .push_bind(target.a as f64)
+            .push(") + (c.b - ")
+            .push_bind(target.b as f64)
+            .push(") * (c.b - ")
+            .push_bind(target.b as f64)
+            .push(") <= ")
+            .push_bind(tol_sq)
+            .push(")");
+    }
+}
+
 /// Which date column a `DateFilter` applies to.
 ///
 /// The shared `Date` postfix is deliberate: these names and their serde values
@@ -232,7 +286,7 @@ pub enum DateField {
 }
 
 impl DateField {
-    fn column(self) -> &'static str {
+    pub(crate) fn column(self) -> &'static str {
         match self {
             DateField::ImportedDate => "a.imported_date",
             DateField::CreationDate => "a.creation_date",
@@ -241,39 +295,10 @@ impl DateField {
     }
 }
 
-/// A half-open instant range over one date column: `[from, until)`.
-///
-/// The frontend sends absolute timestamps rather than calendar days, because
-/// only the client knows the user's timezone. It converts the picked LOCAL days
-/// into instants, and `until` is local midnight of the day AFTER the end date —
-/// so an inclusive-looking "Jan 1 → Jan 31" still contains everything stamped
-/// during the 31st. Interpreting days as UTC here instead would mean a user west
-/// of Greenwich clicking "Today" gets nothing they imported that evening.
-///
-/// JS `toISOString()` emits exactly the shape `stamp()` writes, so this stays a
-/// plain lexicographic comparison against an indexed column.
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct DateFilter {
-    pub field: DateField,
-    #[serde(default)]
-    pub from: Option<String>,
-    #[serde(default)]
-    pub until: Option<String>,
-}
-
-/// Inclusive byte range; either end may be open.
-#[derive(Serialize, Deserialize, Debug, Clone, Copy)]
-pub struct SizeRange {
-    #[serde(default)]
-    pub min: Option<i64>,
-    #[serde(default)]
-    pub max: Option<i64>,
-}
-
 /// Whether a bound is a real timestamp. Lexicographic comparison against a
 /// garbage string wouldn't error, it would just return a nonsense slice — so an
 /// unparseable bound is rejected at the boundary instead.
-fn valid_stamp(s: &str) -> bool {
+pub(crate) fn valid_stamp(s: &str) -> bool {
     DateTime::parse_from_rfc3339(s).is_ok()
 }
 
@@ -370,9 +395,17 @@ pub struct AssetMetadata {
 }
 
 /// How a view sorts its assets. Stored as TEXT; each auto variant maps to an
-/// `idx_assets_*` index. `Manual` is scope-dependent — inside a folder it means
-/// the membership row's position, everywhere else the asset's own global
-/// `manual_position`.
+/// `idx_assets_*` index.
+///
+/// Two variants are SCOPE-RELATIVE — they mean one thing inside a folder and
+/// another everywhere else, because the value they sort by lives on the
+/// membership row rather than the asset:
+///
+///   * `Manual`    — `assets_folders.position` in a folder, `assets.manual_position` outside.
+///   * `AddedDate` — `assets_folders.added_at` in a folder, `assets.imported_date` outside.
+///
+/// Both fall back to an asset-level column so every scope can answer them; the
+/// folder answer is simply the more precise one.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, Type, PartialEq, Eq)]
 #[sqlx(rename_all = "snake_case")]
 #[serde(rename_all = "snake_case")]
@@ -384,6 +417,10 @@ pub enum OrderBy {
     FileSize,
     Resolution,
     Manual,
+    /// When the asset was put into THIS folder — the answer to "what did I add
+    /// here last week", which `imported_date` can't give once an asset has been
+    /// filed somewhere long after it entered the library.
+    AddedDate,
 }
 
 impl OrderBy {
@@ -402,6 +439,10 @@ impl OrderBy {
             OrderBy::Resolution => "a.pixel_count",
             OrderBy::Manual if in_folder => "af.position",
             OrderBy::Manual => "a.manual_position",
+            // Served by idx_folder_contents (folder_id, added_at) inside a
+            // folder; by idx_assets_imported outside it.
+            OrderBy::AddedDate if in_folder => "af.added_at",
+            OrderBy::AddedDate => "a.imported_date",
         }
     }
 }
@@ -540,8 +581,13 @@ fn conjunct(qb: &mut QueryBuilder<'_, Sqlite>, written: &mut usize) {
 ///
 /// Only enum variants and booleans reach the SQL text; every user-supplied value
 /// (folder id, asset types) is a bound parameter.
+///
+/// `scope_rules` is a smart folder's tree, already loaded — resolving it is a DB
+/// read and this function is deliberately synchronous, so the caller does it (see
+/// `resolve_scope_rules`).
 fn build_manifest_query<'a>(
     scope: &'a Scope,
+    scope_rules: Option<&'a crate::rules::RuleNode>,
     filters: &'a FilterSet,
     sort: Sort,
 ) -> QueryBuilder<'a, Sqlite> {
@@ -552,6 +598,15 @@ fn build_manifest_query<'a>(
     );
     if in_folder {
         qb.push(" JOIN assets_folders af ON af.asset_id = a.id");
+    }
+
+    // Manual order inside a smart folder reads a sparse rank table. LEFT, not
+    // INNER: an asset nobody has placed yet has no row, and it must still appear
+    // (in the unranked tail) rather than vanish from its own folder.
+    let smart_manual = matches!(sort.order_by, OrderBy::Manual);
+    if let (Scope::Smart { id }, true) = (scope, smart_manual) {
+        qb.push(" LEFT JOIN smart_folder_order sfo ON sfo.asset_id = a.id AND sfo.smart_folder_id = ")
+            .push_bind(id.as_str());
     }
 
     let mut written = 0usize;
@@ -567,104 +622,60 @@ fn build_manifest_query<'a>(
             conjunct(&mut qb, &mut written);
             qb.push("a.id NOT IN (SELECT asset_id FROM assets_folders)");
         }
-    }
-
-    // 2. Filters — narrowing within that scope. Dimensions AND together; values
-    //    within one dimension OR together.
-    if !filters.asset_types.is_empty() {
-        conjunct(&mut qb, &mut written);
-        qb.push("a.asset_type IN (");
-        let mut list = qb.separated(", ");
-        for t in &filters.asset_types {
-            list.push_bind(*t);
-        }
-        qb.push(")");
-    }
-
-    if let Some(shape) = filters.shape {
-        conjunct(&mut qb, &mut written);
-        qb.push(DIMENSIONED).push(" AND ");
-        shape.push_predicate(&mut qb);
-    }
-
-    if let Some(date) = &filters.date {
-        let col = date.field.column();
-        // An invalid bound matches nothing rather than being dropped: silently
-        // widening the result set is the dangerous direction (you'd see MORE than
-        // you asked for and have no signal). Same policy as a malformed ratio.
-        if let Some(from) = date.from.as_deref() {
-            conjunct(&mut qb, &mut written);
-            if valid_stamp(from) {
-                qb.push(col).push(" >= ").push_bind(from);
-            } else {
-                qb.push("0");
+        // The smart folder's own rules ARE the scope. Note they land in the same
+        // WHERE as the filter tree below and simply AND with it — that's the
+        // whole composition story, and it costs no extra machinery.
+        //
+        // A missing or empty tree means "everything": a smart folder whose rules
+        // failed to load must not look like an empty folder, which would read as
+        // data loss rather than a broken rule.
+        Scope::Smart { .. } => {
+            if let Some(rules) = scope_rules {
+                if rules.is_active() {
+                    conjunct(&mut qb, &mut written);
+                    rules.push_predicate(&mut qb);
+                }
             }
         }
-        if let Some(until) = date.until.as_deref() {
+        // A group is the union of its members, and the union of NOTHING is
+        // empty — so an empty group shows nothing rather than everything.
+        //
+        // That's the opposite of the rule above, deliberately. An empty rule
+        // GROUP in the editor is a half-written filter, where showing the
+        // library is the forgiving reading. An empty smart-folder group is a
+        // container the user hasn't filled: showing them the whole library
+        // would claim those assets are in a group that is demonstrably empty.
+        Scope::SmartGroup { .. } => {
             conjunct(&mut qb, &mut written);
-            // Half-open: `until` is the instant AFTER the last included day.
-            if valid_stamp(until) {
-                qb.push(col).push(" < ").push_bind(until);
-            } else {
-                qb.push("0");
+            match scope_rules {
+                Some(rules) if rules.is_active() => rules.push_predicate(&mut qb),
+                _ => {
+                    qb.push("0");
+                }
             }
         }
     }
 
-    if let Some(size) = filters.size {
-        if let Some(min) = size.min {
+    // 2. Filters — narrowing within that scope.
+    //
+    // ONE call, because every structural condition now lives in the rule tree
+    // (see the `rules` module). The filter bar builds a flat tree, a smart
+    // folder builds a nested one, and both arrive here as the same thing —
+    // which is what makes "smart folder AND saved filter" compose for free.
+    if let Some(rules) = &filters.rules {
+        if rules.is_active() {
             conjunct(&mut qb, &mut written);
-            qb.push("a.file_size >= ").push_bind(min);
-        }
-        if let Some(max) = size.max {
-            conjunct(&mut qb, &mut written);
-            qb.push("a.file_size <= ").push_bind(max);
-        }
-    }
-
-    if let Some(c) = filters.color {
-        conjunct(&mut qb, &mut written);
-        let target = crate::color::srgb_to_lab(c.r, c.g, c.b);
-        // Squared distance vs squared tolerance: no sqrt, so the whole predicate
-        // is multiply-and-add and needs no SQLite math extension. The lightness
-        // weight is computed from the TARGET's chroma (see color::lightness_weight)
-        // so "red" matches dark and pale reds, while a grey search still
-        // distinguishes grey from black and white.
-        let l_weight = crate::color::lightness_weight(target) as f64;
-        let tol_sq = c.tolerance.max(0.0).powi(2);
-
-        qb.push("EXISTS (SELECT 1 FROM asset_colors c WHERE c.asset_id = a.id AND c.ratio >= ")
-            .push_bind(c.min_coverage)
-            .push(" AND ")
-            .push_bind(l_weight)
-            .push(" * (c.l - ")
-            .push_bind(target.l as f64)
-            .push(") * (c.l - ")
-            .push_bind(target.l as f64)
-            .push(") + (c.a - ")
-            .push_bind(target.a as f64)
-            .push(") * (c.a - ")
-            .push_bind(target.a as f64)
-            .push(") + (c.b - ")
-            .push_bind(target.b as f64)
-            .push(") * (c.b - ")
-            .push_bind(target.b as f64)
-            .push(") <= ")
-            .push_bind(tol_sq)
-            .push(")");
-    }
-
-    if let Some(tags) = &filters.tags {
-        if tags.is_active() {
-            conjunct(&mut qb, &mut written);
-            tags.push_predicate(&mut qb);
+            rules.push_predicate(&mut qb);
         }
     }
 
-    // Full-text search. The parser (search::query) turns user input into a SAFE
-    // FTS5 MATCH string; we only ever bind that string, never raw input. An
-    // Include narrows to matching assets, an Exclude (the "-term" only case,
-    // which FTS5 can't express as a positive MATCH) removes them.
+    // 3. Full-text search. Stays outside the tree: it's the live search box, not
+    // a stored condition, and it's the one lens that never gets saved.
+    //
+    // The parser (search::query) turns user input into a SAFE FTS5 MATCH string;
+    // we only ever bind that string, never raw input. An Include narrows to
+    // matching assets, an Exclude (the "-term" only case, which FTS5 can't
+    // express as a positive MATCH) removes them.
     if let Some(text) = &filters.text {
         if !text.is_blank() {
             match text.compile() {
@@ -692,13 +703,287 @@ fn build_manifest_query<'a>(
     // 3. Sort. The `a.id` tie-break runs in the SAME direction as the sort column
     //    so the composite (col, id) indexes stay usable scanning either way.
     let dir = if sort.is_ascending { " ASC" } else { " DESC" };
-    qb.push(" ORDER BY ")
-        .push(sort.order_by.sql_expr(in_folder))
-        .push(dir)
-        .push(", a.id")
-        .push(dir);
+
+    if matches!(scope, Scope::Smart { .. }) && smart_manual {
+        // Ranked block first, then everything nobody has placed yet.
+        //
+        // `(sfo.position IS NULL) ASC` is NOT subject to `dir`: unranked means
+        // "not yet given a place", which belongs at the end whichever way the
+        // ranked block runs. Reversing it would scatter new arrivals through the
+        // order the user built.
+        //
+        // The tail's own order is newest-first — the library default — so a
+        // fresh match appears where you'd look for a new asset.
+        qb.push(" ORDER BY (sfo.position IS NULL) ASC, sfo.position")
+            .push(dir)
+            .push(", a.imported_date DESC, a.id")
+            .push(dir);
+    } else {
+        qb.push(" ORDER BY ")
+            .push(sort.order_by.sql_expr(in_folder))
+            .push(dir)
+            .push(", a.id")
+            .push(dir);
+    }
 
     qb
+}
+
+// ── Smart folder groups ───────────────────────────────────────────────────────
+//
+// A container in the sidebar that is ALSO a place: clicking one browses the
+// union of its members. That's why it owns a sort (in `view_settings` under
+// `smartgroup:<id>`) — everything except manual, which a union can't answer.
+
+#[derive(Serialize, Debug, Clone, FromRow)]
+pub struct SmartFolderGroup {
+    pub id: String,
+    pub name: String,
+    pub notes: Option<String>,
+    pub position: f64,
+}
+
+#[instrument(skip(pool))]
+pub async fn fetch_smart_folder_groups(pool: &SqlitePool) -> Result<Vec<SmartFolderGroup>> {
+    sqlx::query_as::<_, SmartFolderGroup>(
+        "SELECT id, name, notes, position FROM rule_set_groups ORDER BY position, name",
+    )
+    .fetch_all(pool)
+    .await
+    .context("Failed to fetch smart folder groups")
+}
+
+#[instrument(skip(pool))]
+pub async fn create_smart_folder_group(pool: &SqlitePool, name: &str) -> Result<SmartFolderGroup> {
+    let name = clean_name(name).context("A group needs a name")?;
+    let id = uuid::Uuid::new_v4().to_string();
+    let position = sqlx::query_scalar::<_, Option<f64>>("SELECT MAX(position) FROM rule_set_groups")
+        .fetch_one(pool)
+        .await
+        .context("Failed to compute group position")?
+        .map(|m| m + 1.0)
+        .unwrap_or(0.0);
+
+    sqlx::query(
+        "INSERT INTO rule_set_groups (id, name, position, created_at) VALUES (?, ?, ?, ?)",
+    )
+    .bind(&id)
+    .bind(&name)
+    .bind(position)
+    .bind(stamp(Utc::now()))
+    .execute(pool)
+    .await
+    .context("Failed to insert group")?;
+
+    Ok(SmartFolderGroup {
+        id,
+        name,
+        notes: None,
+        position,
+    })
+}
+
+#[instrument(skip(pool))]
+pub async fn rename_smart_folder_group(pool: &SqlitePool, id: &str, name: &str) -> Result<()> {
+    let name = clean_name(name).context("A group needs a name")?;
+    let res = sqlx::query("UPDATE rule_set_groups SET name = ? WHERE id = ?")
+        .bind(&name)
+        .bind(id)
+        .execute(pool)
+        .await
+        .context("Failed to rename group")?;
+    if res.rows_affected() == 0 {
+        anyhow::bail!("Group not found");
+    }
+    Ok(())
+}
+
+/// Delete a group. Its members are UNGROUPED, never deleted — the FK is
+/// `ON DELETE SET NULL`, because removing a container must not destroy the
+/// user's saved queries.
+#[instrument(skip(pool))]
+pub async fn delete_smart_folder_group(pool: &SqlitePool, id: &str) -> Result<()> {
+    let mut tx = pool.begin().await.context("Failed to begin group delete")?;
+
+    sqlx::query("DELETE FROM rule_set_groups WHERE id = ?")
+        .bind(id)
+        .execute(&mut *tx)
+        .await
+        .context("Failed to delete group")?;
+
+    // Same hand-cleanup as a smart folder: `view_settings` is a key-value table
+    // with no foreign key to cascade.
+    sqlx::query("DELETE FROM view_settings WHERE view_key = ?")
+        .bind(format!("smartgroup:{id}"))
+        .execute(&mut *tx)
+        .await
+        .context("Failed to clear group sort")?;
+
+    tx.commit().await.context("Failed to commit group delete")?;
+    Ok(())
+}
+
+/// Move a smart folder into a group, or out of every group with `None`.
+#[instrument(skip(pool))]
+pub async fn set_smart_folder_group(
+    pool: &SqlitePool,
+    id: &str,
+    group_id: Option<&str>,
+) -> Result<()> {
+    let res = sqlx::query("UPDATE rule_sets SET group_id = ? WHERE id = ? AND kind = 'smart'")
+        .bind(group_id)
+        .bind(id)
+        .execute(pool)
+        .await
+        .context("Failed to move smart folder")?;
+    if res.rows_affected() == 0 {
+        anyhow::bail!("Smart folder not found");
+    }
+    Ok(())
+}
+
+// ── Manual order inside a smart folder ────────────────────────────────────────
+//
+// The rank lives in `smart_folder_order`, sparse: only assets someone has placed
+// have a row. Two operations keep it honest, and both are lazy on purpose —
+// there is no "stopped matching" event to hang eager maintenance on, and
+// `within_last` rules stop matching at midnight with no mutation at all.
+
+/// Drop ranks for assets that no longer match. Called when the folder is opened
+/// in manual order, and after its rules change.
+///
+/// Lazy rather than eager: evaluating every smart folder's predicate on every
+/// tag/folder/asset mutation would put unbounded query cost on the write path,
+/// and it still wouldn't catch time-relative rules. The only moment a stale rank
+/// is observable is when the asset comes back — so we prune where it would show.
+#[instrument(skip(pool, rules))]
+async fn prune_smart_order(
+    pool: &SqlitePool,
+    smart_folder_id: &str,
+    rules: &crate::rules::RuleNode,
+) -> Result<()> {
+    let mut qb = QueryBuilder::<Sqlite>::new(
+        "DELETE FROM smart_folder_order WHERE smart_folder_id = ",
+    );
+    qb.push_bind(smart_folder_id)
+        .push(" AND asset_id NOT IN (SELECT a.id FROM assets a");
+    if rules.is_active() {
+        qb.push(" WHERE ");
+        rules.push_predicate(&mut qb);
+    }
+    qb.push(")");
+
+    qb.build()
+        .execute(pool)
+        .await
+        .context("Failed to prune smart folder order")?;
+    Ok(())
+}
+
+/// Give every CURRENT member a rank, appending any that lack one.
+///
+/// Runs before a reorder because the fractional-rank algorithm needs a `prev`
+/// and `next` to bisect between, and NULLs have no place in that arithmetic.
+/// New members are appended after the current maximum in the same order the
+/// unranked tail displays them, so materialising never visibly reshuffles
+/// anything — what you saw is what gets numbered.
+async fn materialize_smart_order(
+    tx: &mut sqlx::SqliteConnection,
+    smart_folder_id: &str,
+    rules: &crate::rules::RuleNode,
+) -> Result<()> {
+    let mut qb = QueryBuilder::<Sqlite>::new(
+        "INSERT INTO smart_folder_order (smart_folder_id, asset_id, position) SELECT ",
+    );
+    qb.push_bind(smart_folder_id)
+        .push(", a.id, (SELECT COALESCE(MAX(position), -1.0) FROM smart_folder_order WHERE smart_folder_id = ")
+        .push_bind(smart_folder_id)
+        .push(") + ROW_NUMBER() OVER (ORDER BY a.imported_date DESC, a.id) FROM assets a WHERE a.id NOT IN \
+               (SELECT asset_id FROM smart_folder_order WHERE smart_folder_id = ")
+        .push_bind(smart_folder_id)
+        .push(")");
+    if rules.is_active() {
+        qb.push(" AND ");
+        rules.push_predicate(&mut qb);
+    }
+
+    qb.build()
+        .execute(&mut *tx)
+        .await
+        .context("Failed to materialize smart folder order")?;
+    Ok(())
+}
+
+/// Load the rule tree that DEFINES a smart folder scope, if the scope is one.
+///
+/// A scope that names a smart folder which no longer exists resolves to `None`
+/// rather than failing: the grid shows everything and the sidebar has already
+/// dropped the entry, which is recoverable. Erroring here would leave the user
+/// staring at a toast with no view at all.
+pub(crate) async fn resolve_scope_rules(
+    pool: &SqlitePool,
+    scope: &Scope,
+) -> Result<Option<crate::rules::RuleNode>> {
+    // A group resolves to ONE tree: `any` over its members. Every downstream
+    // consumer — the manifest, the count, the manual-order prune — then treats a
+    // group exactly like a single smart folder, because by this point it is one.
+    if let Scope::SmartGroup { id } = scope {
+        let rows: Vec<(String, i64, String)> = sqlx::query_as(
+            "SELECT id, version, query_json FROM rule_sets \
+             WHERE kind = 'smart' AND group_id = ? ORDER BY position, name",
+        )
+        .bind(id.as_str())
+        .fetch_all(pool)
+        .await
+        .context("Failed to read smart folder group")?;
+
+        let children: Vec<crate::rules::RuleNode> = rows
+            .into_iter()
+            .filter_map(|(member, version, json)| {
+                if version > RULE_SET_VERSION {
+                    warn!(id = %member, version, "Group member is from a newer version; skipping");
+                    return None;
+                }
+                serde_json::from_str(&json)
+                    .inspect_err(|e| warn!(id = %member, error = %e, "Group member has unreadable rules"))
+                    .ok()
+            })
+            .collect();
+
+        if children.is_empty() {
+            return Ok(None); // caller renders this as "nothing", not "everything"
+        }
+        return Ok(Some(crate::rules::RuleNode::Group {
+            op: crate::rules::GroupOp::Any,
+            children,
+        }));
+    }
+
+    let Scope::Smart { id } = scope else {
+        return Ok(None);
+    };
+    let row: Option<(i64, String)> =
+        sqlx::query_as("SELECT version, query_json FROM rule_sets WHERE id = ? AND kind = 'smart'")
+            .bind(id.as_str())
+            .fetch_optional(pool)
+            .await
+            .context("Failed to read smart folder rules")?;
+
+    let Some((version, query_json)) = row else {
+        warn!(id = %id, "Smart folder scope names a row that no longer exists");
+        return Ok(None);
+    };
+    if version > RULE_SET_VERSION {
+        warn!(id = %id, version, "Smart folder is from a newer version; showing everything");
+        return Ok(None);
+    }
+    match serde_json::from_str::<crate::rules::RuleNode>(&query_json) {
+        Ok(rules) => Ok(Some(rules)),
+        Err(e) => {
+            warn!(id = %id, error = %e, "Smart folder has unreadable rules");
+            Ok(None)
+        }
+    }
 }
 
 #[instrument(skip(pool))]
@@ -710,8 +995,19 @@ pub async fn fetch_manifest(
         Some(s) => s,
         None => resolve_sort(pool, &query.scope).await?,
     };
+    let scope_rules = resolve_scope_rules(pool, &query.scope).await?;
 
-    build_manifest_query(&query.scope, &query.filters, sort)
+    // Prune stale ranks where they'd be seen: opening a smart folder in manual
+    // order is the only moment a rank for a no-longer-matching asset can affect
+    // anything. Cheap (one DELETE against a small, indexed table) and skipped
+    // entirely under every other sort, where dead rows are invisible.
+    if let (Scope::Smart { id }, OrderBy::Manual, Some(rules)) =
+        (&query.scope, sort.order_by, scope_rules.as_ref())
+    {
+        prune_smart_order(pool, id, rules).await?;
+    }
+
+    build_manifest_query(&query.scope, scope_rules.as_ref(), &query.filters, sort)
         .build_query_as::<AssetLightRow>()
         .fetch_all(pool)
         .await
@@ -733,22 +1029,19 @@ const VIEW_SORT_SQL: &str = "SELECT order_by, is_ascending FROM view_settings WH
 /// membership query instead.
 #[instrument(skip(pool))]
 pub async fn resolve_sort(pool: &SqlitePool, scope: &Scope) -> Result<Sort> {
-    let row: Option<(OrderBy, bool)> = match scope {
-        Scope::Folder { id } => {
+    let row: Option<(OrderBy, bool)> = match scope.view_key() {
+        None => {
+            let Scope::Folder { id } = scope else {
+                unreachable!("only folders have no view key")
+            };
             sqlx::query_as(FOLDER_SORT_SQL)
                 .bind(id.as_str())
                 .fetch_optional(pool)
                 .await
         }
-        Scope::All => {
+        Some(key) => {
             sqlx::query_as(VIEW_SORT_SQL)
-                .bind("all")
-                .fetch_optional(pool)
-                .await
-        }
-        Scope::Uncategorized => {
-            sqlx::query_as(VIEW_SORT_SQL)
-                .bind("uncategorized")
+                .bind(key)
                 .fetch_optional(pool)
                 .await
         }
@@ -756,18 +1049,31 @@ pub async fn resolve_sort(pool: &SqlitePool, scope: &Scope) -> Result<Sort> {
     .context("Failed to read persisted sort")?;
 
     // A missing row is not an error — the user still gets a usable view.
-    Ok(row
+    let sort = row
         .map(|(order_by, is_ascending)| Sort {
             order_by,
             is_ascending,
         })
-        .unwrap_or(DEFAULT_SORT))
+        .unwrap_or(DEFAULT_SORT);
+
+    // A group has no manual order: its contents are a union of queries the user
+    // never arranged as one list, and dragging inside it would rewrite ranks
+    // across several smart folders at once. The UI hides the option; this
+    // coerces it anyway, because `view_settings` is user-editable data and a
+    // stored `manual` would otherwise reach a code path that can't honour it.
+    if matches!(scope, Scope::SmartGroup { .. }) && matches!(sort.order_by, OrderBy::Manual) {
+        return Ok(DEFAULT_SORT);
+    }
+    Ok(sort)
 }
 
 #[instrument(skip(pool))]
 pub async fn set_sort(pool: &SqlitePool, scope: &Scope, sort: Sort) -> Result<()> {
-    let res = match scope {
-        Scope::Folder { id } => {
+    let res = match scope.view_key() {
+        None => {
+            let Scope::Folder { id } = scope else {
+                unreachable!("only folders have no view key")
+            };
             sqlx::query("UPDATE folders SET order_by = ?, is_ascending = ? WHERE id = ?")
                 .bind(sort.order_by)
                 .bind(sort.is_ascending)
@@ -775,13 +1081,9 @@ pub async fn set_sort(pool: &SqlitePool, scope: &Scope, sort: Sort) -> Result<()
                 .execute(pool)
                 .await
         }
-        // Upsert, so the fixed views keep working even if the seed rows are gone.
-        _ => {
-            let key = if matches!(scope, Scope::All) {
-                "all"
-            } else {
-                "uncategorized"
-            };
+        // Upsert, so a view keeps working even with no seed row — which is
+        // always the case for a smart folder, whose key is minted on first sort.
+        Some(key) => {
             sqlx::query(
                 "INSERT INTO view_settings (view_key, order_by, is_ascending) VALUES (?, ?, ?) \
                  ON CONFLICT(view_key) DO UPDATE \
@@ -861,6 +1163,42 @@ pub async fn reorder_assets(
         .fetch_all(&mut *tx)
         .await
         .context("Failed to read uncategorized order")?,
+        // A smart folder's rank lives in its own table, so that every folder
+        // orders independently — reusing the global `manual_position` (as All
+        // and Uncategorized do) would make dragging in one smart folder
+        // silently reshuffle every other view.
+        Scope::Smart { id } => {
+            let rules = resolve_scope_rules(pool, scope)
+                .await?
+                .unwrap_or_else(crate::rules::RuleNode::empty);
+            // Every member needs a rank before the bisection below can run.
+            materialize_smart_order(&mut tx, id, &rules).await?;
+
+            let mut qb = QueryBuilder::<Sqlite>::new(
+                "SELECT sfo.asset_id, sfo.position FROM smart_folder_order sfo \
+                 JOIN assets a ON a.id = sfo.asset_id WHERE sfo.smart_folder_id = ",
+            );
+            qb.push_bind(id.as_str());
+            // Restricted to current members: stale ranks are pruned lazily, so
+            // the list this algorithm bisects must exclude them explicitly or a
+            // departed asset could become somebody's `prev`.
+            if rules.is_active() {
+                qb.push(" AND ");
+                rules.push_predicate(&mut qb);
+            }
+            qb.push(" ORDER BY sfo.position, sfo.asset_id");
+
+            qb.build_query_as()
+                .fetch_all(&mut *tx)
+                .await
+                .context("Failed to read smart folder order")?
+        }
+        // Refused rather than supported: see the coercion in `resolve_sort`.
+        // A group's order is a union of several folders' orders, and there is no
+        // answer to "where does this land" that doesn't rewrite somebody else's.
+        Scope::SmartGroup { .. } => {
+            anyhow::bail!("A group of smart folders has no manual order");
+        }
     };
 
     let moved_set: std::collections::HashSet<&str> =
@@ -969,6 +1307,29 @@ async fn write_manual_position(
                 .await
                 .context("Failed to write manual position")?;
         }
+        // Upsert: `materialize_smart_order` has already given every current
+        // member a row, but an UPDATE that silently affected zero rows would be
+        // the kind of failure that looks like "the drag didn't take".
+        Scope::Smart { id } => {
+            sqlx::query(
+                "INSERT INTO smart_folder_order (smart_folder_id, asset_id, position) \
+                 VALUES (?, ?, ?) \
+                 ON CONFLICT(smart_folder_id, asset_id) DO UPDATE SET position = excluded.position",
+            )
+            .bind(id.as_str())
+            .bind(asset_id)
+            .bind(position)
+            .execute(&mut *tx)
+            .await
+            .context("Failed to write smart folder position")?;
+        }
+        // Unreachable in practice — `reorder_assets` bails before opening the
+        // transaction — but stated rather than swallowed by a catch-all, so the
+        // next scope variant gets a compile error here instead of a silent
+        // write to the wrong column.
+        Scope::SmartGroup { .. } => {
+            anyhow::bail!("A group of smart folders has no manual order");
+        }
     }
     Ok(())
 }
@@ -987,30 +1348,34 @@ pub async fn fetch_folders(pool: &SqlitePool) -> Result<Vec<Folder>> {
     Ok(folders)
 }
 
-// ── Saved filters ─────────────────────────────────────────────────────────────
+// ── Rule sets: saved filters and (from Phase 2) smart folders ─────────────────
 //
-// A saved filter is a LENS, not a place: applying one narrows whatever scope
-// you're already in, so it has no parent, no sort and no position in the tree.
-// (A smart folder would be the opposite — a scope that owns its own sort — and
-// belongs in its own table beside `folders`, not here.)
+// One table, one document format, one compiler — see the `rules` module and the
+// `rule_sets` comment in the migration. `kind` is the only difference: a filter
+// is a LENS applied to whatever scope you're in, a smart folder is a PLACE that
+// owns a sort. Everything below is the filter half; the smart-folder half reuses
+// these same rows.
 
-/// Bump when `FilterSet`'s serialized shape changes incompatibly, and migrate
-/// stored documents deliberately at the same time.
-const SAVED_FILTER_VERSION: i64 = 1;
+/// Bump when the stored rule document changes shape incompatibly, and migrate
+/// existing rows deliberately at the same time.
+///
+/// v1 = the flat `FilterSet` (dimension per field, all ANDed).
+/// v2 = the `RuleNode` tree.
+pub(crate) const RULE_SET_VERSION: i64 = 2;
 
-/// A named, reusable `FilterSet` as the frontend sees it — the JSON document is
+/// A named, reusable rule set as the frontend sees it — the JSON document is
 /// already parsed, so callers never touch the stored representation.
 #[derive(Serialize, Debug, Clone)]
 pub struct SavedFilter {
     pub id: String,
     pub name: String,
     pub position: f64,
-    pub filters: FilterSet,
+    pub rules: crate::rules::RuleNode,
 }
 
 /// Storage shape, with `query_json` still a string.
 #[derive(FromRow)]
-struct SavedFilterRow {
+struct RuleSetRow {
     id: String,
     name: String,
     position: f64,
@@ -1020,9 +1385,9 @@ struct SavedFilterRow {
 
 #[instrument(skip(pool))]
 pub async fn fetch_saved_filters(pool: &SqlitePool) -> Result<Vec<SavedFilter>> {
-    let rows = sqlx::query_as::<_, SavedFilterRow>(
-        "SELECT id, name, position, version, query_json FROM saved_filters \
-         ORDER BY position, name",
+    let rows = sqlx::query_as::<_, RuleSetRow>(
+        "SELECT id, name, position, version, query_json FROM rule_sets \
+         WHERE kind = 'filter' ORDER BY position, name",
     )
     .fetch_all(pool)
     .await
@@ -1033,16 +1398,16 @@ pub async fn fetch_saved_filters(pool: &SqlitePool) -> Result<Vec<SavedFilter>> 
     Ok(rows
         .into_iter()
         .filter_map(|r| {
-            if r.version > SAVED_FILTER_VERSION {
+            if r.version > RULE_SET_VERSION {
                 warn!(id = %r.id, version = r.version, "Saved filter is from a newer version; skipping");
                 return None;
             }
-            match serde_json::from_str::<FilterSet>(&r.query_json) {
-                Ok(filters) => Some(SavedFilter {
+            match serde_json::from_str::<crate::rules::RuleNode>(&r.query_json) {
+                Ok(rules) => Some(SavedFilter {
                     id: r.id,
                     name: r.name,
                     position: r.position,
-                    filters,
+                    rules,
                 }),
                 Err(e) => {
                     warn!(id = %r.id, error = %e, "Saved filter has unreadable query_json; skipping");
@@ -1053,6 +1418,15 @@ pub async fn fetch_saved_filters(pool: &SqlitePool) -> Result<Vec<SavedFilter>> 
         .collect())
 }
 
+/// Serialize a tree for storage, rejecting one the editor could never have made.
+///
+/// Stored documents are user data — a hand-edited library.db could carry a tree
+/// nested a hundred deep, which would compile to unbounded SQL.
+fn encode_rules(rules: &crate::rules::RuleNode) -> Result<String> {
+    rules.validate()?;
+    serde_json::to_string(rules).context("Failed to serialize rule set")
+}
+
 #[instrument(skip(pool, filters))]
 pub async fn create_saved_filter(
     pool: &SqlitePool,
@@ -1060,28 +1434,32 @@ pub async fn create_saved_filter(
     filters: &FilterSet,
 ) -> Result<SavedFilter> {
     let id = uuid::Uuid::new_v4().to_string();
-    // Search text is ephemeral — a saved filter is a durable lens, not a typed
-    // query. Strip it so it never persists, then serialize.
-    let to_store = FilterSet {
-        text: None,
-        ..filters.clone()
-    };
-    let query_json = serde_json::to_string(&to_store).context("Failed to serialize filter set")?;
-    let position = sqlx::query_scalar::<_, Option<f64>>("SELECT MAX(position) FROM saved_filters")
-        .fetch_one(pool)
-        .await
-        .context("Failed to compute saved filter position")?
-        .map(|m| m + 1.0)
-        .unwrap_or(0.0);
+    // The live search text isn't stripped here any more — it structurally can't
+    // reach storage, because it was never part of the tree. That's one of the
+    // things splitting FilterSet into `rules` + `text` bought.
+    let rules = filters
+        .rules
+        .clone()
+        .unwrap_or_else(crate::rules::RuleNode::empty);
+    let query_json = encode_rules(&rules)?;
+
+    let position = sqlx::query_scalar::<_, Option<f64>>(
+        "SELECT MAX(position) FROM rule_sets WHERE kind = 'filter'",
+    )
+    .fetch_one(pool)
+    .await
+    .context("Failed to compute saved filter position")?
+    .map(|m| m + 1.0)
+    .unwrap_or(0.0);
 
     sqlx::query(
-        "INSERT INTO saved_filters (id, name, position, version, query_json, created_at) \
-         VALUES (?, ?, ?, ?, ?, ?)",
+        "INSERT INTO rule_sets (id, kind, name, position, version, query_json, created_at) \
+         VALUES (?, 'filter', ?, ?, ?, ?, ?)",
     )
     .bind(&id)
     .bind(name)
     .bind(position)
-    .bind(SAVED_FILTER_VERSION)
+    .bind(RULE_SET_VERSION)
     .bind(&query_json)
     .bind(stamp(Utc::now()))
     .execute(pool)
@@ -1092,15 +1470,13 @@ pub async fn create_saved_filter(
         id,
         name: name.to_string(),
         position,
-        // Return the STORED form (no ephemeral search), so the in-memory list
-        // matches what a reload would produce.
-        filters: to_store,
+        rules,
     })
 }
 
 #[instrument(skip(pool))]
 pub async fn rename_saved_filter(pool: &SqlitePool, id: &str, name: &str) -> Result<()> {
-    let res = sqlx::query("UPDATE saved_filters SET name = ? WHERE id = ?")
+    let res = sqlx::query("UPDATE rule_sets SET name = ? WHERE id = ?")
         .bind(name)
         .bind(id)
         .execute(pool)
@@ -1112,19 +1488,20 @@ pub async fn rename_saved_filter(pool: &SqlitePool, id: &str, name: &str) -> Res
     Ok(())
 }
 
-/// Overwrite a saved filter's definition with `filters` ("update to current").
-/// Also rewrites `version`, so a document saved by an older build is brought
-/// forward rather than left behind at its original version.
+/// Overwrite a saved filter's definition ("update to current"). Also rewrites
+/// `version`, so a document saved by an older build is brought forward rather
+/// than left behind at its original version.
 #[instrument(skip(pool, filters))]
-pub async fn update_saved_filter(
-    pool: &SqlitePool,
-    id: &str,
-    filters: &FilterSet,
-) -> Result<()> {
-    let query_json = serde_json::to_string(filters).context("Failed to serialize filter set")?;
-    let res = sqlx::query("UPDATE saved_filters SET query_json = ?, version = ? WHERE id = ?")
+pub async fn update_saved_filter(pool: &SqlitePool, id: &str, filters: &FilterSet) -> Result<()> {
+    let rules = filters
+        .rules
+        .clone()
+        .unwrap_or_else(crate::rules::RuleNode::empty);
+    let query_json = encode_rules(&rules)?;
+
+    let res = sqlx::query("UPDATE rule_sets SET query_json = ?, version = ? WHERE id = ?")
         .bind(&query_json)
-        .bind(SAVED_FILTER_VERSION)
+        .bind(RULE_SET_VERSION)
         .bind(id)
         .execute(pool)
         .await
@@ -1137,12 +1514,249 @@ pub async fn update_saved_filter(
 
 #[instrument(skip(pool))]
 pub async fn delete_saved_filter(pool: &SqlitePool, id: &str) -> Result<()> {
-    sqlx::query("DELETE FROM saved_filters WHERE id = ?")
+    sqlx::query("DELETE FROM rule_sets WHERE id = ?")
         .bind(id)
         .execute(pool)
         .await
         .context("Failed to delete saved filter")?;
     Ok(())
+}
+
+// ── Smart folders ─────────────────────────────────────────────────────────────
+//
+// The same rows as saved filters, with `kind = 'smart'`. What differs is how the
+// app treats them: a smart folder is a PLACE (its tree becomes the scope
+// predicate, and it owns a persisted sort under `view_settings`), where a filter
+// is a lens you apply wherever you already are.
+
+/// A smart folder as the sidebar sees it.
+#[derive(Serialize, Debug, Clone)]
+pub struct SmartFolder {
+    pub id: String,
+    pub name: String,
+    pub notes: Option<String>,
+    pub group_id: Option<String>,
+    pub position: f64,
+    pub rules: crate::rules::RuleNode,
+    pub color: Option<String>,
+    pub pin_position: Option<f64>,
+}
+
+#[derive(FromRow)]
+struct SmartFolderRow {
+    id: String,
+    name: String,
+    notes: Option<String>,
+    group_id: Option<String>,
+    position: f64,
+    version: i64,
+    query_json: String,
+    color: Option<String>,
+    pin_position: Option<f64>,
+}
+
+#[instrument(skip(pool))]
+pub async fn fetch_smart_folders(pool: &SqlitePool) -> Result<Vec<SmartFolder>> {
+    let rows = sqlx::query_as::<_, SmartFolderRow>(
+        "SELECT id, name, notes, group_id, position, version, query_json, color, pin_position \
+         FROM rule_sets WHERE kind = 'smart' ORDER BY position, name",
+    )
+    .fetch_all(pool)
+    .await
+    .context("Failed to fetch smart folders")?;
+
+    // An unreadable row is skipped, never fatal — one bad document must not take
+    // the whole sidebar down with it.
+    Ok(rows
+        .into_iter()
+        .filter_map(|r| {
+            if r.version > RULE_SET_VERSION {
+                warn!(id = %r.id, version = r.version, "Smart folder is from a newer version; skipping");
+                return None;
+            }
+            match serde_json::from_str::<crate::rules::RuleNode>(&r.query_json) {
+                Ok(rules) => Some(SmartFolder {
+                    id: r.id,
+                    name: r.name,
+                    notes: r.notes,
+                    group_id: r.group_id,
+                    position: r.position,
+                    rules,
+                    color: r.color,
+                    pin_position: r.pin_position,
+                }),
+                Err(e) => {
+                    warn!(id = %r.id, error = %e, "Smart folder has unreadable query_json; skipping");
+                    None
+                }
+            }
+        })
+        .collect())
+}
+
+#[instrument(skip(pool, rules))]
+pub async fn create_smart_folder(
+    pool: &SqlitePool,
+    name: &str,
+    rules: &crate::rules::RuleNode,
+) -> Result<SmartFolder> {
+    let name = clean_name(name).context("A smart folder needs a name")?;
+    let query_json = encode_rules(rules)?;
+    let id = uuid::Uuid::new_v4().to_string();
+
+    let position = sqlx::query_scalar::<_, Option<f64>>(
+        "SELECT MAX(position) FROM rule_sets WHERE kind = 'smart'",
+    )
+    .fetch_one(pool)
+    .await
+    .context("Failed to compute smart folder position")?
+    .map(|m| m + 1.0)
+    .unwrap_or(0.0);
+
+    sqlx::query(
+        "INSERT INTO rule_sets (id, kind, name, position, version, query_json, created_at) \
+         VALUES (?, 'smart', ?, ?, ?, ?, ?)",
+    )
+    .bind(&id)
+    .bind(&name)
+    .bind(position)
+    .bind(RULE_SET_VERSION)
+    .bind(&query_json)
+    .bind(stamp(Utc::now()))
+    .execute(pool)
+    .await
+    .context("Failed to insert smart folder")?;
+
+    Ok(SmartFolder {
+        id,
+        name,
+        notes: None,
+        group_id: None,
+        position,
+        rules: rules.clone(),
+        color: None,
+        pin_position: None,
+    })
+}
+
+/// Partial update. `None` leaves a field alone; `Some` replaces it.
+#[derive(Deserialize, Debug, Default)]
+#[serde(default)]
+pub struct SmartFolderPatch {
+    pub name: Option<String>,
+    pub notes: Option<String>,
+    pub rules: Option<crate::rules::RuleNode>,
+}
+
+#[instrument(skip(pool, patch))]
+pub async fn update_smart_folder(
+    pool: &SqlitePool,
+    id: &str,
+    patch: SmartFolderPatch,
+) -> Result<()> {
+    let name = match patch.name {
+        Some(raw) => Some(clean_name(&raw).context("A smart folder needs a name")?),
+        None => None,
+    };
+    let notes = patch.notes.map(|s| blank_to_null(&s));
+    let query_json = match &patch.rules {
+        Some(rules) => Some(encode_rules(rules)?),
+        None => None,
+    };
+
+    if name.is_none() && notes.is_none() && query_json.is_none() {
+        return Ok(());
+    }
+
+    let mut qb = QueryBuilder::new("UPDATE rule_sets SET ");
+    {
+        let mut sep = qb.separated(", ");
+        if let Some(v) = &name {
+            sep.push("name = ");
+            sep.push_bind_unseparated(v);
+        }
+        if let Some(v) = &notes {
+            sep.push("notes = ");
+            sep.push_bind_unseparated(v);
+        }
+        if let Some(v) = &query_json {
+            sep.push("query_json = ");
+            sep.push_bind_unseparated(v);
+            // Rewritten rules are written in the CURRENT format, so a document
+            // saved by an older build is brought forward rather than left
+            // behind at its original version.
+            sep.push("version = ");
+            sep.push_bind_unseparated(RULE_SET_VERSION);
+        }
+    }
+    qb.push(" WHERE id = ").push_bind(id).push(" AND kind = 'smart'");
+
+    let res = qb
+        .build()
+        .execute(pool)
+        .await
+        .context("Failed to update smart folder")?;
+    if res.rows_affected() == 0 {
+        anyhow::bail!("Smart folder not found");
+    }
+
+    // Editing the rules is the one deliberate act that can change membership
+    // wholesale, and it's exactly when the user expects the folder to shift —
+    // so prune here too rather than waiting for the next manual-order open.
+    if let Some(rules) = &patch.rules {
+        if let Err(e) = prune_smart_order(pool, id, rules).await {
+            // Non-fatal: stale ranks are invisible under every other sort, and
+            // failing the edit itself would be a worse trade.
+            warn!(id = %id, error = %e, "Pruning smart folder order after a rule change failed");
+        }
+    }
+    Ok(())
+}
+
+#[instrument(skip(pool))]
+pub async fn delete_smart_folder(pool: &SqlitePool, id: &str) -> Result<()> {
+    let mut tx = pool
+        .begin()
+        .await
+        .context("Failed to begin smart folder delete")?;
+
+    sqlx::query("DELETE FROM rule_sets WHERE id = ? AND kind = 'smart'")
+        .bind(id)
+        .execute(&mut *tx)
+        .await
+        .context("Failed to delete smart folder")?;
+
+    // The sort lives in a key-value table with no foreign key to cascade, so it
+    // has to be cleaned up by hand — otherwise a new smart folder that happened
+    // to reuse the id would inherit a stranger's sort.
+    sqlx::query("DELETE FROM view_settings WHERE view_key = ?")
+        .bind(format!("smart:{id}"))
+        .execute(&mut *tx)
+        .await
+        .context("Failed to clear smart folder sort")?;
+
+    tx.commit()
+        .await
+        .context("Failed to commit smart folder delete")?;
+    Ok(())
+}
+
+/// How many assets a rule tree currently matches.
+///
+/// Powers the editor's live count, which is the only validation a rule set gets:
+/// it tells you the rule is wrong (0 items, or 40,000) before you commit to it,
+/// and it costs one COUNT through the very compiler that will serve the folder.
+#[instrument(skip(pool, rules))]
+pub async fn count_matching(pool: &SqlitePool, rules: &crate::rules::RuleNode) -> Result<i64> {
+    let mut qb = QueryBuilder::<Sqlite>::new("SELECT COUNT(*) FROM assets a");
+    if rules.is_active() {
+        qb.push(" WHERE ");
+        rules.push_predicate(&mut qb);
+    }
+    qb.build_query_scalar()
+        .fetch_one(pool)
+        .await
+        .context("Failed to count matching assets")
 }
 
 // ── Folder CRUD (app-exclusive; never touches the source filesystem) ──────────
@@ -1812,133 +2426,255 @@ pub async fn reorder_folder(
     Ok(())
 }
 
-// ── Pinned folders ────────────────────────────────────────────────────────────
+// ── Pins ──────────────────────────────────────────────────────────────────────
 //
-// A pin is a SHORTCUT, not a place: pinning doesn't move a folder, change its
-// parent, or affect what it contains — it only adds a row to the sidebar's
-// curated list. That's why pin state lives on the folder itself rather than in a
-// join table, and why unpinning is lossless.
+// The sidebar's shortlist holds BOTH folders and smart folders, in ONE order the
+// user arranges freely. That means a single rank space spanning two tables:
+// `folders.pin_position` and `rule_sets.pin_position` are compared against each
+// other, and a reorder writes to whichever table owns the row.
 //
-// Pins are library data (they name folder ids), so they live here in library.db
-// and not in the app-global settings file — otherwise switching libraries would
-// show pins pointing at folders that don't exist.
+// Two rank spaces would have been less code and the wrong model — the pins would
+// interleave by accident of their independent numbering rather than by choice.
 
-/// Pin or unpin a folder. Pinning appends to the end of the list; unpinning
-/// clears the rank but keeps the colour, so re-pinning restores the look.
+/// Which table a pin lives in.
+///
+/// Decoded straight from the `'folder'` / `'smart'` literals in `fetch_pins`'s
+/// UNION, so the sqlx and serde names must agree — one spelling for the DB and
+/// the frontend both.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Type)]
+#[sqlx(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
+pub enum PinKind {
+    Folder,
+    Smart,
+}
+
+impl PinKind {
+    fn table(self) -> &'static str {
+        match self {
+            PinKind::Folder => "folders",
+            PinKind::Smart => "rule_sets",
+        }
+    }
+}
+
+/// One entry in the pinned list, whichever kind it is.
+#[derive(Serialize, Debug, Clone, FromRow)]
+pub struct PinnedItem {
+    pub kind: PinKind,
+    pub id: String,
+    pub name: String,
+    pub color: Option<String>,
+    pub position: f64,
+}
+
+/// The pinned list, in the user's order, across both kinds.
 #[instrument(skip(pool))]
-pub async fn set_folder_pinned(pool: &SqlitePool, id: &str, pinned: bool) -> Result<()> {
-    // Read first so "folder doesn't exist" and "already in that state" are
+pub async fn fetch_pins(pool: &SqlitePool) -> Result<Vec<PinnedItem>> {
+    sqlx::query_as::<_, PinnedItem>(
+        "SELECT 'folder' AS kind, id, name, color, pin_position AS position FROM folders \
+           WHERE pin_position IS NOT NULL \
+         UNION ALL \
+         SELECT 'smart' AS kind, id, name, color, pin_position AS position FROM rule_sets \
+           WHERE kind = 'smart' AND pin_position IS NOT NULL \
+         ORDER BY position, name",
+    )
+    .fetch_all(pool)
+    .await
+    .context("Failed to fetch pins")
+}
+
+/// One past the tail of the SHARED rank space.
+async fn next_pin_position(pool: &SqlitePool) -> Result<f64> {
+    let max: Option<f64> = sqlx::query_scalar(
+        "SELECT MAX(p) FROM (SELECT MAX(pin_position) AS p FROM folders \
+         UNION ALL SELECT MAX(pin_position) AS p FROM rule_sets)",
+    )
+    .fetch_one(pool)
+    .await
+    .context("Failed to compute pin position")?;
+    Ok(max.map(|m| m + 1.0).unwrap_or(0.0))
+}
+
+/// Pin or unpin, whichever kind. Pinning appends; unpinning clears the rank but
+/// keeps the colour, so re-pinning restores the look.
+#[instrument(skip(pool))]
+pub async fn set_pinned(pool: &SqlitePool, kind: PinKind, id: &str, pinned: bool) -> Result<()> {
+    // Read first so "doesn't exist" and "already in that state" stay
     // distinguishable — with a bare UPDATE both look like 0 rows affected.
-    let current: Option<Option<f64>> = sqlx::query_scalar("SELECT pin_position FROM folders WHERE id = ?")
+    let sql = format!("SELECT pin_position FROM {} WHERE id = ?", kind.table());
+    let current: Option<Option<f64>> = sqlx::query_scalar(&sql)
         .bind(id)
         .fetch_optional(pool)
         .await
-        .context("Failed to read folder pin state")?;
+        .context("Failed to read pin state")?;
 
-    let Some(pin_position) = current else {
-        anyhow::bail!("Folder not found");
+    let Some(position) = current else {
+        anyhow::bail!("Not found");
     };
-    if pin_position.is_some() == pinned {
+    if position.is_some() == pinned {
         return Ok(()); // idempotent: re-pinning must not shuffle the order
     }
 
-    if pinned {
-        sqlx::query(
-            "UPDATE folders
-                SET pin_position = COALESCE(
-                    (SELECT MAX(pin_position) + 1.0 FROM folders WHERE pin_position IS NOT NULL),
-                    0.0
-                )
-              WHERE id = ?",
-        )
+    let value = if pinned {
+        Some(next_pin_position(pool).await?)
     } else {
-        sqlx::query("UPDATE folders SET pin_position = NULL WHERE id = ?")
-    }
-    .bind(id)
-    .execute(pool)
-    .await
-    .context("Failed to update folder pin")?;
-
+        None
+    };
+    let sql = format!("UPDATE {} SET pin_position = ? WHERE id = ?", kind.table());
+    sqlx::query(&sql)
+        .bind(value)
+        .bind(id)
+        .execute(pool)
+        .await
+        .context("Failed to update pin")?;
     Ok(())
 }
 
-/// Drag-to-reorder within the pinned list. `after` is the pin the folder lands
-/// behind; `None` means it becomes the first pin.
-///
-/// Same fractional-rank scheme as [`reorder_folder`], minus the tree: pins are
-/// one flat list, so there are no siblings to scope to and no cycle to check.
+/// Set or clear a pin's accent, whichever kind. Validated against [`PIN_COLORS`]
+/// here as well as in `update_folder`, because this path bypasses that patch.
 #[instrument(skip(pool))]
-pub async fn reorder_pin(pool: &SqlitePool, id: &str, after: Option<&str>) -> Result<()> {
+pub async fn set_pin_color(
+    pool: &SqlitePool,
+    kind: PinKind,
+    id: &str,
+    color: Option<&str>,
+) -> Result<()> {
+    if let Some(c) = color {
+        if !PIN_COLORS.contains(&c) {
+            anyhow::bail!("Unknown pin colour");
+        }
+    }
+    let sql = format!("UPDATE {} SET color = ? WHERE id = ?", kind.table());
+    let res = sqlx::query(&sql)
+        .bind(color)
+        .bind(id)
+        .execute(pool)
+        .await
+        .context("Failed to set pin colour")?;
+    if res.rows_affected() == 0 {
+        anyhow::bail!("Not found");
+    }
+    Ok(())
+}
+
+/// Drag-to-reorder across the whole pinned list. `after` is the pin it lands
+/// behind; `None` means it becomes the first.
+#[instrument(skip(pool))]
+pub async fn reorder_pin(
+    pool: &SqlitePool,
+    kind: PinKind,
+    id: &str,
+    after_kind: Option<PinKind>,
+    after_id: Option<&str>,
+) -> Result<()> {
     let mut tx = pool
         .begin()
         .await
         .context("Failed to begin pin reorder transaction")?;
 
-    // The other pins in display order. Excluding the one being moved, because
-    // its current slot is not a neighbour of where it's going.
-    let pins: Vec<(String, f64)> = sqlx::query_as(
-        "SELECT id, pin_position FROM folders
-         WHERE pin_position IS NOT NULL AND id <> ?
-         ORDER BY pin_position",
+    // Every other pin, in display order, across both tables.
+    let pins: Vec<PinnedItem> = sqlx::query_as(
+        "SELECT * FROM (\
+           SELECT 'folder' AS kind, id, name, color, pin_position AS position FROM folders \
+             WHERE pin_position IS NOT NULL \
+           UNION ALL \
+           SELECT 'smart' AS kind, id, name, color, pin_position AS position FROM rule_sets \
+             WHERE kind = 'smart' AND pin_position IS NOT NULL) \
+         ORDER BY position, name",
     )
-    .bind(id)
     .fetch_all(&mut *tx)
     .await
-    .context("Failed to read pinned folders")?;
+    .context("Failed to read pins")?;
+
+    let others: Vec<&PinnedItem> = pins
+        .iter()
+        .filter(|p| !(p.kind == kind && p.id == id))
+        .collect();
 
     // An `after` that isn't in the list (a stale sidebar) appends rather than
     // failing — the same forgiving rule the folder tree uses.
-    let insert_at = match after {
-        Some(a) => pins
+    let insert_at = match (after_kind, after_id) {
+        (Some(ak), Some(aid)) => others
             .iter()
-            .position(|(pid, _)| pid == a)
+            .position(|p| p.kind == ak && p.id == aid)
             .map(|i| i + 1)
-            .unwrap_or(pins.len()),
-        None => 0,
+            .unwrap_or(others.len()),
+        _ => 0,
     };
 
-    let prev = insert_at.checked_sub(1).and_then(|i| pins.get(i)).map(|(_, p)| *p);
-    let next = pins.get(insert_at).map(|(_, p)| *p);
+    let prev = insert_at.checked_sub(1).and_then(|i| others.get(i)).map(|p| p.position);
+    let next = others.get(insert_at).map(|p| p.position);
 
     let position = match (prev, next) {
         (None, None) => 0.0,
         (None, Some(n)) => n - 1.0,
         (Some(p), None) => p + 1.0,
         (Some(p), Some(n)) if n - p > POSITION_EPSILON => (p + n) / 2.0,
-        // Gap exhausted — renumber 0,1,2…, leaving a hole for the arriving pin.
+        // Gap exhausted — renumber, leaving a hole for the arriving pin. Writes
+        // land in whichever table owns each row.
         (Some(_), Some(_)) => {
             tracing::info!("Pin positions exhausted; renumbering");
-            for (rank, (pid, _)) in pins.iter().enumerate() {
-                let renumbered = if rank < insert_at {
-                    rank as f64
-                } else {
-                    rank as f64 + 1.0
-                };
-                sqlx::query("UPDATE folders SET pin_position = ? WHERE id = ?")
+            for (rank, p) in others.iter().enumerate() {
+                let renumbered = if rank < insert_at { rank as f64 } else { rank as f64 + 1.0 };
+                let sql = format!("UPDATE {} SET pin_position = ? WHERE id = ?", p.kind.table());
+                sqlx::query(&sql)
                     .bind(renumbered)
-                    .bind(pid)
+                    .bind(&p.id)
                     .execute(&mut *tx)
                     .await
-                    .context("Failed to renumber pinned folders")?;
+                    .context("Failed to renumber pins")?;
             }
             insert_at as f64
         }
     };
 
-    let res = sqlx::query("UPDATE folders SET pin_position = ? WHERE id = ? AND pin_position IS NOT NULL")
+    let sql = format!(
+        "UPDATE {} SET pin_position = ? WHERE id = ? AND pin_position IS NOT NULL",
+        kind.table()
+    );
+    let res = sqlx::query(&sql)
         .bind(position)
         .bind(id)
         .execute(&mut *tx)
         .await
         .context("Failed to reorder pin")?;
     if res.rows_affected() == 0 {
-        anyhow::bail!("Folder is not pinned");
+        anyhow::bail!("That item isn't pinned");
     }
 
     tx.commit()
         .await
         .context("Failed to commit pin reorder transaction")?;
     Ok(())
+}
+
+/// A few assets a rule set currently matches, for the sidebar preview.
+///
+/// Deliberately the light row and a small LIMIT: this answers "what's in here
+/// right now", which a list of rules can't, and it must stay cheap enough to run
+/// on hover.
+#[instrument(skip(pool, rules))]
+pub async fn preview_matches(
+    pool: &SqlitePool,
+    rules: &crate::rules::RuleNode,
+    limit: i64,
+) -> Result<Vec<AssetLightRow>> {
+    let mut qb = QueryBuilder::<Sqlite>::new(
+        "SELECT a.id, a.width, a.height, a.asset_type, a.thumb_hash, a.is_animated, a.filename \
+         FROM assets a",
+    );
+    if rules.is_active() {
+        qb.push(" WHERE ");
+        rules.push_predicate(&mut qb);
+    }
+    qb.push(" ORDER BY a.imported_date DESC, a.id DESC LIMIT ")
+        .push_bind(limit.clamp(1, 50));
+
+    qb.build_query_as::<AssetLightRow>()
+        .fetch_all(pool)
+        .await
+        .context("Failed to preview matches")
 }
 
 /// Reparent a folder (and append it to the end of the new parent's siblings).
@@ -3134,4 +3870,420 @@ async fn update_thumbnails(pool: &SqlitePool, updates: &[ThumbUpdate]) -> Result
         .await
         .context("Failed to commit thumbnail updates")?;
     Ok(())
+}
+
+/// End-to-end backend tests for the manifest query.
+///
+/// The rule tests cover the compiler and the wire tests cover parsing, but
+/// neither covers the two together THROUGH `ManifestQuery` — which is the actual
+/// path a filter takes. That gap is where a filter can parse fine, compile fine,
+/// and still not narrow anything.
+#[cfg(test)]
+mod manifest_tests {
+    use super::*;
+
+    async fn db() -> SqlitePool {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        for stmt in [
+            "CREATE TABLE assets (id TEXT PRIMARY KEY, asset_type TEXT, filename TEXT, \
+             notes TEXT, source_url TEXT, file_size INTEGER, width INTEGER, height INTEGER, \
+             extension TEXT, imported_date TEXT, creation_date TEXT, modified_date TEXT, \
+             manual_position REAL, thumb_hash TEXT, is_animated INTEGER)",
+            "CREATE TABLE assets_tags (asset_id TEXT, tag_id TEXT)",
+            "CREATE TABLE assets_folders (folder_id TEXT, asset_id TEXT, position REAL)",
+            "INSERT INTO assets VALUES ('i1','image','a.png',NULL,NULL,10,100,100,'png',\
+             '2026-01-01T00:00:00.000Z','2026-01-01T00:00:00.000Z','2026-01-01T00:00:00.000Z',0,NULL,0)",
+            "INSERT INTO assets VALUES ('v1','video','b.mp4',NULL,NULL,20,100,100,'mp4',\
+             '2026-01-01T00:00:00.000Z','2026-01-01T00:00:00.000Z','2026-01-01T00:00:00.000Z',1,NULL,0)",
+            "INSERT INTO assets_tags VALUES ('i1','t1')",
+        ] {
+            sqlx::query(stmt).execute(&pool).await.unwrap();
+        }
+        pool
+    }
+
+    async fn ids_for(pool: &SqlitePool, query_json: &str) -> Vec<String> {
+        let query: ManifestQuery = serde_json::from_str(query_json).expect("query must parse");
+        let mut qb = build_manifest_query(
+            &query.scope,
+            None,
+            &query.filters,
+            query.sort.unwrap_or(DEFAULT_SORT),
+        );
+        qb.build_query_as::<AssetLightRow>()
+            .fetch_all(pool)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|r| r.id)
+            .collect()
+    }
+
+    /// The exact payload the filter bar sends when you click "Videos".
+    #[tokio::test]
+    async fn media_type_filter_narrows_the_manifest() {
+        let pool = db().await;
+        let ids = ids_for(
+            &pool,
+            r#"{"scope":{"kind":"all"},"filters":{"rules":{"kind":"group","op":"all","children":[
+                {"kind":"condition","type":"media_type","types":["video"]}]},"text":null},
+                "sort":{"order_by":"imported_date","is_ascending":false}}"#,
+        )
+        .await;
+        assert_eq!(ids, vec!["v1"], "clicking Videos must not leave images in");
+    }
+
+    /// And when you select a tag to include.
+    #[tokio::test]
+    async fn tag_include_filter_narrows_the_manifest() {
+        let pool = db().await;
+        let ids = ids_for(
+            &pool,
+            r#"{"scope":{"kind":"all"},"filters":{"rules":{"kind":"group","op":"all","children":[
+                {"kind":"condition","type":"tags","mode":"all","include":["t1"],"exclude":[],"untagged":false}]},
+                "text":null},"sort":{"order_by":"imported_date","is_ascending":false}}"#,
+        )
+        .await;
+        assert_eq!(ids, vec!["i1"]);
+    }
+}
+
+/// Manual order inside a smart folder.
+///
+/// The riskiest surface in the feature: a wrong rank doesn't crash, it just puts
+/// the user's assets in the wrong order, which nothing else would catch.
+#[cfg(test)]
+mod smart_order_tests {
+    use super::*;
+
+    const SMART: &str = "s1";
+
+    async fn db() -> SqlitePool {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        for stmt in [
+            "CREATE TABLE assets (id TEXT PRIMARY KEY, asset_type TEXT, filename TEXT, \
+             notes TEXT, source_url TEXT, file_size INTEGER, width INTEGER, height INTEGER, \
+             extension TEXT, imported_date TEXT, creation_date TEXT, modified_date TEXT, \
+             manual_position REAL, thumb_hash TEXT, is_animated INTEGER)",
+            "CREATE TABLE assets_tags (asset_id TEXT, tag_id TEXT)",
+            "CREATE TABLE assets_folders (folder_id TEXT, asset_id TEXT, position REAL)",
+            "CREATE TABLE smart_folder_order (smart_folder_id TEXT, asset_id TEXT, \
+             position REAL NOT NULL, PRIMARY KEY (smart_folder_id, asset_id))",
+            // `reorder_assets` resolves the folder's predicate from here rather
+            // than trusting the caller, so the row has to exist.
+            "CREATE TABLE rule_sets (id TEXT PRIMARY KEY, kind TEXT, name TEXT, \
+             version INTEGER, query_json TEXT)",
+        ] {
+            sqlx::query(stmt).execute(&pool).await.unwrap();
+        }
+        sqlx::query("INSERT INTO rule_sets VALUES (?, 'smart', 'Videos', ?, ?)")
+            .bind(SMART)
+            .bind(RULE_SET_VERSION)
+            .bind(serde_json::to_string(&rules()).unwrap())
+            .execute(&pool)
+            .await
+            .unwrap();
+        // Three videos, newest first by imported_date: v3, v2, v1. Plus an image
+        // that the smart folder's rules exclude.
+        for (id, ty, date) in [
+            ("v1", "video", "2026-01-01T00:00:00.000Z"),
+            ("v2", "video", "2026-01-02T00:00:00.000Z"),
+            ("v3", "video", "2026-01-03T00:00:00.000Z"),
+            ("i1", "image", "2026-01-04T00:00:00.000Z"),
+        ] {
+            sqlx::query(
+                "INSERT INTO assets VALUES (?, ?, 'f', NULL, NULL, 1, 10, 10, 'x', ?, ?, ?, 0, NULL, 0)",
+            )
+            .bind(id).bind(ty).bind(date).bind(date).bind(date)
+            .execute(&pool).await.unwrap();
+        }
+        pool
+    }
+
+    /// "Every video" — the scope predicate under test.
+    fn rules() -> crate::rules::RuleNode {
+        serde_json::from_str(
+            r#"{"kind":"condition","type":"media_type","types":["video"]}"#,
+        )
+        .unwrap()
+    }
+
+    async fn order(pool: &SqlitePool) -> Vec<String> {
+        let scope = Scope::Smart { id: SMART.into() };
+        let rules = rules();
+        let sort = Sort { order_by: OrderBy::Manual, is_ascending: true };
+        let filters = FilterSet::default();
+        build_manifest_query(&scope, Some(&rules), &filters, sort)
+            .build_query_as::<AssetLightRow>()
+            .fetch_all(pool)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|r| r.id)
+            .collect()
+    }
+
+    async fn reorder(pool: &SqlitePool, moved: &str, after: Option<&str>) {
+        reorder_assets(pool, &Scope::Smart { id: SMART.into() }, &[moved.into()], after)
+            .await
+            .unwrap();
+    }
+
+    /// With nothing placed, the folder still reads newest-first — the unranked
+    /// tail is a real order, not a pile.
+    #[tokio::test]
+    async fn unranked_members_sort_newest_first() {
+        let pool = db().await;
+        assert_eq!(order(&pool).await, vec!["v3", "v2", "v1"]);
+    }
+
+    #[tokio::test]
+    async fn dragging_reorders_and_persists() {
+        let pool = db().await;
+        // Put the oldest at the very front.
+        reorder(&pool, "v1", None).await;
+        assert_eq!(order(&pool).await, vec!["v1", "v3", "v2"]);
+    }
+
+    /// The whole reason this table exists: two smart folders (and All assets)
+    /// must order independently.
+    #[tokio::test]
+    async fn reordering_does_not_touch_the_global_rank() {
+        let pool = db().await;
+        reorder(&pool, "v1", None).await;
+        let globals: Vec<f64> = sqlx::query_scalar("SELECT manual_position FROM assets")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert!(
+            globals.iter().all(|p| *p == 0.0),
+            "smart folder reorder must not write assets.manual_position, got {globals:?}"
+        );
+    }
+
+    /// A new match appends at the bottom rather than landing wherever its
+    /// import date would put it among ranked rows.
+    #[tokio::test]
+    async fn new_members_append_after_the_ranked_block() {
+        let pool = db().await;
+        reorder(&pool, "v1", None).await; // ranks v1, v3, v2
+
+        sqlx::query(
+            "INSERT INTO assets VALUES ('v4','video','f',NULL,NULL,1,10,10,'x',\
+             '2026-01-09T00:00:00.000Z','2026-01-09T00:00:00.000Z','2026-01-09T00:00:00.000Z',0,NULL,0)",
+        )
+        .execute(&pool).await.unwrap();
+
+        // Newest of all, but unplaced — so it goes last, not first.
+        assert_eq!(order(&pool).await, vec!["v1", "v3", "v2", "v4"]);
+    }
+
+    /// Leaving and returning must lose the old slot: removing what made an asset
+    /// match is deliberate, so it comes back as a newcomer.
+    #[tokio::test]
+    async fn a_departed_asset_loses_its_rank() {
+        let pool = db().await;
+        reorder(&pool, "v1", None).await;
+        assert_eq!(order(&pool).await, vec!["v1", "v3", "v2"]);
+
+        // v1 stops matching, and the folder is opened (prune runs).
+        sqlx::query("UPDATE assets SET asset_type = 'image' WHERE id = 'v1'")
+            .execute(&pool).await.unwrap();
+        prune_smart_order(&pool, SMART, &rules()).await.unwrap();
+
+        // ...then matches again. It has no rank now, so it sorts to the tail.
+        sqlx::query("UPDATE assets SET asset_type = 'video' WHERE id = 'v1'")
+            .execute(&pool).await.unwrap();
+        assert_eq!(order(&pool).await, vec!["v3", "v2", "v1"]);
+    }
+
+    /// Pruning must only drop the departed — a bug here silently erases an
+    /// order the user built by hand.
+    #[tokio::test]
+    async fn pruning_keeps_ranks_of_current_members() {
+        let pool = db().await;
+        reorder(&pool, "v1", None).await;
+        prune_smart_order(&pool, SMART, &rules()).await.unwrap();
+        assert_eq!(order(&pool).await, vec!["v1", "v3", "v2"]);
+    }
+}
+
+/// Groups of smart folders, browsed as a union.
+#[cfg(test)]
+mod group_tests {
+    use super::*;
+
+    async fn db() -> SqlitePool {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        for stmt in [
+            "CREATE TABLE assets (id TEXT PRIMARY KEY, asset_type TEXT, filename TEXT, \
+             notes TEXT, source_url TEXT, file_size INTEGER, width INTEGER, height INTEGER, \
+             extension TEXT, imported_date TEXT, creation_date TEXT, modified_date TEXT, \
+             manual_position REAL, thumb_hash TEXT, is_animated INTEGER)",
+            "CREATE TABLE assets_tags (asset_id TEXT, tag_id TEXT)",
+            "CREATE TABLE assets_folders (folder_id TEXT, asset_id TEXT, position REAL)",
+            "CREATE TABLE rule_sets (id TEXT PRIMARY KEY, kind TEXT, name TEXT, group_id TEXT, \
+             position REAL, version INTEGER, query_json TEXT)",
+            "INSERT INTO assets VALUES ('i1','image','a.png',NULL,NULL,1,1,1,'png',\
+             '2026-01-01T00:00:00.000Z','x','x',0,NULL,0)",
+            "INSERT INTO assets VALUES ('v1','video','b.mp4',NULL,NULL,1,1,1,'mp4',\
+             '2026-01-02T00:00:00.000Z','x','x',0,NULL,0)",
+            "INSERT INTO assets VALUES ('a1','audio','c.mp3',NULL,NULL,1,1,1,'mp3',\
+             '2026-01-03T00:00:00.000Z','x','x',0,NULL,0)",
+        ] {
+            sqlx::query(stmt).execute(&pool).await.unwrap();
+        }
+        pool
+    }
+
+    async fn add_member(pool: &SqlitePool, id: &str, group: Option<&str>, ty: &str) {
+        let json = format!(
+            r#"{{"kind":"condition","type":"media_type","types":["{ty}"]}}"#
+        );
+        sqlx::query("INSERT INTO rule_sets VALUES (?, 'smart', ?, ?, 0, ?, ?)")
+            .bind(id).bind(id).bind(group).bind(RULE_SET_VERSION).bind(json)
+            .execute(pool).await.unwrap();
+    }
+
+    async fn ids_in_group(pool: &SqlitePool, group: &str) -> Vec<String> {
+        let scope = Scope::SmartGroup { id: group.into() };
+        let rules = resolve_scope_rules(pool, &scope).await.unwrap();
+        build_manifest_query(&scope, rules.as_ref(), &FilterSet::default(), DEFAULT_SORT)
+            .build_query_as::<AssetLightRow>()
+            .fetch_all(pool)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|r| r.id)
+            .collect()
+    }
+
+    /// The union, deduplicated for free — we select rows from `assets`, so an
+    /// asset matching two members is still one row, with no UNION and no
+    /// DISTINCT pass.
+    #[tokio::test]
+    async fn a_group_is_the_union_of_its_members() {
+        let pool = db().await;
+        add_member(&pool, "s_vid", Some("g1"), "video").await;
+        add_member(&pool, "s_aud", Some("g1"), "audio").await;
+        add_member(&pool, "s_img", None, "image").await; // ungrouped, must not leak in
+
+        let mut ids = ids_in_group(&pool, "g1").await;
+        ids.sort();
+        assert_eq!(ids, vec!["a1", "v1"]);
+    }
+
+    /// Overlapping members must not double-count.
+    #[tokio::test]
+    async fn overlapping_members_yield_one_row_each() {
+        let pool = db().await;
+        add_member(&pool, "s_a", Some("g1"), "video").await;
+        add_member(&pool, "s_b", Some("g1"), "video").await;
+        assert_eq!(ids_in_group(&pool, "g1").await, vec!["v1"]);
+    }
+
+    /// The union of NOTHING is empty — not everything.
+    ///
+    /// This deliberately differs from an empty rule GROUP in the editor, which
+    /// constrains nothing: that one is a half-written filter, where showing the
+    /// library is the forgiving reading. An empty container is genuinely empty,
+    /// and showing the whole library would claim otherwise.
+    #[tokio::test]
+    async fn an_empty_group_shows_nothing() {
+        let pool = db().await;
+        add_member(&pool, "s_img", None, "image").await;
+        assert!(ids_in_group(&pool, "g_empty").await.is_empty());
+    }
+
+    /// `view_settings` is user-editable data, so a stored `manual` must not
+    /// reach the reorder path that can't honour it for a union.
+    #[tokio::test]
+    async fn a_group_never_resolves_to_manual_sort() {
+        let pool = db().await;
+        sqlx::query("CREATE TABLE view_settings (view_key TEXT PRIMARY KEY, order_by TEXT, is_ascending INTEGER)")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO view_settings VALUES ('smartgroup:g1', 'manual', 1)")
+            .execute(&pool).await.unwrap();
+
+        let sort = resolve_sort(&pool, &Scope::SmartGroup { id: "g1".into() })
+            .await
+            .unwrap();
+        assert!(!matches!(sort.order_by, OrderBy::Manual), "got {:?}", sort.order_by);
+    }
+}
+
+/// The wire spelling of `Scope`.
+///
+/// Every other scope test constructs `Scope::SmartGroup` in Rust, which never
+/// exercises serde's rename — so a frontend sending `"smartgroup"` against a
+/// variant serde calls `"smart_group"` compiled, passed every test, and failed
+/// at runtime. This pins the names the frontend must use.
+#[cfg(test)]
+mod scope_wire_tests {
+    use super::*;
+
+    #[test]
+    fn scope_kinds_match_the_frontend() {
+        for (json, expected) in [
+            (r#"{"kind":"all"}"#, "all"),
+            (r#"{"kind":"uncategorized"}"#, "uncategorized"),
+            (r#"{"kind":"folder","id":"f1"}"#, "folder"),
+            (r#"{"kind":"smart","id":"s1"}"#, "smart"),
+            (r#"{"kind":"smart_group","id":"g1"}"#, "smart_group"),
+        ] {
+            let scope: Scope =
+                serde_json::from_str(json).unwrap_or_else(|e| panic!("{expected}: {e}"));
+            // Round-trips through the same name the frontend sent.
+            let kind = match scope {
+                Scope::All => "all",
+                Scope::Uncategorized => "uncategorized",
+                Scope::Folder { .. } => "folder",
+                Scope::Smart { .. } => "smart",
+                Scope::SmartGroup { .. } => "smart_group",
+            };
+            assert_eq!(kind, expected);
+        }
+    }
+}
+
+/// The wire vocabulary for pins.
+///
+/// Written BEFORE the frontend that consumes it, because the last three bugs in
+/// this feature were all a name that compiled on both sides and disagreed across
+/// the IPC boundary. `PinKind` is worse than most: it crosses THREE boundaries —
+/// SQL literal, serde, and TypeScript — so all three spellings are pinned here.
+#[cfg(test)]
+mod pin_wire_tests {
+    use super::*;
+
+    #[test]
+    fn pin_kind_spellings_agree() {
+        // serde, as the frontend sends and receives it.
+        assert_eq!(serde_json::to_string(&PinKind::Folder).unwrap(), r#""folder""#);
+        assert_eq!(serde_json::to_string(&PinKind::Smart).unwrap(), r#""smart""#);
+        let k: PinKind = serde_json::from_str(r#""smart""#).unwrap();
+        assert_eq!(k, PinKind::Smart);
+
+        // …and the SQL literals `fetch_pins` decodes from must match those.
+        assert_eq!(PinKind::Folder.table(), "folders");
+        assert_eq!(PinKind::Smart.table(), "rule_sets");
+    }
+
+    /// The keys the sidebar reads. A rename here silently empties the pin list.
+    #[test]
+    fn pinned_item_has_the_keys_the_sidebar_reads() {
+        let json = serde_json::to_value(PinnedItem {
+            kind: PinKind::Smart,
+            id: "s1".into(),
+            name: "Renders".into(),
+            color: Some("blue".into()),
+            position: 1.0,
+        })
+        .unwrap();
+
+        for key in ["kind", "id", "name", "color", "position"] {
+            assert!(json.get(key).is_some(), "PinnedItem lost `{key}`: {json}");
+        }
+        assert_eq!(json["kind"], "smart");
+    }
 }

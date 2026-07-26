@@ -3,6 +3,19 @@
 
     const sort = $derived(assetLibrary.sort);
 
+    // "Date added to folder" only means something in a folder — outside one it
+    // silently falls back to the import date, which is a different question.
+    // A group of smart folders has no manual order: its contents are a union of
+    // queries the user never arranged as one list. The backend coerces a stored
+    // `manual` away too — this just keeps it off the menu.
+    const inFolder = $derived(assetLibrary.scope.kind === "folder");
+    const inGroup = $derived(assetLibrary.scope.kind === "smart_group");
+    const options = $derived(
+        ORDER_BY_LABELS.filter(
+            (o) => (!o.folderOnly || inFolder) && !(inGroup && o.value === "manual"),
+        ),
+    );
+
     // Switching criterion picks the direction people actually expect: newest and
     // largest first for dates/size, A→Z and first-added-first for name/manual.
     function setCriterion(order_by: OrderBy) {
@@ -24,7 +37,7 @@
         class="rounded border border-neutral-300 bg-white px-1.5 py-0.5 text-xs text-neutral-700
                focus:outline-none focus-visible:ring-1 focus-visible:ring-neutral-400"
     >
-        {#each ORDER_BY_LABELS as opt (opt.value)}
+        {#each options as opt (opt.value)}
             <option value={opt.value}>{opt.label}</option>
         {/each}
     </select>

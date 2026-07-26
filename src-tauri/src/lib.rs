@@ -6,6 +6,7 @@ mod error;
 mod extract;
 mod fs;
 mod library;
+mod rules;
 mod search;
 mod tags;
 mod thumbnail;
@@ -41,6 +42,16 @@ pub fn run() {
             commands::connect_library,
             commands::stream_manifest,
             commands::fetch_folders,
+            commands::fetch_smart_folders,
+            commands::create_smart_folder,
+            commands::update_smart_folder,
+            commands::delete_smart_folder,
+            commands::count_matching,
+            commands::fetch_smart_folder_groups,
+            commands::create_smart_folder_group,
+            commands::rename_smart_folder_group,
+            commands::delete_smart_folder_group,
+            commands::set_smart_folder_group,
             commands::create_folder,
             commands::update_folder,
             commands::folder_stats,
@@ -50,8 +61,11 @@ pub fn run() {
             commands::delete_folders,
             commands::move_folder,
             commands::reorder_folder,
-            commands::set_folder_pinned,
+            commands::fetch_pins,
+            commands::set_pinned,
+            commands::set_pin_color,
             commands::reorder_pin,
+            commands::preview_matches,
             commands::reorder_assets,
             commands::add_assets_to_folder,
             commands::move_assets_to_folder,

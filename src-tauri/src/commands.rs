@@ -435,6 +435,144 @@ pub async fn delete_saved_filter(
         .map_err(AppError::from)
 }
 
+// ── Smart folders ─────────────────────────────────────────────────────────────
+
+#[instrument(skip_all)]
+#[tauri::command]
+pub async fn fetch_smart_folders(
+    state: tauri::State<'_, DbState>,
+) -> Result<Vec<assets::SmartFolder>, AppError> {
+    let pool = state.acquire_pool().await?;
+    assets::fetch_smart_folders(&pool)
+        .await
+        .inspect_err(|e| tracing::error!(error = %e, "fetch_smart_folders failed"))
+        .map_err(AppError::from)
+}
+
+#[instrument(skip_all, fields(name = %name))]
+#[tauri::command]
+pub async fn create_smart_folder(
+    name: String,
+    rules: crate::rules::RuleNode,
+    state: tauri::State<'_, DbState>,
+) -> Result<assets::SmartFolder, AppError> {
+    let pool = state.acquire_pool().await?;
+    assets::create_smart_folder(&pool, &name, &rules)
+        .await
+        .inspect_err(|e| tracing::error!(error = %e, "create_smart_folder failed"))
+        .map_err(AppError::from)
+}
+
+#[instrument(skip_all)]
+#[tauri::command]
+pub async fn update_smart_folder(
+    id: String,
+    patch: assets::SmartFolderPatch,
+    state: tauri::State<'_, DbState>,
+) -> Result<(), AppError> {
+    let pool = state.acquire_pool().await?;
+    assets::update_smart_folder(&pool, &id, patch)
+        .await
+        .inspect_err(|e| tracing::error!(error = %e, "update_smart_folder failed"))
+        .map_err(AppError::from)
+}
+
+#[instrument(skip_all)]
+#[tauri::command]
+pub async fn delete_smart_folder(
+    id: String,
+    state: tauri::State<'_, DbState>,
+) -> Result<(), AppError> {
+    let pool = state.acquire_pool().await?;
+    assets::delete_smart_folder(&pool, &id)
+        .await
+        .inspect_err(|e| tracing::error!(error = %e, "delete_smart_folder failed"))
+        .map_err(AppError::from)
+}
+
+/// Live "Found N items" for the rule editor. Debounced by the caller — this runs
+/// the real predicate, so it costs a real query.
+#[instrument(skip_all)]
+#[tauri::command]
+pub async fn count_matching(
+    rules: crate::rules::RuleNode,
+    state: tauri::State<'_, DbState>,
+) -> Result<i64, AppError> {
+    let pool = state.acquire_pool().await?;
+    assets::count_matching(&pool, &rules)
+        .await
+        .inspect_err(|e| tracing::error!(error = %e, "count_matching failed"))
+        .map_err(AppError::from)
+}
+
+#[instrument(skip_all)]
+#[tauri::command]
+pub async fn fetch_smart_folder_groups(
+    state: tauri::State<'_, DbState>,
+) -> Result<Vec<assets::SmartFolderGroup>, AppError> {
+    let pool = state.acquire_pool().await?;
+    assets::fetch_smart_folder_groups(&pool)
+        .await
+        .inspect_err(|e| tracing::error!(error = %e, "fetch_smart_folder_groups failed"))
+        .map_err(AppError::from)
+}
+
+#[instrument(skip_all, fields(name = %name))]
+#[tauri::command]
+pub async fn create_smart_folder_group(
+    name: String,
+    state: tauri::State<'_, DbState>,
+) -> Result<assets::SmartFolderGroup, AppError> {
+    let pool = state.acquire_pool().await?;
+    assets::create_smart_folder_group(&pool, &name)
+        .await
+        .inspect_err(|e| tracing::error!(error = %e, "create_smart_folder_group failed"))
+        .map_err(AppError::from)
+}
+
+#[instrument(skip_all)]
+#[tauri::command]
+pub async fn rename_smart_folder_group(
+    id: String,
+    name: String,
+    state: tauri::State<'_, DbState>,
+) -> Result<(), AppError> {
+    let pool = state.acquire_pool().await?;
+    assets::rename_smart_folder_group(&pool, &id, &name)
+        .await
+        .inspect_err(|e| tracing::error!(error = %e, "rename_smart_folder_group failed"))
+        .map_err(AppError::from)
+}
+
+/// Deleting a group UNGROUPS its members; it never deletes saved queries.
+#[instrument(skip_all)]
+#[tauri::command]
+pub async fn delete_smart_folder_group(
+    id: String,
+    state: tauri::State<'_, DbState>,
+) -> Result<(), AppError> {
+    let pool = state.acquire_pool().await?;
+    assets::delete_smart_folder_group(&pool, &id)
+        .await
+        .inspect_err(|e| tracing::error!(error = %e, "delete_smart_folder_group failed"))
+        .map_err(AppError::from)
+}
+
+/// Move a smart folder into a group; `groupId: null` ungroups it.
+#[instrument(skip_all)]
+#[tauri::command]
+pub async fn set_smart_folder_group(
+    id: String,
+    group_id: Option<String>,
+    state: tauri::State<'_, DbState>,
+) -> Result<(), AppError> {
+    let pool = state.acquire_pool().await?;
+    assets::set_smart_folder_group(&pool, &id, group_id.as_deref())
+        .await
+        .inspect_err(|e| tracing::error!(error = %e, "set_smart_folder_group failed"))
+        .map_err(AppError::from)
+}
+
 #[instrument(skip_all)]
 #[tauri::command]
 pub async fn fetch_folders(
@@ -534,36 +672,88 @@ pub async fn reorder_assets(
         .inspect_err(|e| tracing::error!(error = %e, "reorder_assets failed"))
         .map_err(AppError::from)
 }
+// ── Pins ──────────────────────────────────────────────────────────────────────
+//
+// One list, two kinds. Every command takes a `kind` so the sidebar's shortlist
+// can hold folders and smart folders in a single order the user arranges.
 
-/// Pin or unpin a folder in the sidebar. Pinning appends to the end of the list.
+/// The pinned list, in order, across both kinds.
 #[instrument(skip_all)]
 #[tauri::command]
-pub async fn set_folder_pinned(
+pub async fn fetch_pins(
+    state: tauri::State<'_, DbState>,
+) -> Result<Vec<assets::PinnedItem>, AppError> {
+    let pool = state.acquire_pool().await?;
+    assets::fetch_pins(&pool)
+        .await
+        .inspect_err(|e| tracing::error!(error = %e, "fetch_pins failed"))
+        .map_err(AppError::from)
+}
+
+/// Pin or unpin. Pinning appends to the end of the shared list.
+#[instrument(skip_all)]
+#[tauri::command]
+pub async fn set_pinned(
+    kind: assets::PinKind,
     id: String,
     pinned: bool,
     state: tauri::State<'_, DbState>,
 ) -> Result<(), AppError> {
     let pool = state.acquire_pool().await?;
-    assets::set_folder_pinned(&pool, &id, pinned)
+    assets::set_pinned(&pool, kind, &id, pinned)
         .await
-        .inspect_err(|e| tracing::error!(error = %e, "set_folder_pinned failed"))
+        .inspect_err(|e| tracing::error!(error = %e, "set_pinned failed"))
         .map_err(AppError::from)
 }
 
-/// Drag-to-reorder inside the pinned list. `afterId: null` means first.
+/// Set or clear a pin's accent. `color: null` clears it.
+#[instrument(skip_all)]
+#[tauri::command]
+pub async fn set_pin_color(
+    kind: assets::PinKind,
+    id: String,
+    color: Option<String>,
+    state: tauri::State<'_, DbState>,
+) -> Result<(), AppError> {
+    let pool = state.acquire_pool().await?;
+    assets::set_pin_color(&pool, kind, &id, color.as_deref())
+        .await
+        .inspect_err(|e| tracing::error!(error = %e, "set_pin_color failed"))
+        .map_err(AppError::from)
+}
+
+/// Drag-to-reorder inside the pinned list. A null `afterId` means first.
 #[instrument(skip_all)]
 #[tauri::command]
 pub async fn reorder_pin(
+    kind: assets::PinKind,
     id: String,
+    after_kind: Option<assets::PinKind>,
     after_id: Option<String>,
     state: tauri::State<'_, DbState>,
 ) -> Result<(), AppError> {
     let pool = state.acquire_pool().await?;
-    assets::reorder_pin(&pool, &id, after_id.as_deref())
+    assets::reorder_pin(&pool, kind, &id, after_kind, after_id.as_deref())
         .await
         .inspect_err(|e| tracing::error!(error = %e, "reorder_pin failed"))
         .map_err(AppError::from)
 }
+
+/// A few of a rule set's current matches, for the sidebar preview.
+#[instrument(skip_all)]
+#[tauri::command]
+pub async fn preview_matches(
+    rules: crate::rules::RuleNode,
+    limit: i64,
+    state: tauri::State<'_, DbState>,
+) -> Result<Vec<AssetLightRow>, AppError> {
+    let pool = state.acquire_pool().await?;
+    assets::preview_matches(&pool, &rules, limit)
+        .await
+        .inspect_err(|e| tracing::error!(error = %e, "preview_matches failed"))
+        .map_err(AppError::from)
+}
+
 
 #[instrument(skip_all)]
 #[tauri::command]

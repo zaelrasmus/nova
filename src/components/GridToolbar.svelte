@@ -1,7 +1,9 @@
 <script lang="ts">
+    import { SlidersHorizontal } from "@lucide/svelte";
     import SortControl from "./SortControl.svelte";
     import { settings } from "../routes/settings.svelte";
     import { assetLibrary } from "$lib/assets.svelte";
+    import { layout } from "$lib/layout.svelte";
 
     /**
      * View controls for the grid pane header.
@@ -27,6 +29,26 @@
 </script>
 
 <div class="flex items-center gap-3">
+    <!-- The way in to the filter bar. Shows a dot while filters are active, so a
+         narrowed library is legible even with the bar closed — and it can't be
+         closed while narrowed, since the bar force-shows in that state. -->
+    <button
+        type="button"
+        onclick={() => (layout.filterBarOpen = !layout.filterBarOpen)}
+        title="Filters"
+        aria-label="Filters"
+        aria-pressed={layout.filterBarOpen || assetLibrary.hasFilters}
+        class="relative grid h-7 w-7 shrink-0 place-items-center rounded transition-colors
+               {layout.filterBarOpen || assetLibrary.hasFilters
+            ? 'bg-neutral-800 text-neutral-100'
+            : 'text-neutral-500 hover:bg-neutral-800 hover:text-neutral-200'}"
+    >
+        <SlidersHorizontal class="h-4 w-4" />
+        {#if assetLibrary.hasFilters}
+            <span class="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-blue-500"></span>
+        {/if}
+    </button>
+
     <SortControl />
 
     <!-- View switcher. Waterfall is disabled while sorting manually, because

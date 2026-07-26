@@ -1,11 +1,12 @@
 <script lang="ts">
-    import { Layers, Filter, Tag, FolderTree as FolderTreeIcon } from "@lucide/svelte";
+    import { Layers, Filter, Tag, Sparkles, FolderTree as FolderTreeIcon } from "@lucide/svelte";
     import { layout } from "$lib/layout.svelte";
     import { DRAG_SCROLL_ATTR } from "$lib/dragdrop.svelte";
     import FolderTree from "../FolderTree.svelte";
     import SavedFilters from "../SavedFilters.svelte";
     import SystemViews from "../SystemViews.svelte";
     import PinnedFolders from "../PinnedFolders.svelte";
+    import SmartFolders from "../SmartFolders.svelte";
 
     /**
      * The collapsed sidebar.
@@ -33,10 +34,14 @@
 
     const { onManageTags }: Props = $props();
 
-    type Flyout = "library" | "filters" | "tags" | "tree";
+    type Flyout = "library" | "smart" | "filters" | "tags" | "tree";
 
     const SECTIONS: { id: Flyout; icon: typeof Tag; label: string }[] = [
         { id: "library", icon: Layers, label: "Library" },
+        // Above the separator with the other chrome, not below with folder-land:
+        // a smart folder is a place you go, but its list is a fixed destination
+        // like the tree's, not a shortlist the user curates icon by icon.
+        { id: "smart", icon: Sparkles, label: "Smart folders" },
         { id: "filters", icon: Filter, label: "Saved filters" },
         { id: "tags", icon: Tag, label: "Tags" },
     ];
@@ -224,6 +229,8 @@
         <div class="flex-1 overflow-y-auto p-2 [scrollbar-width:thin]" {...{ [DRAG_SCROLL_ATTR]: "" }}>
             {#if hovered === "library"}
                 <SystemViews variant="expanded" />
+            {:else if hovered === "smart"}
+                <SmartFolders />
             {:else if hovered === "tree"}
                 <FolderTree />
             {:else if hovered === "filters"}

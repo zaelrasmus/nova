@@ -61,6 +61,20 @@ class LayoutState {
     sidebarHidden = $state(false);
     inspectorHidden = $state(false);
 
+    /**
+     * Is the filter bar showing?
+     *
+     * It has to be togglable rather than "visible when filters are active": the
+     * bar IS the controls, so gating it on `hasFilters` is circular — you could
+     * never set the first filter. It's force-shown whenever a filter IS active
+     * (see AssetGrid), so a narrowed view always shows what's narrowing it and
+     * the way to clear it.
+     *
+     * Session-only, deliberately: it mirrors the filters, and those never
+     * survive a restart either.
+     */
+    filterBarOpen = $state(false);
+
     /** True while a resize handle is being dragged — kills the column transition. */
     resizing = $state(false);
 

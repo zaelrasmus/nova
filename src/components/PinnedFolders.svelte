@@ -1,25 +1,39 @@
 <script lang="ts">
-    import { Folder as FolderIcon } from "@lucide/svelte";
-    import { assetLibrary, type Folder } from "$lib/assets.svelte";
-    import { DROP_FOLDER_ATTR, DROP_FOLDER_NAME_ATTR } from "$lib/droptarget";
+    import { Folder as FolderIcon, Sparkles } from "@lucide/svelte";
+    import {
+        assetLibrary,
+        thumbHashUrl,
+        type AssetLightRow,
+        type PinnedItem,
+    } from "$lib/assets.svelte";
+    import {
+        DROP_FOLDER_ATTR,
+        DROP_FOLDER_NAME_ATTR,
+        DROP_SMART_ATTR,
+        DROP_SMART_NAME_ATTR,
+    } from "$lib/droptarget";
     import { drag, DRAG_SCROLL_ATTR } from "$lib/dragdrop.svelte";
     import FolderTree from "./FolderTree.svelte";
     import { dropzone } from "$lib/dropzone.svelte";
     import { pinColorVar } from "$lib/pins";
-    import FolderContextMenu from "./FolderContextMenu.svelte";
+    import { describeConditions } from "$lib/rules";
+    import PinContextMenu from "./PinContextMenu.svelte";
 
     /**
-     * The pinned folders — the sidebar's curated shortlist.
+     * The sidebar's curated shortlist — folders AND smart folders, in one order.
      *
      * Renders in both sidebar modes from one component, because a pin has to
      * behave identically in each: same order, same accent, same drop behaviour.
      * Only the amount of room differs, so only the row template does.
      *
-     * DROP TARGET: each pin carries the same attributes as a tree row, so
-     * dragging assets onto one files them there and an OS file drop imports into
-     * it — the coordinate hit-test in droptarget.ts finds these without any
-     * knowledge of the sidebar. This is the payoff of pinning: your handful of
-     * real destinations, always one drop away, without opening the tree.
+     * DROP TARGETS, and the reason the two kinds differ:
+     *   • a folder pin carries the same attributes as a tree row, so dragging
+     *     assets onto one files them there and an OS drop imports into it. This
+     *     is the payoff of pinning — your real destinations, one drop away.
+     *   • a smart pin carries DROP_SMART_ATTR instead, which every validator
+     *     REFUSES. You can't put something into a query. Marking it (rather than
+     *     leaving it unmarked so drops quietly do nothing) is what lets the drag
+     *     preview explain why.
      */
     interface Props {
         variant: "rail" | "expanded";
@@ -33,41 +47,48 @@
 
     const { variant, onFlyoutOpen }: Props = $props();
 
-    const pins = $derived(assetLibrary.pinned);
+    const pins = $derived(assetLibrary.pins);
     const scope = $derived(assetLibrary.scope);
 
-    const parentOf = $derived(new Map(assetLibrary.folders.map((f) => [f.id, f.parent_id])));
+    /** Pins span two tables, so identity is the PAIR, never the id alone. */
+    const refKey = (p: { kind: string; id: string }) => `${p.kind}:${p.id}`;
 
-    /** The folder currently being browsed, if the scope is a folder at all. */
+    const parentOf = $derived(new Map(assetLibrary.folders.map((f) => [f.id, f.parent_id])));
     const activeFolder = $derived(scope.kind === "folder" ? scope.id : null);
+
+    function isActive(pin: PinnedItem): boolean {
+        if (pin.kind === "folder") return activeFolder === pin.id;
+        return scope.kind === "smart" && scope.id === pin.id;
+    }
 
     /**
      * Is the current scope *inside* this pin, without being it?
      *
-     * Needs its own state, distinct from "active": drill two levels into a
-     * pinned folder and every pin would otherwise look equally unselected, and
-     * you'd lose track of where you are.
+     * Folders only — a smart folder has no descendants, so for those the
+     * question collapses into plain equality.
      */
-    function containsActive(pinId: string): boolean {
-        if (!activeFolder || activeFolder === pinId) return false;
+    function containsActive(pin: PinnedItem): boolean {
+        if (pin.kind !== "folder" || !activeFolder || activeFolder === pin.id) return false;
         let cursor = parentOf.get(activeFolder) ?? null;
         while (cursor) {
-            if (cursor === pinId) return true;
+            if (cursor === pin.id) return true;
             cursor = parentOf.get(cursor) ?? null;
         }
         return false;
     }
 
     // ── Context menu ────────────────────────────────────────────────────────
-    let menu = $state<{ folder: Folder; x: number; y: number } | null>(null);
+    let menu = $state<{ pin: PinnedItem; x: number; y: number } | null>(null);
 
     // ── Hover flyout (rail only) ────────────────────────────────────────────
     //
     // A pin in the rail is a 36px icon: enough to recognise, not enough to
-    // navigate. Hovering opens its subtree beside it — the same "hover looks,
-    // click stays" rule the section icons follow, so the rail stays browsable
-    // without giving the sidebar its width back.
-    let flyout = $state<{ folder: Folder; top: number } | null>(null);
+    // navigate. Hovering opens the pin's contents beside it — the same "hover
+    // looks, click stays" rule the section icons follow.
+    let flyout = $state<{ pin: PinnedItem; top: number } | null>(null);
+    /** A smart pin's current matches. Cached per pin so re-hovering is free. */
+    let preview = $state<AssetLightRow[]>([]);
+    const previewCache = new Map<string, AssetLightRow[]>();
 
     const FLYOUT_H = 420;
     const FLYOUT_W = 260;
@@ -87,16 +108,41 @@
         closeTimer = setTimeout(() => (flyout = null), 150);
     }
 
-    function openFlyout(folder: Folder, anchor: HTMLElement) {
+    /** The rules behind a smart pin, for its chips and its preview query. */
+    const smartRules = (id: string) => assetLibrary.smartFolders.find((f) => f.id === id)?.rules;
+
+    async function loadPreview(pin: PinnedItem) {
+        const key = refKey(pin);
+        const cached = previewCache.get(key);
+        if (cached) {
+            preview = cached;
+            return;
+        }
+        const rules = smartRules(pin.id);
+        if (!rules) return;
+        try {
+            const rows = await assetLibrary.previewMatches($state.snapshot(rules), 9);
+            previewCache.set(key, rows);
+            // Only paint if this pin is still the one hovered — a slow query
+            // must not drop its rows into a panel that has since moved on.
+            if (flyout && refKey(flyout.pin) === key) preview = rows;
+        } catch {
+            /* the panel still shows the rules, which is the durable half */
+        }
+    }
+
+    function openFlyout(pin: PinnedItem, anchor: HTMLElement) {
         // Not while rearranging: a flyout appearing under a dragged pin would
         // cover the very list the drop is aiming at.
         if (variant !== "rail" || dragId) return;
         cancelClose();
         const rect = anchor.getBoundingClientRect();
         flyout = {
-            folder,
+            pin,
             top: Math.max(8, Math.min(rect.top - 4, window.innerHeight - FLYOUT_H - 8)),
         };
+        preview = previewCache.get(refKey(pin)) ?? [];
+        if (pin.kind === "smart") void loadPreview(pin);
         onFlyoutOpen?.();
     }
 
@@ -108,6 +154,14 @@
 
     $effect(() => cancelClose);
 
+    // Anything that changes membership invalidates the previews. Cheap to drop
+    // wholesale — they're nine rows each and refetch on the next hover.
+    $effect(() => {
+        void assetLibrary.smartFolders;
+        void assetLibrary.thumbVersion;
+        previewCache.clear();
+    });
+
     // ── Drag to reorder ─────────────────────────────────────────────────────
     //
     // Deliberately NOT the app-wide drag system. That one answers "what does
@@ -115,12 +169,12 @@
     // itself, with no payload and no cross-surface target. Keeping them separate
     // means dragging a pin can't be mistaken for filing a folder into another.
     let listEl = $state<HTMLElement | null>(null);
-    let pressId: string | null = null;
+    let pressKey: string | null = null;
     let pressY = 0;
     let dragId = $state<string | null>(null);
     let dragY = $state(0);
     /** Midpoints of the pins that are staying put, measured once per drag. */
-    let midpoints = $state<{ id: string; mid: number }[]>([]);
+    let midpoints = $state<{ key: string; mid: number }[]>([]);
     /** A drag just ended — swallow the click that pointer-up is about to fire. */
     let justDragged = false;
 
@@ -140,57 +194,68 @@
      */
     function lineBefore(i: number): boolean {
         if (!dragId) return false;
-        const dragIdx = pins.findIndex((p) => p.id === dragId);
+        const dragIdx = pins.findIndex((p) => refKey(p) === dragId);
         return insertAt === (i > dragIdx ? i - 1 : i);
     }
 
-    function startReorder(e: PointerEvent, id: string) {
+    function startReorder(e: PointerEvent, key: string) {
         if (e.button !== 0) return;
         // Cleared here rather than in the click handler: a drag that ends
         // outside the list fires no click, and a stale flag would then eat the
         // user's next real one.
         justDragged = false;
-        pressId = id;
+        pressKey = key;
         pressY = e.clientY;
         (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
     }
 
     function moveReorder(e: PointerEvent) {
-        if (!pressId) return;
+        if (!pressKey) return;
         // A 4px threshold, so a click that wobbles is still a click. Without it
         // every navigation would be a no-op reorder.
         if (!dragId && Math.abs(e.clientY - pressY) < 4) return;
         if (!dragId) {
-            dragId = pressId;
-            midpoints = [...(listEl?.querySelectorAll<HTMLElement>("[data-pin-id]") ?? [])]
-                .filter((el) => el.dataset.pinId !== dragId)
+            dragId = pressKey;
+            midpoints = [...(listEl?.querySelectorAll<HTMLElement>("[data-pin-key]") ?? [])]
+                .filter((el) => el.dataset.pinKey !== dragId)
                 .map((el) => {
                     const r = el.getBoundingClientRect();
-                    return { id: el.dataset.pinId!, mid: r.top + r.height / 2 };
+                    return { key: el.dataset.pinKey!, mid: r.top + r.height / 2 };
                 });
         }
         dragY = e.clientY;
     }
 
     async function endReorder() {
-        const moved = dragId;
+        const movedKey = dragId;
         const at = insertAt;
-        pressId = null;
+        pressKey = null;
         dragId = null;
-        if (!moved || at < 0) return;
+        if (!movedKey || at < 0) return;
         justDragged = true;
+
+        const moved = pins.find((p) => refKey(p) === movedKey);
+        if (!moved) return;
         // `after` is the pin it lands behind; null means it becomes the first.
-        await assetLibrary.reorderPin(moved, at > 0 ? midpoints[at - 1].id : null);
+        const afterKey = at > 0 ? midpoints[at - 1].key : null;
+        const after = afterKey ? (pins.find((p) => refKey(p) === afterKey) ?? null) : null;
+        await assetLibrary.reorderPin(
+            moved.kind,
+            moved.id,
+            after ? { kind: after.kind, id: after.id } : null,
+        );
     }
 
-    function open(folder: Folder) {
+    function open(pin: PinnedItem) {
         // A reorder's pointer-up fires a click too, which would otherwise
         // navigate to whichever pin happened to end up under the cursor.
         if (justDragged) {
             justDragged = false;
             return;
         }
-        void assetLibrary.setScope({ kind: "folder", id: folder.id });
+        void assetLibrary.setScope(
+            pin.kind === "folder" ? { kind: "folder", id: pin.id } : { kind: "smart", id: pin.id },
+        );
     }
 </script>
 
@@ -213,10 +278,15 @@
             ? 'min-h-0 flex-1 items-center overflow-y-auto py-1 [scrollbar-width:thin]'
             : 'shrink-0 px-2 pb-2'}"
     >
-        {#each pins as pin, i (pin.id)}
-            {@const active = activeFolder === pin.id}
-            {@const inside = containsActive(pin.id)}
-            {@const dropping = dropzone.isOverFolder(pin.id) || drag.isOverFolder(pin.id)}
+        {#each pins as pin, i (refKey(pin))}
+            {@const key = refKey(pin)}
+            {@const active = isActive(pin)}
+            {@const inside = containsActive(pin)}
+            {@const isSmart = pin.kind === "smart"}
+            {@const dropping =
+                !isSmart && (dropzone.isOverFolder(pin.id) || drag.isOverFolder(pin.id))}
+            {@const refusing =
+                isSmart && drag.target?.kind === "smart" && drag.target.id === pin.id}
             {@const accent = pinColorVar(pin.color)}
 
             <!-- Insertion line for the reorder in progress. -->
@@ -225,15 +295,17 @@
             {/if}
 
             <div
-                data-pin-id={pin.id}
-                {...{ [DROP_FOLDER_ATTR]: pin.id, [DROP_FOLDER_NAME_ATTR]: pin.name }}
-                class="shrink-0 {dragId === pin.id ? 'opacity-40' : ''}"
+                data-pin-key={key}
+                {...isSmart
+                    ? { [DROP_SMART_ATTR]: pin.id, [DROP_SMART_NAME_ATTR]: pin.name }
+                    : { [DROP_FOLDER_ATTR]: pin.id, [DROP_FOLDER_NAME_ATTR]: pin.name }}
+                class="shrink-0 {dragId === key ? 'opacity-40' : ''}"
             >
                 <button
                     type="button"
                     title={pin.name}
                     aria-current={active ? "true" : undefined}
-                    onpointerdown={(e) => startReorder(e, pin.id)}
+                    onpointerdown={(e) => startReorder(e, key)}
                     onpointermove={moveReorder}
                     onpointerup={endReorder}
                     onpointercancel={endReorder}
@@ -242,23 +314,33 @@
                     onclick={() => open(pin)}
                     oncontextmenu={(e) => {
                         e.preventDefault();
-                        menu = { folder: pin, x: e.clientX, y: e.clientY };
+                        menu = { pin, x: e.clientX, y: e.clientY };
                     }}
                     class="flex items-center transition-colors
                            {variant === 'rail'
                         ? 'h-9 w-9 justify-center rounded-md'
                         : 'w-full gap-2 rounded px-2 py-1 text-left text-sm'}
-                           {dropping
-                        ? 'bg-emerald-600/25 ring-1 ring-emerald-500'
-                        : active
-                          ? 'bg-neutral-800'
-                          : 'hover:bg-neutral-800/60'}"
+                           {refusing
+                        ? 'cursor-not-allowed bg-red-900/30 ring-1 ring-red-700/60'
+                        : dropping
+                          ? 'bg-emerald-600/25 ring-1 ring-emerald-500'
+                          : active
+                            ? 'bg-neutral-800'
+                            : 'hover:bg-neutral-800/60'}"
                 >
                     <!-- The accent lives on the icon, not the row: a full-width
                          tinted row would fight the selection highlight, and the
-                         glyph is what you actually scan for in the rail. -->
+                         glyph is what you actually scan for in the rail.
+
+                         The glyph itself distinguishes the two kinds — a smart
+                         pin can't be dropped into, so it must not look like
+                         something that can. -->
                     <span class="relative flex shrink-0 items-center" style="color: {accent}">
-                        <FolderIcon class="h-4 w-4" strokeWidth={1.5} />
+                        {#if isSmart}
+                            <Sparkles class="h-4 w-4" strokeWidth={1.5} />
+                        {:else}
+                            <FolderIcon class="h-4 w-4" strokeWidth={1.5} />
+                        {/if}
                         {#if inside}
                             <!-- "You're somewhere below this pin." Quieter than
                                  the active state on purpose — it's a trail, not
@@ -271,9 +353,7 @@
                     </span>
 
                     {#if variant === "expanded"}
-                        <span
-                            class="truncate {active ? 'text-neutral-100' : 'text-neutral-300'}"
-                        >
+                        <span class="truncate {active ? 'text-neutral-100' : 'text-neutral-300'}">
                             {pin.name}
                         </span>
                     {/if}
@@ -289,7 +369,7 @@
     </div>
 {:else if variant === "expanded"}
     <p class="px-3 pb-2 text-xs text-neutral-600">
-        Right-click a folder to pin it here.
+        Right-click a folder or smart folder to pin it here.
     </p>
 {/if}
 
@@ -313,19 +393,21 @@
             <span class="flex min-w-0 items-center gap-1.5">
                 <span
                     class="h-1.5 w-1.5 shrink-0 rounded-full"
-                    style="background-color: {pinColorVar(flyout.folder.color)}"
+                    style="background-color: {pinColorVar(flyout.pin.color)}"
                 ></span>
-                <span class="truncate text-[11px] font-semibold uppercase tracking-wider
-                             text-neutral-400">
-                    {flyout.folder.name}
+                <span
+                    class="truncate text-[11px] font-semibold uppercase tracking-wider
+                           text-neutral-400"
+                >
+                    {flyout.pin.name}
                 </span>
             </span>
             <button
                 type="button"
                 onclick={() => {
-                    const target = flyout!.folder;
+                    const target = flyout!.pin;
                     flyout = null;
-                    void assetLibrary.setScope({ kind: "folder", id: target.id });
+                    open(target);
                 }}
                 class="shrink-0 rounded px-1.5 py-0.5 text-[11px] text-neutral-500
                        transition-colors hover:bg-neutral-800 hover:text-neutral-200"
@@ -334,23 +416,61 @@
             </button>
         </div>
 
-        <!-- The pin's own subtree, fully interactive: same tree component, just
-             rooted here instead of at the library. Drag, drop, rename and the
-             context menu all work exactly as they do in the full sidebar. -->
         <div
             class="flex-1 overflow-y-auto p-2 [scrollbar-width:thin]"
             {...{ [DRAG_SCROLL_ATTR]: "" }}
         >
-            <FolderTree rootId={flyout.folder.id} />
+            {#if flyout.pin.kind === "folder"}
+                <!-- The pin's own subtree, fully interactive: same tree
+                     component, just rooted here instead of at the library. -->
+                <FolderTree rootId={flyout.pin.id} />
+            {:else}
+                <!-- A smart folder has no subtree. Its rules say WHY things are
+                     in here; the thumbnails say WHAT is, right now. Neither
+                     answers the other's question, so it shows both. -->
+                {@const rules = smartRules(flyout.pin.id) ?? null}
+                <div class="flex flex-wrap gap-1">
+                    {#each describeConditions(rules) as chip (chip)}
+                        <span
+                            class="rounded bg-neutral-800 px-1.5 py-0.5 text-[10px] text-neutral-400"
+                        >
+                            {chip}
+                        </span>
+                    {:else}
+                        <span class="text-[10px] text-neutral-600">Matches everything.</span>
+                    {/each}
+                </div>
+
+                {#if preview.length > 0}
+                    <div class="mt-2 grid grid-cols-3 gap-1">
+                        {#each preview as row (row.id)}
+                            {@const src = thumbHashUrl(row.thumb_hash)}
+                            <div
+                                class="aspect-square overflow-hidden rounded bg-neutral-800"
+                                title={row.filename}
+                            >
+                                {#if src}
+                                    <!-- ThumbHash, not the real thumbnail: it's
+                                         already in the light row, so the preview
+                                         costs no file I/O on hover. -->
+                                    <img
+                                        src={src}
+                                        alt=""
+                                        class="h-full w-full object-cover"
+                                        draggable="false"
+                                    />
+                                {/if}
+                            </div>
+                        {/each}
+                    </div>
+                {:else}
+                    <p class="mt-2 text-[10px] text-neutral-600">Nothing matches right now.</p>
+                {/if}
+            {/if}
         </div>
     </div>
 {/if}
 
 {#if menu}
-    <FolderContextMenu
-        folder={menu.folder}
-        x={menu.x}
-        y={menu.y}
-        onclose={() => (menu = null)}
-    />
+    <PinContextMenu pin={menu.pin} x={menu.x} y={menu.y} onclose={() => (menu = null)} />
 {/if}

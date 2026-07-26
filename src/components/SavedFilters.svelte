@@ -1,5 +1,6 @@
 <script lang="ts">
     import { assetLibrary, type SavedFilter } from "$lib/assets.svelte";
+    import { describeRules } from "$lib/rules";
     import { toast } from "svelte-sonner";
 
     const saved = $derived(assetLibrary.savedFilters);
@@ -48,15 +49,12 @@
         }
     }
 
-    /** One-line summary of what a saved filter narrows, for the row's tooltip. */
-    function describe(f: SavedFilter): string {
-        const parts: string[] = [];
-        if (f.filters.asset_types.length) parts.push(f.filters.asset_types.join(", "));
-        if (f.filters.shape) parts.push(`shape: ${f.filters.shape.kind}`);
-        if (f.filters.date) parts.push(`by ${f.filters.date.field.replace("_", " ")}`);
-        if (f.filters.size) parts.push("size range");
-        return parts.length ? parts.join(" · ") : "no conditions";
-    }
+    /**
+     * One-line summary of what a saved filter narrows, for the row's tooltip.
+     * Shared with the rule editor and (from Phase 5) a smart folder's flyout, so
+     * the same rule reads the same way wherever it's shown.
+     */
+    const describe = (f: SavedFilter) => describeRules(f.rules);
 </script>
 
 <div

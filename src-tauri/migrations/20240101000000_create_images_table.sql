@@ -104,26 +104,94 @@ INSERT OR IGNORE INTO view_settings (view_key, order_by, is_ascending) VALUES ('
 -- would need a hand-written encode/decode/validate layer kept in sync with it by
 -- discipline alone, and its `value TEXT` column is untyped either way. SQLite's
 -- json_each() covers querying across saved filters if that's ever needed.
-CREATE TABLE IF NOT EXISTS saved_filters (
+-- Stored rule sets: ONE table behind two products.
+--
+-- A rule set is a tree of all/any/none groups over conditions (see rules.rs).
+-- The same document is used two ways, and `kind` is the only thing that differs:
+--
+--   'smart'  — a Smart Folder. A PLACE in the sidebar: its tree becomes the
+--              scope predicate, and it owns a persisted sort like any folder.
+--   'filter' — a Saved Filter. A LENS: its tree narrows whatever scope you're
+--              already in, and it owns nothing.
+--
+-- They stay two concepts in the UI on purpose — a smart folder is for an ongoing
+-- workflow, a saved filter is a repeatable query you don't want cluttering the
+-- sidebar — but they share the storage, the compiler and the editor, because
+-- underneath they are the same sentence about assets.
+CREATE TABLE IF NOT EXISTS rule_sets (
     id TEXT PRIMARY KEY NOT NULL,
-    name TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('smart', 'filter')),
 
-    -- List ordering (fractional rank, same idea as folders.position). No reorder
-    -- command yet; the column exists so adding one later needs no migration.
+    -- Deliberately NOT unique: two groups may each hold an "Approved", exactly
+    -- as two folders may. (SQLite's UNIQUE on TEXT is also case-sensitive, so it
+    -- would block the legitimate collision and permit the confusing one.)
+    name TEXT NOT NULL,
+    -- Named to match folders.notes and assets.notes: same field, same purpose,
+    -- edited through the same inspector control.
+    notes TEXT,
+
+    -- Ungroup on delete, never cascade: removing a group must not destroy the
+    -- user's saved queries.
+    group_id TEXT REFERENCES rule_set_groups(id) ON DELETE SET NULL,
+
+    -- List ordering (fractional rank, same idea as folders.position).
     position REAL NOT NULL DEFAULT 0,
 
-    -- Schema version of query_json. When the filter language changes (tags), old
+    -- Schema version of query_json. When the rule language changes, old
     -- documents get migrated deliberately instead of silently mis-parsed, and a
     -- row written by a NEWER build is skipped rather than misread.
-    version INTEGER NOT NULL DEFAULT 1,
+    -- v1 = the flat FilterSet; v2 = the rule tree.
+    version INTEGER NOT NULL DEFAULT 2,
 
-    -- Serialized FilterSet.
+    -- Serialized RuleNode.
     query_json TEXT NOT NULL,
+
+    -- Sidebar pin, same semantics as folders: NULL = unpinned, and the accent
+    -- survives unpinning so re-pinning restores the look. Only meaningful for
+    -- kind = 'smart' — a lens has nowhere to be pinned to.
+    color TEXT,
+    pin_position REAL,
 
     created_at TEXT NOT NULL
 );
 
-CREATE INDEX IF NOT EXISTS idx_saved_filters_order ON saved_filters (position, name);
+CREATE INDEX IF NOT EXISTS idx_rule_sets_order ON rule_sets (kind, position, name);
+CREATE INDEX IF NOT EXISTS idx_rule_sets_pinned
+    ON rule_sets (pin_position) WHERE pin_position IS NOT NULL;
+
+-- Manual order INSIDE a smart folder.
+--
+-- Folders get this free: `assets_folders` physically exists per (folder, asset)
+-- and carries a position. A smart folder's membership is computed, so there is
+-- no row to hang a rank on — hence this table.
+--
+-- It is SPARSE on purpose. A row exists only for an asset someone has actually
+-- placed; everything else sorts after the ranked block (see the ORDER BY in
+-- build_manifest_query). That gives append-on-arrival semantics for free: an
+-- asset that starts matching after an import lands at the bottom, exactly where
+-- a folder would put it, with nothing having to notice it arrived.
+--
+-- Rows for assets that stop matching are pruned when the folder is next opened
+-- in manual order — removing a tag is an intentional act, and a returning asset
+-- should come back at the bottom rather than resurrect its old slot.
+CREATE TABLE IF NOT EXISTS smart_folder_order (
+    smart_folder_id TEXT NOT NULL REFERENCES rule_sets(id) ON DELETE CASCADE,
+    asset_id        TEXT NOT NULL REFERENCES assets(id)    ON DELETE CASCADE,
+    position        REAL NOT NULL,
+
+    PRIMARY KEY (smart_folder_id, asset_id)
+) WITHOUT ROWID;
+
+-- Sidebar containers for smart folders. A group is browsable — clicking one
+-- shows the UNION of its members — so it owns a sort, which lives in
+-- view_settings under 'smartgroup:<id>' rather than here.
+CREATE TABLE IF NOT EXISTS rule_set_groups (
+    id TEXT PRIMARY KEY NOT NULL,
+    name TEXT NOT NULL,
+    notes TEXT,
+    position REAL NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
+);
 
 -- Dominant colors per asset, in CIELAB, with the share of the image each covers.
 --

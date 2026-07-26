@@ -25,6 +25,7 @@
     import GridToolbar from "$components/GridToolbar.svelte";
     import SystemViews from "$components/SystemViews.svelte";
     import PinnedFolders from "$components/PinnedFolders.svelte";
+    import SmartFolders from "$components/SmartFolders.svelte";
     import WindowControls from "$components/layout/WindowControls.svelte";
     import ResizeHandle from "$components/layout/ResizeHandle.svelte";
     import SidebarRail from "$components/layout/SidebarRail.svelte";
@@ -223,6 +224,15 @@
             return;
         }
 
+        // An OS drop onto a pinned smart folder is refused for the same reason
+        // an internal one is: membership is derived, so there is nothing to put
+        // it into. Said out loud rather than quietly importing to the library at
+        // large, which would look like the drop landed somewhere it didn't.
+        if (target.kind === "smart") {
+            toast.error("Smart folders collect matching assets automatically.");
+            return;
+        }
+
         const targetFolder = target.kind === "folder" ? target.id : null;
         await runImport(
             "import_dropped_paths",
@@ -292,6 +302,16 @@
         const scope = assetLibrary.scope;
         if (scope.kind === "all") return "All assets";
         if (scope.kind === "uncategorized") return "Uncategorized";
+        if (scope.kind === "smart") {
+            return assetLibrary.smartFolders.find((f) => f.id === scope.id)?.name ?? "Smart folder";
+        }
+        if (scope.kind === "smart_group") {
+            const group = assetLibrary.smartFolderGroups.find((g) => g.id === scope.id);
+            // "Everything in X" rather than just "X": a group header and the
+            // group's union are different places, and the title is the only
+            // thing telling you which one you're looking at.
+            return group ? `Everything in ${group.name}` : "Group";
+        }
         return assetLibrary.folders.find((f) => f.id === scope.id)?.name ?? "Folder";
     });
 
@@ -397,6 +417,18 @@
                         Pinned
                     </p>
                     <PinnedFolders variant="expanded" />
+
+                    <div class="mx-3 my-2 h-px shrink-0 bg-neutral-800"></div>
+
+                    <p
+                        class="px-3 pb-1 text-[10px] font-semibold uppercase tracking-wider
+                               text-neutral-600"
+                    >
+                        Smart folders
+                    </p>
+                    <div class="px-2">
+                        <SmartFolders />
+                    </div>
 
                     <div class="mx-3 my-2 h-px shrink-0 bg-neutral-800"></div>
 
@@ -719,13 +751,21 @@
          never becomes its own drop target. -->
     {#if drag.active && drag.payload}
         {@const over = drag.target?.kind === "folder" ? drag.target : null}
+        {@const smart = drag.target?.kind === "smart" ? drag.target : null}
         <div
             class="pointer-events-none fixed z-[100] flex items-center gap-2 rounded-md px-2.5
                    py-1.5 text-xs font-medium text-white shadow-lg
                    {drag.forbidden ? 'bg-red-700' : over ? 'bg-emerald-600' : 'bg-neutral-700'}"
             style="left: {drag.x + 14}px; top: {drag.y + 14}px"
         >
-            {#if drag.payload.kind === "assets"}
+            {#if smart}
+                <!-- Says what the MECHANISM is, not what the asset is.
+                     "Doesn't match the rules" would be a diagnosis we can't
+                     cheaply make — and often false, since a dragged asset may
+                     already match and be in there. A wrong explanation is worse
+                     than a plain refusal. -->
+                <span>Smart folders collect matching assets automatically</span>
+            {:else if drag.payload.kind === "assets"}
                 <span>{drag.count} {drag.count === 1 ? "asset" : "assets"}</span>
                 {#if over}
                     <!-- Naming the action AND the destination, because add and

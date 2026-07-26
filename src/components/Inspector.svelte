@@ -384,7 +384,7 @@
             <button
                 type="button"
                 onclick={() =>
-                    assetLibrary.setFolderPinned(folder.id, folder.pin_position === null)}
+                    assetLibrary.setPinned("folder", folder.id, folder.pin_position === null)}
                 class="flex items-center gap-2 self-start rounded border border-neutral-800 px-2
                        py-1 text-xs transition-colors hover:bg-neutral-800
                        {folder.pin_position !== null
@@ -399,7 +399,7 @@
             </button>
 
             {#if folder.pin_position !== null}
-                <PinSwatches folderId={folder.id} />
+                <PinSwatches kind="folder" id={folder.id} />
             {/if}
         </div>
 

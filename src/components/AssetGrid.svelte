@@ -3,6 +3,7 @@
     import { createVirtualizer } from "@tanstack/svelte-virtual";
     import AssetCard from "./AssetCard.svelte";
     import FilterBar from "./FilterBar.svelte";
+    import { layout } from "$lib/layout.svelte";
     import {get} from "svelte/store";
     import { libraryManager, settings } from "../routes/settings.svelte";
     import { assetLibrary, type AssetLightRow } from "$lib/assets.svelte";
@@ -60,6 +61,9 @@
         assetLibrary.setScope({ kind: "all" });
         assetLibrary.loadFolders();
         assetLibrary.loadSavedFilters();
+        assetLibrary.loadSmartFolders();
+        assetLibrary.loadSmartFolderGroups();
+        assetLibrary.loadPins();
         assetLibrary.loadColorCoverage();
         assetLibrary.loadTags();
         assetLibrary.loadTagGroups();
@@ -489,9 +493,12 @@
          search field and the view controls moved up into the grid pane's header
          (+page.svelte + GridToolbar.svelte) so all three panes share one 44px
          chrome strip and this is nothing but assets.
-         The FilterBar stays because it is CONDITIONAL — a chips row that only
-         exists while filters are active, so it costs no space when idle. -->
-    {#if assetLibrary.hasFilters}
+         The FilterBar stays, toggled from the toolbar so it costs no space when
+         idle. It is FORCE-SHOWN while any filter is active: a narrowed view must
+         always show what's narrowing it, or "why is my library half empty" has
+         no answer on screen. (Gating it on `hasFilters` alone was circular —
+         these are the controls that set the first filter.) -->
+    {#if layout.filterBarOpen || assetLibrary.hasFilters}
         <div class="shrink-0">
             <FilterBar />
         </div>
@@ -533,6 +540,11 @@
                     // The press that starts a drag must not collapse a
                     // multi-selection when it's released.
                     onStart: () => selection.assets.cancelPendingCollapse(),
+                    // A smart folder collects by rule, so nothing can be put
+                    // INTO one. Refusing here (rather than letting the drop land
+                    // and do nothing) is what paints the forbidden state and
+                    // lets the preview explain itself.
+                    validate: (target) => target.kind !== "smart",
                     onDrop: onAssetDrop,
                     onDragOut: onDragOut,
                 }}
@@ -557,8 +569,14 @@
                              the layout. Reading order == index order, so the
                              reorder hit-test lands exactly. -->
                         {#each justifiedVisible as row (row.top)}
-                            {#each row.items as it (assets[it.index].id)}
+                            <!-- `?.` in the key, not just the body: a key
+                                 expression is evaluated before the block, so a
+                                 bare deref here would throw where no guard can
+                                 catch it. Same shrink hazard as the waterfall
+                                 branch below. -->
+                            {#each row.items as it (assets[it.index]?.id ?? it.index)}
                                 {@const light = assets[it.index]}
+                                {#if light}
                                 {@const heavy = assetLibrary.heavy.get(light.id)}
                                 <AssetCard
                                     assetType={light.asset_type}
@@ -575,11 +593,22 @@
                                     onClick={() => selection.clickAsset(light.id)}
                                     onOpen={() => viewer.open(it.index, "quicklook")}
                                 />
+                                {/if}
                             {/each}
                         {/each}
                     {:else}
                         {#each $virtualizer.getVirtualItems() as item (item.key)}
                             {@const light = assets[item.index]}
+                            <!-- The virtualizer's item list lags `assets` by a
+                                 frame: it's still sized for the OLD count until
+                                 the setOptions/measure effect runs, so a filter
+                                 that SHRINKS the manifest briefly yields indices
+                                 past the end. Without this guard the render
+                                 throws on `light.thumb_hash`, and a thrown
+                                 render leaves the previous grid on screen —
+                                 which looks exactly like "the filter did
+                                 nothing" rather than like a crash. -->
+                            {#if light}
                             {@const heavy = assetLibrary.heavy.get(light.id)}
                             <AssetCard
                                 assetType={light.asset_type}
@@ -596,6 +625,7 @@
                                 onClick={() => selection.clickAsset(light.id)}
                                 onOpen={() => viewer.open(item.index, "quicklook")}
                             />
+                            {/if}
                         {/each}
                     {/if}
                 </div>
