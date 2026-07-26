@@ -97,7 +97,7 @@
         <button
             type="button"
             onclick={() => go({ kind: "smart", id: folder.id })}
-            title={describeRules(folder.rules)}
+            title={describeRules(folder.rules, assetLibrary.folderNames)}
             aria-current={active ? "true" : undefined}
             class="flex min-w-0 flex-1 items-center gap-1.5 rounded px-2 py-1 text-left text-sm
                    transition-colors

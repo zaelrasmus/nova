@@ -1,6 +1,11 @@
 <script lang="ts">
     import { Minus } from "@lucide/svelte";
-    import { ASSET_TYPE_LABELS, assetLibrary, type AssetTypeFilter } from "$lib/assets.svelte";
+    import {
+        ASSET_TYPE_LABELS,
+        assetLibrary,
+        type AssetTypeFilter,
+        type Folder,
+    } from "$lib/assets.svelte";
     import type { Condition, NumField, TextField } from "$lib/rules";
 
     /**
@@ -33,12 +38,18 @@
         | "media_type"
         | "extension"
         | "tags"
+        | "folder"
         | "uncategorized";
 
     const FIELDS: { value: FieldKey; label: string }[] = [
         { value: "text:name", label: "Name" },
         { value: "text:notes", label: "Notes" },
         { value: "text:source_url", label: "Source URL" },
+        // Two different questions, deliberately both offered: membership picks
+        // folders by identity (survives a rename, can walk subfolders), while
+        // "folder name" matches TEXT, which is what you want for a convention
+        // like every folder called "raw" wherever it lives.
+        { value: "folder", label: "In folder" },
         { value: "text:folder_name", label: "Folder name" },
         { value: "number:file_size", label: "File size" },
         { value: "number:width", label: "Width" },
@@ -81,6 +92,32 @@
         { value: "before", label: "before" },
         { value: "on", label: "on" },
     ] as const;
+
+    /**
+     * The folder tree flattened in display order, with depth for indentation.
+     *
+     * Hierarchy has to survive into this picker: two folders called "2024" under
+     * different parents are indistinguishable as a flat list of names, and
+     * picking the wrong one produces a smart folder that looks right and
+     * collects the wrong assets.
+     */
+    const folderRows = $derived.by(() => {
+        const byParent = new Map<string | null, Folder[]>();
+        for (const f of assetLibrary.folders) {
+            const arr = byParent.get(f.parent_id) ?? [];
+            arr.push(f);
+            byParent.set(f.parent_id, arr);
+        }
+        const out: { folder: Folder; depth: number }[] = [];
+        const walk = (parent: string | null, depth: number) => {
+            for (const f of byParent.get(parent) ?? []) {
+                out.push({ folder: f, depth });
+                walk(f.id, depth + 1);
+            }
+        };
+        walk(null, 0);
+        return out;
+    });
 
     const fieldKey = $derived.by((): FieldKey => {
         switch (condition.type) {
@@ -134,6 +171,9 @@
                     exclude: [],
                     untagged: false,
                 });
+                break;
+            case "folder":
+                onchange({ type: "folder", ids: [], include_subfolders: false });
                 break;
             default:
                 onchange({ type: "uncategorized" });
@@ -423,6 +463,78 @@
                 class="h-3 w-3 accent-blue-600"
             />
             untagged
+        </label>
+    {:else if condition.type === "folder"}
+        <!-- `negate` as an operator, `include_subfolders` as a modifier — the
+             same split the engine makes. Offering "is not in" + "with
+             subfolders" as two sibling operators reads like it means something
+             and doesn't. -->
+        <select
+            class="{selectClass} w-32 shrink-0"
+            value={condition.negate ? "not_in" : "in"}
+            onchange={(e) =>
+                onchange({
+                    ...condition,
+                    negate: e.currentTarget.value === "not_in",
+                } as Condition)}
+            aria-label="Operator"
+        >
+            <option value="in">is in</option>
+            <option value="not_in">is not in</option>
+        </select>
+
+        <div
+            class="max-h-24 min-w-0 flex-1 overflow-y-auto rounded border border-neutral-800
+                   [scrollbar-width:thin]"
+        >
+            {#if folderRows.length === 0}
+                <p class="px-2 py-1 text-xs text-neutral-600">No folders in this library yet.</p>
+            {/if}
+            {#each folderRows as { folder, depth } (folder.id)}
+                {@const on = condition.ids.includes(folder.id)}
+                <button
+                    type="button"
+                    aria-pressed={on}
+                    title={folder.name}
+                    onclick={() =>
+                        onchange({
+                            ...condition,
+                            ids: on
+                                ? condition.ids.filter((x: string) => x !== folder.id)
+                                : [...condition.ids, folder.id],
+                        } as Condition)}
+                    class="flex w-full items-center gap-2 py-0.5 pr-2 text-left text-xs
+                           text-neutral-300 transition-colors hover:bg-neutral-800"
+                    style="padding-left: {8 + depth * 12}px"
+                >
+                    <span
+                        aria-hidden="true"
+                        class="grid h-3.5 w-3.5 shrink-0 place-items-center rounded-sm border
+                               text-[9px] leading-none text-white
+                               {on ? 'border-blue-500 bg-blue-600' : 'border-neutral-600'}"
+                    >
+                        {on ? "✓" : ""}
+                    </span>
+                    <span class="truncate">{folder.name}</span>
+                </button>
+            {/each}
+        </div>
+
+        <label
+            class="flex shrink-0 items-center gap-1 text-xs text-neutral-400"
+            title="Also match assets in folders nested under the ones picked"
+        >
+            <input
+                type="checkbox"
+                checked={condition.include_subfolders ?? false}
+                onchange={(e) =>
+                    onchange({
+                        ...condition,
+                        include_subfolders: e.currentTarget.checked,
+                    } as Condition)}
+                class="h-3 w-3 accent-blue-600"
+            />
+            + subfolders
         </label>
     {:else}
         <span class="flex-1 text-xs text-neutral-500">is in no folder</span>

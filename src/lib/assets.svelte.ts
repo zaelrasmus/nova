@@ -747,6 +747,16 @@ class AssetLibrary {
   filters = $state<FilterSet>(emptyFilters());
   /** Flat folder list for the tree UI, refreshed on library switch + import. */
   folders = $state<Folder[]>([]);
+  /**
+   * folder id -> name, for rendering rules that reference folders by id.
+   *
+   * Lives here so the three places that summarise a rule set agree, and so a
+   * folder rename shows up in every one of them at once.
+   */
+  get folderNames(): ReadonlyMap<string, string> {
+    return new Map(this.folders.map((f) => [f.id, f.name]));
+  }
+
   /** Named filter combinations for this library, refreshed on library switch. */
   savedFilters = $state<SavedFilter[]>([]);
   smartFolders = $state<SmartFolder[]>([]);

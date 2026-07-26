@@ -54,7 +54,7 @@
      * Shared with the rule editor and (from Phase 5) a smart folder's flyout, so
      * the same rule reads the same way wherever it's shown.
      */
-    const describe = (f: SavedFilter) => describeRules(f.rules);
+    const describe = (f: SavedFilter) => describeRules(f.rules, assetLibrary.folderNames);
 </script>
 
 <div

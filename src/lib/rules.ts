@@ -145,10 +145,19 @@ const OP_LABELS: Record<string, string> = {
  *
  * Deliberately lossy: it says which dimensions are involved, not the exact
  * values of every operand, because these read at a glance in cramped places.
+ *
+ * `folderNames` is passed IN rather than read from the library store: this
+ * module is the file format, and a saved rule set can name a folder that no
+ * longer exists. Callers that have the store resolve what they can; anything
+ * unresolved degrades to a count instead of failing.
  */
-export function describeConditions(node: RuleNode | null): string[] {
+export function describeConditions(
+  node: RuleNode | null,
+  folderNames?: ReadonlyMap<string, string>,
+): string[] {
   if (!node) return [];
-  if (node.kind === "group") return node.children.flatMap(describeConditions);
+  if (node.kind === "group")
+    return node.children.flatMap((c) => describeConditions(c, folderNames));
 
   const op = (o: string) => OP_LABELS[o] ?? o;
   switch (node.type) {
@@ -185,16 +194,27 @@ export function describeConditions(node: RuleNode | null): string[] {
       return [`shape: ${node.shape.kind}`];
     case "color":
       return ["colour"];
-    case "folder":
-      return [`${node.negate ? "not in " : "in "}${node.ids.length} folder(s)`];
+    case "folder": {
+      const prefix = node.negate ? "not in " : "in ";
+      const suffix = node.include_subfolders ? " +sub" : "";
+      // Naming beats counting, but only while it still fits a chip — past a few
+      // folders the list is longer than the row it has to sit in.
+      const named = node.ids.map((id) => folderNames?.get(id)).filter(Boolean);
+      return named.length === node.ids.length && named.length > 0 && named.length <= 3
+        ? [`${prefix}${named.join(", ")}${suffix}`]
+        : [`${prefix}${node.ids.length} folder(s)${suffix}`];
+    }
     case "uncategorized":
       return [node.negate ? "in a folder" : "uncategorized"];
   }
 }
 
 /** The same, as one line. Empty rule sets say so rather than reading blank. */
-export function describeRules(node: RuleNode | null): string {
-  const parts = describeConditions(node);
+export function describeRules(
+  node: RuleNode | null,
+  folderNames?: ReadonlyMap<string, string>,
+): string {
+  const parts = describeConditions(node, folderNames);
   return parts.length ? parts.join(" · ") : "no conditions";
 }
 

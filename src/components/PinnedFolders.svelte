@@ -430,7 +430,7 @@
                      answers the other's question, so it shows both. -->
                 {@const rules = smartRules(flyout.pin.id) ?? null}
                 <div class="flex flex-wrap gap-1">
-                    {#each describeConditions(rules) as chip (chip)}
+                    {#each describeConditions(rules, assetLibrary.folderNames) as chip (chip)}
                         <span
                             class="rounded bg-neutral-800 px-1.5 py-0.5 text-[10px] text-neutral-400"
                         >
