@@ -184,6 +184,18 @@ pub enum Op {
     /// Write the source URL. No modes: a URL is not a thing you append to.
     SetSourceUrl { url: String },
 
+    /// Move to the Trash.
+    ///
+    /// Safe to offer as a step precisely because it's reversible — the asset
+    /// keeps its file, its folders and its tags, and Restore is one UPDATE.
+    /// Permanent deletion is deliberately NOT a step: it has no inverse, so it
+    /// must never sit inside a pipeline that claims to be undoable.
+    MoveToTrash,
+    /// Bring assets back from the Trash. Not offered in the step picker — it
+    /// exists so the Trash view's Restore runs through the same pipeline (and
+    /// gets the same undo) as everything else.
+    RestoreFromTrash,
+
     /// Rename from a pattern.
     ///
     /// In Nova a filename is METADATA — files on disk are `assets/{uuid}.{ext}` —
@@ -551,6 +563,13 @@ pub enum Inverse {
         asset_ids: Vec<String>,
         members: Vec<FolderMember>,
     },
+    /// Undo of a trash or restore, naming only the assets whose state actually
+    /// changed — so undoing a trash can't drag back something that was already
+    /// in the Trash before the run.
+    SetTrashed {
+        asset_ids: Vec<String>,
+        trashed: bool,
+    },
     /// Undo of a text write. Values are per asset and `None` means the column was
     /// empty — which must be restored as NULL, not as the string "None".
     RestoreText {
@@ -673,6 +692,17 @@ impl Op {
                 }
             }
 
+            Op::MoveToTrash => {
+                if let Some(inverse) = set_trashed(&mut *conn, asset_ids, true).await? {
+                    inverses.push(inverse);
+                }
+            }
+            Op::RestoreFromTrash => {
+                if let Some(inverse) = set_trashed(&mut *conn, asset_ids, false).await? {
+                    inverses.push(inverse);
+                }
+            }
+
             Op::SetSourceUrl { url } => {
                 if let Some(inverse) = write_text(
                     &mut *conn,
@@ -782,6 +812,8 @@ impl Op {
             Op::SetSourceUrl { .. } => 160,
             // The old filename, which is bounded in a way a note isn't.
             Op::RenameWithPattern { .. } => 160,
+            // An id list and one boolean for the whole step.
+            Op::MoveToTrash | Op::RestoreFromTrash => 48,
         }
     }
 }
@@ -804,6 +836,9 @@ impl Inverse {
                 clear_folder_members(&mut *conn, asset_ids).await?;
                 insert_folder_members(conn, members).await
             }
+            Inverse::SetTrashed { asset_ids, trashed } => {
+                set_trashed(conn, asset_ids, *trashed).await.map(|_| ())
+            }
             Inverse::RestoreText { field, values } => {
                 write_text_values(conn, *field, values).await
             }
@@ -816,6 +851,7 @@ impl Inverse {
         match self {
             Inverse::AddTag { asset_ids, .. }
             | Inverse::RemoveTag { asset_ids, .. }
+            | Inverse::SetTrashed { asset_ids, .. }
             | Inverse::RemoveFolderMembers { asset_ids, .. } => asset_ids.clone(),
             // The scope is what was cleared, which is a superset of what the
             // captured members mention — an asset that was in no folder still
@@ -869,6 +905,10 @@ impl Inverse {
                     members: keep_members(members),
                 }
             }
+            Inverse::SetTrashed { asset_ids, trashed } => Inverse::SetTrashed {
+                asset_ids: keep(asset_ids),
+                trashed: *trashed,
+            },
             Inverse::RestoreText { field, values } => Inverse::RestoreText {
                 field: *field,
                 values: values
@@ -1171,6 +1211,62 @@ async fn seed_auto_tags(
         }
     }
     Ok(inverses)
+}
+
+/// Move assets into or out of the Trash, returning the inverse.
+///
+/// Only assets whose state actually CHANGES are written and recorded, computed
+/// the same way every other delta here is. Undoing a trash therefore can't drag
+/// back something that was already in the Trash when the run started.
+async fn set_trashed(
+    conn: &mut sqlx::SqliteConnection,
+    asset_ids: &[String],
+    trashed: bool,
+) -> Result<Option<Inverse>> {
+    // The assets currently on the other side of the line — the ones this will
+    // move. Read before the write, because afterwards there is no way to tell.
+    let mut changing: Vec<String> = Vec::new();
+    for chunk in asset_ids.chunks(IDS_PER_QUERY) {
+        let mut qb = QueryBuilder::<Sqlite>::new("SELECT id FROM assets WHERE deleted_at IS ");
+        qb.push(if trashed { "NULL" } else { "NOT NULL" });
+        qb.push(" AND id IN (");
+        let mut sep = qb.separated(", ");
+        for id in chunk {
+            sep.push_bind(id);
+        }
+        qb.push(")");
+        changing.extend(
+            qb.build_query_scalar::<String>()
+                .fetch_all(&mut *conn)
+                .await
+                .context("Failed to read which assets would move")?,
+        );
+    }
+    if changing.is_empty() {
+        return Ok(None);
+    }
+
+    let stamp = trashed.then(crate::assets::now_stamp);
+    for chunk in changing.chunks(IDS_PER_QUERY) {
+        let mut qb = QueryBuilder::<Sqlite>::new("UPDATE assets SET deleted_at = ");
+        qb.push_bind(stamp.clone());
+        qb.push(" WHERE id IN (");
+        let mut sep = qb.separated(", ");
+        for id in chunk {
+            sep.push_bind(id);
+        }
+        qb.push(")");
+        qb.build()
+            .execute(&mut *conn)
+            .await
+            .context("Failed to move assets to or from the Trash")?;
+    }
+
+    Ok(Some(Inverse::SetTrashed {
+        asset_ids: changing,
+        // The inverse of trashing is restoring, and vice versa.
+        trashed: !trashed,
+    }))
 }
 
 /// Which of `asset_ids` still exist. Used only by undo.
@@ -2072,6 +2168,8 @@ mod wire_tests {
                 Op::SetSourceUrl { url: String::new() },
                 "set_source_url",
             ),
+            (Op::MoveToTrash, "move_to_trash"),
+            (Op::RestoreFromTrash, "restore_from_trash"),
         ];
         for (step, expected) in cases {
             assert_eq!(serde_json::to_value(&step).unwrap()["type"], expected);
@@ -2251,7 +2349,7 @@ mod exec_tests {
              asset_type TEXT NOT NULL DEFAULT 'image', \
              extension TEXT NOT NULL DEFAULT 'png', width INTEGER NOT NULL DEFAULT 1920, \
              height INTEGER NOT NULL DEFAULT 1080, file_size INTEGER NOT NULL DEFAULT 100, \
-             imported_date TEXT NOT NULL DEFAULT '2026-07-26T10:00:00.000Z', \
+             imported_date TEXT NOT NULL DEFAULT '2026-07-26T10:00:00.000Z', deleted_at TEXT, \
              creation_date TEXT NOT NULL DEFAULT '2024-01-15T08:00:00.000Z', \
              modified_date TEXT NOT NULL DEFAULT '2025-03-03T00:00:00.000Z')",
             "CREATE TABLE tags (id TEXT PRIMARY KEY, name TEXT)",
@@ -2802,6 +2900,79 @@ mod exec_tests {
             .unwrap();
         assert!(tagged_with(&pool, "t2").await.is_empty());
         assert!(latest_undoable_run(&pool).await.unwrap().is_none());
+    }
+
+    // ── Trash ────────────────────────────────────────────────────────────────
+
+    async fn trashed(pool: &SqlitePool) -> Vec<String> {
+        sqlx::query_scalar("SELECT id FROM assets WHERE deleted_at IS NOT NULL ORDER BY id")
+            .fetch_all(pool)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn trashing_is_undoable() {
+        let pool = db().await;
+        let a = action(&pool, vec![Op::MoveToTrash]).await;
+
+        let summary = run_action(&pool, &a.id, &ids(&["a1", "a2"])).await.unwrap();
+        assert_eq!(trashed(&pool).await, ids(&["a1", "a2"]));
+
+        undo_run(&pool, summary.run_id.as_deref().unwrap()).await.unwrap();
+        assert!(trashed(&pool).await.is_empty());
+    }
+
+    /// Trashing keeps everything, which is what makes restore exact rather than
+    /// approximate — and is the whole reason this is a soft delete.
+    #[tokio::test]
+    async fn trashing_keeps_folders_and_tags() {
+        let pool = db().await;
+        let a = action(&pool, vec![Op::MoveToTrash]).await;
+        run_action(&pool, &a.id, &ids(&["a1"])).await.unwrap();
+
+        assert_eq!(members_of(&pool, "f1").await.len(), 1);
+        assert_eq!(tagged_with(&pool, "t1").await, ids(&["a1"]));
+
+        let restore = action(&pool, vec![Op::RestoreFromTrash]).await;
+        run_action(&pool, &restore.id, &ids(&["a1"])).await.unwrap();
+        assert!(trashed(&pool).await.is_empty());
+        assert_eq!(members_of(&pool, "f1").await[0].1, 7.5, "position was lost");
+    }
+
+    /// An asset already in the Trash isn't named by the inverse, so undoing a
+    /// trash can't drag it back out.
+    #[tokio::test]
+    async fn undo_leaves_assets_that_were_already_trashed() {
+        let pool = db().await;
+        sqlx::query("UPDATE assets SET deleted_at = '2026-01-01T00:00:00.000Z' WHERE id = 'a1'")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let a = action(&pool, vec![Op::MoveToTrash]).await;
+        let summary = run_action(&pool, &a.id, &ids(&["a1", "a2"])).await.unwrap();
+        assert_eq!(trashed(&pool).await, ids(&["a1", "a2"]));
+
+        undo_run(&pool, summary.run_id.as_deref().unwrap()).await.unwrap();
+        assert_eq!(trashed(&pool).await, ids(&["a1"]));
+    }
+
+    /// A no-op run records no inverse, so it can't be mistaken for a change.
+    #[tokio::test]
+    async fn trashing_what_is_already_trashed_changes_nothing() {
+        let pool = db().await;
+        let a = action(&pool, vec![Op::MoveToTrash]).await;
+        run_action(&pool, &a.id, &ids(&["a1"])).await.unwrap();
+        let second = run_action(&pool, &a.id, &ids(&["a1"])).await.unwrap();
+
+        let payload: String =
+            sqlx::query_scalar("SELECT payload_json FROM action_undo WHERE run_id = ? AND seq = 0")
+                .bind(second.run_id.as_deref().unwrap())
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(payload, "[]");
     }
 
     // ── Folder auto-tags ─────────────────────────────────────────────────────

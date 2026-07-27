@@ -193,10 +193,14 @@ fn unique_ids(ids: &[String]) -> Vec<&String> {
 #[instrument(skip(pool))]
 pub async fn fetch_tags(pool: &SqlitePool) -> Result<Vec<Tag>> {
     let tags = sqlx::query_as::<_, Tag>(
+        // Trashed assets keep their tags so restore is exact, but they don't
+        // count towards usage — a tag showing 12 when clicking it finds 9 reads
+        // as a bug, and the manifest is the thing users check against.
         "SELECT t.id, t.name, t.color, t.group_id, t.is_starred, t.position,
-                COUNT(at.asset_id) AS usage, MAX(at.added_at) AS last_used
+                COUNT(a.id) AS usage, MAX(at.added_at) AS last_used
          FROM tags t
          LEFT JOIN assets_tags at ON at.tag_id = t.id
+         LEFT JOIN assets a ON a.id = at.asset_id AND a.deleted_at IS NULL
          GROUP BY t.id
          ORDER BY t.name COLLATE NOCASE",
     )

@@ -38,6 +38,14 @@ export type Op =
   | { type: "set_folders"; folder_ids: string[] }
   | { type: "set_note"; mode: TextMode; text: string }
   | { type: "set_source_url"; url: string }
+  /**
+   * Safe to offer as a step precisely because it's reversible. Permanent
+   * deletion is not a step and never will be — it has no inverse, so it must
+   * never sit inside a pipeline that claims to be undoable.
+   */
+  | { type: "move_to_trash" }
+  /** Not in the step picker; exists so the Trash's Restore shares the pipeline. */
+  | { type: "restore_from_trash" }
   | {
       type: "rename_with_pattern";
       pattern: string;
@@ -187,6 +195,8 @@ export function emptyOp(type: OpType): Op {
     case "remove_tags":
       return { type, tag_ids: [] };
     case "clear_all_tags":
+    case "move_to_trash":
+    case "restore_from_trash":
       return { type };
     case "add_to_folder":
     case "remove_from_folder":
@@ -247,6 +257,8 @@ const STEP_LABELS: Record<OpType, string> = {
   set_note: "Set note",
   set_source_url: "Set source URL",
   rename_with_pattern: "Rename",
+  move_to_trash: "Move to Trash",
+  restore_from_trash: "Restore from Trash",
 };
 
 /**
@@ -258,6 +270,11 @@ export const STEP_GROUPS: { label: string; types: OpType[] }[] = [
   { label: "Folders", types: ["add_to_folder", "remove_from_folder", "set_folders"] },
   { label: "Text", types: ["set_note", "set_source_url"] },
   { label: "Naming", types: ["rename_with_pattern"] },
+  // `restore_from_trash` is deliberately absent: it exists so the Trash view's
+  // Restore runs through the same pipeline, but an action that restores assets
+  // would have to be run FROM the Trash to do anything, and actions run on a
+  // grid selection. Offering it would be offering a step that never fires.
+  { label: "Trash", types: ["move_to_trash"] },
 ];
 
 export const stepLabel = (type: OpType): string => STEP_LABELS[type];
@@ -317,6 +334,9 @@ function describeOp(op: Op, names: NameLookup = {}): string {
       return op.url.trim() === "" ? "Clear source URL" : label;
     case "rename_with_pattern":
       return `${label}: ${op.pattern}`;
+    case "move_to_trash":
+    case "restore_from_trash":
+      return label;
   }
 }
 

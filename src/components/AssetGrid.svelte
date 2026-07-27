@@ -19,6 +19,7 @@
     import { toast } from "svelte-sonner";
     import AssetContextMenu from "./AssetContextMenu.svelte";
     import RenameDialog from "./actions/RenameDialog.svelte";
+    import { undoRun } from "./actions/run";
 
 
     // Manifest = layout source of truth (id, width, height, asset_type).
@@ -68,6 +69,7 @@
         assetLibrary.loadPins();
         assetLibrary.loadQuickActions();
         assetLibrary.loadActionRuns();
+        assetLibrary.loadTrashCount();
         assetLibrary.loadColorCoverage();
         assetLibrary.loadTags();
         assetLibrary.loadTagGroups();
@@ -85,6 +87,50 @@
      */
     let assetMenu = $state<{ x: number; y: number; ids: string[] } | null>(null);
     let renaming = $state<string[] | null>(null);
+
+    const inTrash = $derived(assetLibrary.scope.kind === "trash");
+
+    /**
+     * Move to the Trash, or back out.
+     *
+     * Reversible either way, so no confirmation — the toast carries the Undo,
+     * and Ctrl+Z carries it after that. Confirming a reversible bulk action is
+     * how users learn to dismiss dialogs unread.
+     */
+    async function setTrashed(assetIds: string[], trashed: boolean) {
+        try {
+            const summary = await assetLibrary.setAssetsTrashed(assetIds, trashed);
+            const runId = summary.run_id;
+            const what = `${trashed ? "Moved" : "Restored"} ${summary.asset_count.toLocaleString()} ${
+                summary.asset_count === 1 ? "asset" : "assets"
+            }`;
+            if (runId && summary.is_undoable) {
+                toast.success(what, {
+                    action: { label: "Undo", onClick: () => void undoRun(runId) },
+                });
+            } else {
+                toast.success(what);
+            }
+        } catch (e) {
+            toast.error(typeof e === "string" ? e : "Couldn't move those assets.");
+        }
+    }
+
+    /** The one irreversible action in the app, so the one that always confirms. */
+    async function purge(assetIds: string[]) {
+        const ok = window.confirm(
+            `Permanently delete ${assetIds.length.toLocaleString()} ${
+                assetIds.length === 1 ? "asset" : "assets"
+            }? The files are removed from disk. This can't be undone.`,
+        );
+        if (!ok) return;
+        try {
+            const purged = await assetLibrary.purgeAssets(assetIds);
+            toast.success(`Deleted ${purged.toLocaleString()} permanently`);
+        } catch (e) {
+            toast.error(typeof e === "string" ? e : "Couldn't delete those assets.");
+        }
+    }
 
     let containerHeight = $state(0);
     let scrollTop = $state(0);
@@ -713,12 +759,17 @@
     </div>
 
 {#if assetMenu}
+    {@const ids = assetMenu.ids}
     <AssetContextMenu
-        count={assetMenu.ids.length}
+        count={ids.length}
+        {inTrash}
         x={assetMenu.x}
         y={assetMenu.y}
         onclose={() => (assetMenu = null)}
-        onRename={() => (renaming = assetMenu!.ids)}
+        onRename={() => (renaming = ids)}
+        onTrash={() => void setTrashed(ids, true)}
+        onRestore={() => void setTrashed(ids, false)}
+        onPurge={() => void purge(ids)}
     />
 {/if}
 

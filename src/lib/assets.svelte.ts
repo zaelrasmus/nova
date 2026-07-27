@@ -86,7 +86,14 @@ export type ManifestScope =
   /** A smart folder: a place whose membership is a query. See lib/rules.ts. */
   | { kind: "smart"; id: string }
   /** A group of smart folders, browsed as the union of its members. */
-  | { kind: "smart_group"; id: string };
+  | { kind: "smart_group"; id: string }
+  /**
+   * Assets moved to the Trash.
+   *
+   * A scope, not a mode — which is what lets the grid, selection, sorting and
+   * the viewer all work in here without knowing the Trash exists.
+   */
+  | { kind: "trash" };
 
 /** Do two scopes name the same place? Scopes are rebuilt per click, so `===` won't do. */
 export const sameScope = (a: ManifestScope, b: ManifestScope): boolean =>
@@ -1763,6 +1770,59 @@ class AssetLibrary {
     return summary;
   }
 
+  // ── Trash ─────────────────────────────────────────────────────────────────
+
+  /** How many assets are in the Trash. Drives the sidebar badge. */
+  trashCount = $state(0);
+
+  async loadTrashCount(): Promise<void> {
+    try {
+      this.trashCount = await invoke<number>("trash_count");
+    } catch {
+      this.trashCount = 0;
+    }
+  }
+
+  /**
+   * Move to the Trash, or back out of it.
+   *
+   * Goes through the action pipeline, so it's undoable and lands in the run
+   * history like every other bulk change. The current view always reloads: the
+   * assets either just left it or just arrived in it.
+   */
+  async setAssetsTrashed(assetIds: string[], trashed: boolean): Promise<RunSummary> {
+    const summary = await invoke<RunSummary>("set_assets_trashed", { assetIds, trashed });
+    await this.#afterTrashWrite();
+    return summary;
+  }
+
+  /** Delete for good. Returns how many were actually removed. */
+  async purgeAssets(assetIds: string[]): Promise<number> {
+    const purged = await invoke<number>("purge_assets", { assetIds });
+    await this.#afterTrashWrite();
+    return purged;
+  }
+
+  async emptyTrash(): Promise<number> {
+    const purged = await invoke<number>("empty_trash");
+    await this.#afterTrashWrite();
+    return purged;
+  }
+
+  /**
+   * Always reloads, unlike the other bulk writes.
+   *
+   * Trashing removes rows from every view except the Trash and adds them to it,
+   * so there is no scope where the manifest can be left alone — including
+   * unfiltered "All", which is the case the other paths skip.
+   */
+  async #afterTrashWrite(): Promise<void> {
+    await this.loadTrashCount();
+    await this.loadTags();
+    await this.loadActionRuns();
+    await this.reload();
+  }
+
   /** Undo the newest undoable run, whatever produced it. Backs Ctrl+Z. */
   async undoLatest(): Promise<UndoSummary | null> {
     const summary = await invoke<UndoSummary | null>("undo_latest_run");
@@ -1783,7 +1843,16 @@ class AssetLibrary {
   async #afterActionWrite(): Promise<void> {
     await this.loadTags();
     await this.loadActionRuns();
-    if (this.scope.kind !== "all" || this.hasFilters) await this.reload();
+    // A step (or an undo of one) may have trashed or restored assets, which
+    // changes what EVERY view shows — including unfiltered "All", the one case
+    // the condition below would otherwise skip. Comparing the count is precise
+    // and costs one small query, where inspecting the steps would mean teaching
+    // this method the step language.
+    const before = this.trashCount;
+    await this.loadTrashCount();
+    if (this.trashCount !== before || this.scope.kind !== "all" || this.hasFilters) {
+      await this.reload();
+    }
   }
 
   /** Add assets to a folder; reload the manifest if the change affects the view. */

@@ -66,6 +66,21 @@ CREATE TABLE IF NOT EXISTS assets (
     -- "unhashed" is a real state rather than an oversight.
     content_hash TEXT,
 
+    -- When this asset was moved to the Trash. NULL = live.
+    --
+    -- A soft delete rather than a separate table, because Trash has to be a
+    -- PLACE you can browse: as a scope it reuses the manifest query, the grid,
+    -- the virtualizer, selection and the viewer, where a `trashed_assets` table
+    -- would need its own copy of all of it. It also makes restore one UPDATE
+    -- with every folder membership and tag still attached, which is what makes
+    -- restore exact rather than approximate.
+    --
+    -- The cost is that every query which scans assets globally must exclude
+    -- these rows. `build_manifest_query` writes that predicate unconditionally
+    -- so the grid can't leak; the handful of other global scans (counts, folder
+    -- stats, tag usage, pending thumbnails/colors) each say so at their site.
+    deleted_at TEXT,
+
     -- TESTING Columns
     thumb_hash TEXT, -- base64 ThumbHash (NULL until generated)
     thumb_config TEXT, -- recipe tag, e.g. "webp:auto" (staleness marker)
@@ -91,7 +106,8 @@ CREATE TABLE IF NOT EXISTS view_settings (
 );
 
 INSERT OR IGNORE INTO view_settings (view_key, order_by, is_ascending) VALUES ('all', 'imported_date', 0),
-     ('uncategorized', 'imported_date', 0);
+     ('uncategorized', 'imported_date', 0),
+     ('trash', 'imported_date', 0);
 
 -- Named, reusable filter combinations. A saved filter is a LENS (it narrows
 -- whatever scope you're in), not a place — it has no parent, no sort and no
@@ -304,6 +320,9 @@ CREATE INDEX IF NOT EXISTS idx_assets_modified ON assets (modified_date, id);
 CREATE INDEX IF NOT EXISTS idx_assets_size     ON assets (file_size, id);
 CREATE INDEX IF NOT EXISTS idx_assets_pixels   ON assets (pixel_count, id);
 CREATE INDEX IF NOT EXISTS idx_assets_manual   ON assets (manual_position, id);
+-- Partial: the Trash is a handful of rows out of potentially hundreds of
+-- thousands, and every other view filters on this column being NULL.
+CREATE INDEX IF NOT EXISTS idx_assets_trashed  ON assets (deleted_at) WHERE deleted_at IS NOT NULL;
 -- COLLATE NOCASE must match the ORDER BY's collation or SQLite silently ignores
 -- this index and full-sorts instead.
 CREATE INDEX IF NOT EXISTS idx_assets_filename ON assets (filename COLLATE NOCASE, id);

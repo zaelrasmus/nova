@@ -1405,3 +1405,69 @@ pub async fn apply_folder_auto_tags(
     .inspect_err(|e| tracing::error!(error = %e, "apply_folder_auto_tags failed"))
     .map_err(AppError::from)
 }
+
+// ── Trash ─────────────────────────────────────────────────────────────────────
+
+#[instrument(skip_all)]
+#[tauri::command]
+pub async fn trash_count(state: tauri::State<'_, DbState>) -> Result<i64, AppError> {
+    let pool = state.acquire_pool().await?;
+    assets::trash_count(&pool)
+        .await
+        .inspect_err(|e| tracing::error!(error = %e, "trash_count failed"))
+        .map_err(AppError::from)
+}
+
+/// Move to the Trash, and back. Both go through the action pipeline, so both are
+/// undoable and both appear in the run history like any other bulk change.
+#[instrument(skip_all, fields(count = asset_ids.len(), trashed))]
+#[tauri::command]
+pub async fn set_assets_trashed(
+    asset_ids: Vec<String>,
+    trashed: bool,
+    state: tauri::State<'_, DbState>,
+) -> Result<actions::RunSummary, AppError> {
+    let pool = state.acquire_pool().await?;
+    let op = if trashed {
+        actions::Op::MoveToTrash
+    } else {
+        actions::Op::RestoreFromTrash
+    };
+    actions::run_steps(
+        &pool,
+        actions::RunSource::Direct {
+            name: if trashed { "Move to Trash" } else { "Restore" },
+        },
+        &[actions::Step { op, when: None }],
+        &asset_ids,
+    )
+    .await
+    .inspect_err(|e| tracing::error!(error = %e, "set_assets_trashed failed"))
+    .map_err(AppError::from)
+}
+
+/// Delete for good. Returns how many were actually removed — assets that were
+/// not in the Trash are ignored rather than deleted, so a stale selection can
+/// never destroy a live asset.
+#[instrument(skip_all, fields(count = asset_ids.len()))]
+#[tauri::command]
+pub async fn purge_assets(
+    asset_ids: Vec<String>,
+    state: tauri::State<'_, DbState>,
+) -> Result<usize, AppError> {
+    let handle = state.acquire().await?;
+    assets::purge_assets(&handle.pool, &handle.root, &asset_ids)
+        .await
+        .inspect_err(|e| tracing::error!(error = %e, "purge_assets failed"))
+        .map_err(AppError::from)
+}
+
+#[instrument(skip_all)]
+#[tauri::command]
+pub async fn empty_trash(state: tauri::State<'_, DbState>) -> Result<usize, AppError> {
+    let handle = state.acquire().await?;
+    assets::empty_trash(&handle.pool, &handle.root)
+        .await
+        .inspect_err(|e| tracing::error!(error = %e, "empty_trash failed"))
+        .map_err(AppError::from)
+}

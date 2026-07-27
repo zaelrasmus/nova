@@ -114,6 +114,10 @@ pub fn run() {
             commands::fetch_folder_auto_tags,
             commands::set_folder_auto_tags,
             commands::apply_folder_auto_tags,
+            commands::trash_count,
+            commands::set_assets_trashed,
+            commands::purge_assets,
+            commands::empty_trash,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

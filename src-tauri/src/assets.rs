@@ -52,6 +52,12 @@ pub enum Scope {
     /// no temp table, and no dedup pass, because we select rows from `assets`
     /// and an asset matching two members is still one row.
     SmartGroup { id: String },
+    /// Assets moved to the Trash.
+    ///
+    /// A scope rather than a mode, which is what lets it reuse the whole read
+    /// path: the grid, the virtualizer, selection, sorting and the viewer all
+    /// work in here without knowing the Trash exists.
+    Trash,
 }
 
 impl Scope {
@@ -63,6 +69,7 @@ impl Scope {
             Scope::Uncategorized => Some("uncategorized".into()),
             Scope::Smart { id } => Some(format!("smart:{id}")),
             Scope::SmartGroup { id } => Some(format!("smartgroup:{id}")),
+            Scope::Trash => Some("trash".into()),
             Scope::Folder { .. } => None,
         }
     }
@@ -521,6 +528,10 @@ pub struct ImportResult {
     /// reporting rather than hiding: "imported 3 of 200" with no explanation
     /// reads as a failure, and this is the explanation.
     pub duplicates: usize,
+    /// Of those duplicates, how many were in the Trash and came back. Reported
+    /// separately because "skipped 2" and "2 came back out of the Trash" are
+    /// very different outcomes to the person who just dropped the file.
+    pub restored: usize,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -612,9 +623,22 @@ fn build_manifest_query<'a>(
 
     let mut written = 0usize;
 
+    // 0. The Trash line, written FIRST and unconditionally.
+    //
+    // Every scope except Trash hides deleted assets, and Trash shows nothing
+    // else. Placed outside the match on purpose: as an arm it would be one more
+    // thing a newly added scope has to remember, and forgetting it leaks deleted
+    // assets into a view rather than failing loudly.
+    conjunct(&mut qb, &mut written);
+    qb.push(if matches!(scope, Scope::Trash) {
+        "a.deleted_at IS NOT NULL"
+    } else {
+        "a.deleted_at IS NULL"
+    });
+
     // 1. Scope — which rows exist at all.
     match scope {
-        Scope::All => {}
+        Scope::All | Scope::Trash => {}
         Scope::Folder { id } => {
             conjunct(&mut qb, &mut written);
             qb.push("af.folder_id = ").push_bind(id.as_str());
@@ -1150,20 +1174,27 @@ pub async fn reorder_assets(
         .fetch_all(&mut *tx)
         .await
         .context("Failed to read folder order")?,
+        // `deleted_at IS NULL` here as well as in the manifest: a trashed asset
+        // must not hold a rank in the order the live ones are bisected against,
+        // or restoring it would drop it at an arbitrary point.
         Scope::All => sqlx::query_as(
-            "SELECT id, manual_position FROM assets ORDER BY manual_position, id",
+            "SELECT id, manual_position FROM assets WHERE deleted_at IS NULL \
+             ORDER BY manual_position, id",
         )
         .fetch_all(&mut *tx)
         .await
         .context("Failed to read global order")?,
         Scope::Uncategorized => sqlx::query_as(
             "SELECT id, manual_position FROM assets a
-             WHERE NOT EXISTS (SELECT 1 FROM assets_folders af WHERE af.asset_id = a.id)
+             WHERE a.deleted_at IS NULL
+               AND NOT EXISTS (SELECT 1 FROM assets_folders af WHERE af.asset_id = a.id)
              ORDER BY manual_position, id",
         )
         .fetch_all(&mut *tx)
         .await
         .context("Failed to read uncategorized order")?,
+        // The Trash is a holding area, not an arrangement.
+        Scope::Trash => anyhow::bail!("The Trash can't be reordered"),
         // A smart folder's rank lives in its own table, so that every folder
         // orders independently — reusing the global `manual_position` (as All
         // and Uncategorized do) would make dragging in one smart folder
@@ -1308,6 +1339,7 @@ async fn write_manual_position(
                 .await
                 .context("Failed to write manual position")?;
         }
+        Scope::Trash => anyhow::bail!("The Trash can't be reordered"),
         // Upsert: `materialize_smart_order` has already given every current
         // member a row, but an UPDATE that silently affected zero rows would be
         // the kind of failure that looks like "the drag didn't take".
@@ -1749,9 +1781,11 @@ pub async fn delete_smart_folder(pool: &SqlitePool, id: &str) -> Result<()> {
 /// and it costs one COUNT through the very compiler that will serve the folder.
 #[instrument(skip(pool, rules))]
 pub async fn count_matching(pool: &SqlitePool, rules: &crate::rules::RuleNode) -> Result<i64> {
-    let mut qb = QueryBuilder::<Sqlite>::new("SELECT COUNT(*) FROM assets a");
+    // Trashed assets are excluded, because the count has to agree with what the
+    // smart folder will actually show — and the manifest hides them.
+    let mut qb = QueryBuilder::<Sqlite>::new("SELECT COUNT(*) FROM assets a WHERE a.deleted_at IS NULL");
     if rules.is_active() {
-        qb.push(" WHERE ");
+        qb.push(" AND ");
         rules.push_predicate(&mut qb);
     }
     qb.build_query_scalar()
@@ -2062,8 +2096,13 @@ pub async fn folder_stats(pool: &SqlitePool, folder_id: &str) -> Result<FolderSt
              SELECT f.id FROM folders f JOIN subtree s ON f.parent_id = s.id
          ),
          members AS (
+             -- Trashed assets keep their membership so restore is exact, but
+             -- they must not be counted here or a folder would claim more than
+             -- it shows.
              SELECT DISTINCT af.asset_id AS asset_id
-             FROM assets_folders af JOIN subtree s ON af.folder_id = s.id
+             FROM assets_folders af
+             JOIN subtree s ON af.folder_id = s.id
+             JOIN assets a ON a.id = af.asset_id AND a.deleted_at IS NULL
          )
          SELECT
              (SELECT COUNT(*) FROM subtree) - 1,
@@ -2663,10 +2702,10 @@ pub async fn preview_matches(
 ) -> Result<Vec<AssetLightRow>> {
     let mut qb = QueryBuilder::<Sqlite>::new(
         "SELECT a.id, a.width, a.height, a.asset_type, a.thumb_hash, a.is_animated, a.filename \
-         FROM assets a",
+         FROM assets a WHERE a.deleted_at IS NULL",
     );
     if rules.is_active() {
-        qb.push(" WHERE ");
+        qb.push(" AND ");
         rules.push_predicate(&mut qb);
     }
     qb.push(" ORDER BY a.imported_date DESC, a.id DESC LIMIT ")
@@ -2746,6 +2785,125 @@ pub async fn add_assets_to_folder(
 
     reindex_membership(pool, asset_ids).await;
     Ok(())
+}
+
+// ── Permanent deletion ───────────────────────────────────────────────────────
+//
+// Deliberately NOT a pipeline step. Every `Op` can state its inverse; this one
+// cannot, and a step that silently isn't undoable inside a run that claims to be
+// would be worse than no delete at all. It lives here, reachable only from the
+// Trash, and always behind a confirmation.
+
+/// How many assets are in the Trash. Drives the sidebar badge.
+#[instrument(skip(pool))]
+pub async fn trash_count(pool: &SqlitePool) -> Result<i64> {
+    sqlx::query_scalar("SELECT COUNT(*) FROM assets WHERE deleted_at IS NOT NULL")
+        .fetch_one(pool)
+        .await
+        .context("Failed to count the Trash")
+}
+
+/// Delete assets and their bytes for good.
+///
+/// Order matters: the DATABASE row goes first, then the files. A crash between
+/// the two leaves an orphaned file (wasted disk, invisible, reapable) rather
+/// than a row pointing at nothing (a broken thumbnail in the grid forever).
+/// Same reasoning as the import pipeline's write-then-commit ordering, mirrored.
+#[instrument(skip(pool, root, ids), fields(count = ids.len()))]
+pub async fn purge_assets(pool: &SqlitePool, root: &Path, ids: &[String]) -> Result<usize> {
+    if ids.is_empty() {
+        return Ok(0);
+    }
+
+    // Paths captured before the delete cascades them away.
+    let mut paths: Vec<(String, String)> = Vec::with_capacity(ids.len());
+    for chunk in ids.chunks(IDS_PER_QUERY) {
+        let mut qb = QueryBuilder::new("SELECT id, extension FROM assets WHERE id IN (");
+        let mut sep = qb.separated(", ");
+        for id in chunk {
+            sep.push_bind(id);
+        }
+        // Only ever from the Trash: purging a live asset would be a delete the
+        // user never saw coming, so the guard lives in the query rather than in
+        // whichever caller remembers it.
+        qb.push(") AND deleted_at IS NOT NULL");
+        paths.extend(
+            qb.build_query_as::<(String, String)>()
+                .fetch_all(pool)
+                .await
+                .context("Failed to read the assets to delete")?,
+        );
+    }
+    if paths.is_empty() {
+        return Ok(0);
+    }
+    let purge_ids: Vec<&String> = paths.iter().map(|(id, _)| id).collect();
+
+    let mut tx = pool
+        .begin()
+        .await
+        .context("Failed to begin the delete transaction")?;
+    for chunk in purge_ids.chunks(IDS_PER_QUERY) {
+        // `search_index` is an FTS5 virtual table — no foreign keys, so it is
+        // the one place the cascade can't reach and must be cleared by hand.
+        let mut del = QueryBuilder::<Sqlite>::new("DELETE FROM search_index WHERE asset_id IN (");
+        let mut sep = del.separated(", ");
+        for id in chunk {
+            sep.push_bind(*id);
+        }
+        del.push(")");
+        del.build()
+            .execute(&mut *tx)
+            .await
+            .context("Failed to clear search rows")?;
+
+        // Memberships, tags, colours and smart-folder ranks all cascade.
+        let mut qb = QueryBuilder::<Sqlite>::new("DELETE FROM assets WHERE id IN (");
+        let mut sep = qb.separated(", ");
+        for id in chunk {
+            sep.push_bind(*id);
+        }
+        qb.push(")");
+        qb.build()
+            .execute(&mut *tx)
+            .await
+            .context("Failed to delete assets")?;
+    }
+    tx.commit()
+        .await
+        .context("Failed to commit the delete transaction")?;
+
+    // Best-effort, and after the commit. A file we can't remove is disk we
+    // haven't reclaimed; it is not a reason to keep a row the user deleted.
+    let assets_dir = root.join("assets");
+    let thumbs_dir = root.join("thumbnails");
+    for (id, ext) in &paths {
+        let original = assets_dir.join(format!("{id}.{ext}"));
+        if let Err(e) = tokio::fs::remove_file(&original).await {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                warn!(path = ?original, error = %e, "Could not remove the original (non-fatal)");
+            }
+        }
+        let thumb = thumbs_dir.join(format!("{id}.webp"));
+        if let Err(e) = tokio::fs::remove_file(&thumb).await {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                warn!(path = ?thumb, error = %e, "Could not remove the thumbnail (non-fatal)");
+            }
+        }
+    }
+
+    Ok(paths.len())
+}
+
+/// Purge everything in the Trash.
+#[instrument(skip(pool, root))]
+pub async fn empty_trash(pool: &SqlitePool, root: &Path) -> Result<usize> {
+    let ids: Vec<String> =
+        sqlx::query_scalar("SELECT id FROM assets WHERE deleted_at IS NOT NULL")
+            .fetch_all(pool)
+            .await
+            .context("Failed to read the Trash")?;
+    purge_assets(pool, root, &ids).await
 }
 
 // ── Folder auto-tags ─────────────────────────────────────────────────────────
@@ -2848,7 +3006,11 @@ async fn seed_import_auto_tags(pool: &SqlitePool, links: &[FolderLink]) -> Resul
 /// already here" one-off, which is the only retroactive path.
 #[instrument(skip(pool))]
 pub async fn folder_member_ids(pool: &SqlitePool, folder_id: &str) -> Result<Vec<String>> {
-    sqlx::query_scalar("SELECT asset_id FROM assets_folders WHERE folder_id = ?")
+    sqlx::query_scalar(
+        "SELECT af.asset_id FROM assets_folders af \
+         JOIN assets a ON a.id = af.asset_id AND a.deleted_at IS NULL \
+         WHERE af.folder_id = ?",
+    )
         .bind(folder_id)
         .fetch_all(pool)
         .await
@@ -3255,6 +3417,42 @@ struct DedupSplit {
     duplicates: Vec<(String, AssetMetadata)>,
 }
 
+/// Bring back any deduplicated asset that was sitting in the Trash.
+///
+/// The dedup lookup deliberately matches trashed assets — `content_hash` is
+/// UNIQUE, so it has to, or re-importing deleted bytes would trip the index.
+/// Which leaves one question: what should re-importing a file you threw away
+/// do? Nothing visible is the wrong answer. Dropping a file into Nova says "I
+/// want this", so it comes back out of the Trash, with every folder and tag it
+/// had — restore is exact, which is the whole reason Trash is a soft delete.
+#[instrument(skip(pool, duplicates), fields(count = duplicates.len()))]
+async fn restore_trashed_duplicates(
+    pool: &SqlitePool,
+    duplicates: &[(String, AssetMetadata)],
+) -> Result<usize> {
+    if duplicates.is_empty() {
+        return Ok(0);
+    }
+    let ids: Vec<&String> = duplicates.iter().map(|(id, _)| id).collect();
+    let mut restored = 0usize;
+    for chunk in ids.chunks(IDS_PER_QUERY) {
+        let mut qb =
+            QueryBuilder::<Sqlite>::new("UPDATE assets SET deleted_at = NULL WHERE id IN (");
+        let mut sep = qb.separated(", ");
+        for id in chunk {
+            sep.push_bind(*id);
+        }
+        qb.push(") AND deleted_at IS NOT NULL");
+        restored += qb
+            .build()
+            .execute(pool)
+            .await
+            .context("Failed to restore re-imported assets")?
+            .rows_affected() as usize;
+    }
+    Ok(restored)
+}
+
 /// Partition staged assets against the library's existing fingerprints.
 ///
 /// Catches BOTH kinds of duplicate, which is why one pass builds a map rather
@@ -3492,6 +3690,13 @@ pub async fn import_assets(
         );
     }
 
+    // Re-importing something you deleted brings it back, rather than appearing
+    // to do nothing at all.
+    let restored = restore_trashed_duplicates(&pool, &duplicates).await?;
+    if restored > 0 {
+        info!(count = restored, "Restored re-imported assets from the Trash");
+    }
+
     reporter.report(ImportProgress {
         stage: ImportStage::CopyingFiles,
         current: 0,
@@ -3605,6 +3810,7 @@ pub async fn import_assets(
             .map(|(k, v)| (k.to_string_lossy().into_owned(), v))
             .collect(),
         duplicates: duplicates.len(),
+        restored,
     })
 }
 
@@ -3686,7 +3892,7 @@ pub async fn generate_pending_thumbnails(
 ) -> Result<usize> {
     let pending: Vec<PendingThumb> = sqlx::query_as::<_, PendingThumb>(
         "SELECT id, extension FROM assets \
-         WHERE thumb_hash IS NULL AND asset_type = 'image' \
+         WHERE thumb_hash IS NULL AND asset_type = 'image' AND deleted_at IS NULL \
          ORDER BY imported_date DESC, id DESC",
     )
     .fetch_all(pool)
@@ -3712,7 +3918,7 @@ pub async fn generate_thumbnails_for_ids(
 
     let mut qb = QueryBuilder::new(
         "SELECT id, extension FROM assets \
-         WHERE thumb_hash IS NULL AND asset_type = 'image' AND id IN (",
+         WHERE thumb_hash IS NULL AND asset_type = 'image' AND deleted_at IS NULL AND id IN (",
     );
     let mut separated = qb.separated(", ");
     for id in ids {
@@ -3880,7 +4086,7 @@ pub struct ColorCoverage {
 #[instrument(skip(pool))]
 pub async fn color_coverage(pool: &SqlitePool) -> Result<ColorCoverage> {
     let total: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM assets WHERE asset_type = 'image'")
+        sqlx::query_scalar("SELECT COUNT(*) FROM assets WHERE asset_type = 'image' AND deleted_at IS NULL")
             .fetch_one(pool)
             .await
             .context("Failed to count images")?;
@@ -3940,7 +4146,7 @@ pub async fn analyze_colors(
 ) -> Result<usize> {
     let pending: Vec<PendingColor> = sqlx::query_as::<_, PendingColor>(
         "SELECT id, extension FROM assets \
-         WHERE asset_type = 'image' AND id NOT IN (SELECT asset_id FROM asset_colors) \
+         WHERE asset_type = 'image' AND deleted_at IS NULL AND id NOT IN (SELECT asset_id FROM asset_colors) \
          ORDER BY imported_date DESC, id DESC",
     )
     .fetch_all(pool)
@@ -4059,12 +4265,12 @@ mod manifest_tests {
             "CREATE TABLE assets (id TEXT PRIMARY KEY, asset_type TEXT, filename TEXT, \
              notes TEXT, source_url TEXT, file_size INTEGER, width INTEGER, height INTEGER, \
              extension TEXT, imported_date TEXT, creation_date TEXT, modified_date TEXT, \
-             manual_position REAL, thumb_hash TEXT, is_animated INTEGER)",
+             manual_position REAL, thumb_hash TEXT, is_animated INTEGER, deleted_at TEXT)",
             "CREATE TABLE assets_tags (asset_id TEXT, tag_id TEXT)",
             "CREATE TABLE assets_folders (folder_id TEXT, asset_id TEXT, position REAL)",
-            "INSERT INTO assets VALUES ('i1','image','a.png',NULL,NULL,10,100,100,'png',\
+            "INSERT INTO assets (id, asset_type, filename, notes, source_url, file_size, width, height, extension, imported_date, creation_date, modified_date, manual_position, thumb_hash, is_animated) VALUES ('i1','image','a.png',NULL,NULL,10,100,100,'png',\
              '2026-01-01T00:00:00.000Z','2026-01-01T00:00:00.000Z','2026-01-01T00:00:00.000Z',0,NULL,0)",
-            "INSERT INTO assets VALUES ('v1','video','b.mp4',NULL,NULL,20,100,100,'mp4',\
+            "INSERT INTO assets (id, asset_type, filename, notes, source_url, file_size, width, height, extension, imported_date, creation_date, modified_date, manual_position, thumb_hash, is_animated) VALUES ('v1','video','b.mp4',NULL,NULL,20,100,100,'mp4',\
              '2026-01-01T00:00:00.000Z','2026-01-01T00:00:00.000Z','2026-01-01T00:00:00.000Z',1,NULL,0)",
             "INSERT INTO assets_tags VALUES ('i1','t1')",
         ] {
@@ -4135,7 +4341,7 @@ mod smart_order_tests {
             "CREATE TABLE assets (id TEXT PRIMARY KEY, asset_type TEXT, filename TEXT, \
              notes TEXT, source_url TEXT, file_size INTEGER, width INTEGER, height INTEGER, \
              extension TEXT, imported_date TEXT, creation_date TEXT, modified_date TEXT, \
-             manual_position REAL, thumb_hash TEXT, is_animated INTEGER)",
+             manual_position REAL, thumb_hash TEXT, is_animated INTEGER, deleted_at TEXT)",
             "CREATE TABLE assets_tags (asset_id TEXT, tag_id TEXT)",
             "CREATE TABLE assets_folders (folder_id TEXT, asset_id TEXT, position REAL)",
             "CREATE TABLE smart_folder_order (smart_folder_id TEXT, asset_id TEXT, \
@@ -4163,7 +4369,7 @@ mod smart_order_tests {
             ("i1", "image", "2026-01-04T00:00:00.000Z"),
         ] {
             sqlx::query(
-                "INSERT INTO assets VALUES (?, ?, 'f', NULL, NULL, 1, 10, 10, 'x', ?, ?, ?, 0, NULL, 0)",
+                "INSERT INTO assets (id, asset_type, filename, notes, source_url, file_size, width, height, extension, imported_date, creation_date, modified_date, manual_position, thumb_hash, is_animated) VALUES (?, ?, 'f', NULL, NULL, 1, 10, 10, 'x', ?, ?, ?, 0, NULL, 0)",
             )
             .bind(id).bind(ty).bind(date).bind(date).bind(date)
             .execute(&pool).await.unwrap();
@@ -4240,7 +4446,7 @@ mod smart_order_tests {
         reorder(&pool, "v1", None).await; // ranks v1, v3, v2
 
         sqlx::query(
-            "INSERT INTO assets VALUES ('v4','video','f',NULL,NULL,1,10,10,'x',\
+            "INSERT INTO assets (id, asset_type, filename, notes, source_url, file_size, width, height, extension, imported_date, creation_date, modified_date, manual_position, thumb_hash, is_animated) VALUES ('v4','video','f',NULL,NULL,1,10,10,'x',\
              '2026-01-09T00:00:00.000Z','2026-01-09T00:00:00.000Z','2026-01-09T00:00:00.000Z',0,NULL,0)",
         )
         .execute(&pool).await.unwrap();
@@ -4290,16 +4496,16 @@ mod group_tests {
             "CREATE TABLE assets (id TEXT PRIMARY KEY, asset_type TEXT, filename TEXT, \
              notes TEXT, source_url TEXT, file_size INTEGER, width INTEGER, height INTEGER, \
              extension TEXT, imported_date TEXT, creation_date TEXT, modified_date TEXT, \
-             manual_position REAL, thumb_hash TEXT, is_animated INTEGER)",
+             manual_position REAL, thumb_hash TEXT, is_animated INTEGER, deleted_at TEXT)",
             "CREATE TABLE assets_tags (asset_id TEXT, tag_id TEXT)",
             "CREATE TABLE assets_folders (folder_id TEXT, asset_id TEXT, position REAL)",
             "CREATE TABLE rule_sets (id TEXT PRIMARY KEY, kind TEXT, name TEXT, group_id TEXT, \
              position REAL, version INTEGER, query_json TEXT)",
-            "INSERT INTO assets VALUES ('i1','image','a.png',NULL,NULL,1,1,1,'png',\
+            "INSERT INTO assets (id, asset_type, filename, notes, source_url, file_size, width, height, extension, imported_date, creation_date, modified_date, manual_position, thumb_hash, is_animated) VALUES ('i1','image','a.png',NULL,NULL,1,1,1,'png',\
              '2026-01-01T00:00:00.000Z','x','x',0,NULL,0)",
-            "INSERT INTO assets VALUES ('v1','video','b.mp4',NULL,NULL,1,1,1,'mp4',\
+            "INSERT INTO assets (id, asset_type, filename, notes, source_url, file_size, width, height, extension, imported_date, creation_date, modified_date, manual_position, thumb_hash, is_animated) VALUES ('v1','video','b.mp4',NULL,NULL,1,1,1,'mp4',\
              '2026-01-02T00:00:00.000Z','x','x',0,NULL,0)",
-            "INSERT INTO assets VALUES ('a1','audio','c.mp3',NULL,NULL,1,1,1,'mp3',\
+            "INSERT INTO assets (id, asset_type, filename, notes, source_url, file_size, width, height, extension, imported_date, creation_date, modified_date, manual_position, thumb_hash, is_animated) VALUES ('a1','audio','c.mp3',NULL,NULL,1,1,1,'mp3',\
              '2026-01-03T00:00:00.000Z','x','x',0,NULL,0)",
         ] {
             sqlx::query(stmt).execute(&pool).await.unwrap();
@@ -4401,6 +4607,7 @@ mod scope_wire_tests {
             (r#"{"kind":"folder","id":"f1"}"#, "folder"),
             (r#"{"kind":"smart","id":"s1"}"#, "smart"),
             (r#"{"kind":"smart_group","id":"g1"}"#, "smart_group"),
+            (r#"{"kind":"trash"}"#, "trash"),
         ] {
             let scope: Scope =
                 serde_json::from_str(json).unwrap_or_else(|e| panic!("{expected}: {e}"));
@@ -4411,6 +4618,7 @@ mod scope_wire_tests {
                 Scope::Folder { .. } => "folder",
                 Scope::Smart { .. } => "smart",
                 Scope::SmartGroup { .. } => "smart_group",
+                Scope::Trash => "trash",
             };
             assert_eq!(kind, expected);
         }

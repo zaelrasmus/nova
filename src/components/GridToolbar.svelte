@@ -1,5 +1,6 @@
 <script lang="ts">
-    import { SlidersHorizontal } from "@lucide/svelte";
+    import { SlidersHorizontal, Flame } from "@lucide/svelte";
+    import { toast } from "svelte-sonner";
     import SortControl from "./SortControl.svelte";
     import QuickActionsMenu from "./actions/QuickActionsMenu.svelte";
     import { settings } from "../routes/settings.svelte";
@@ -22,6 +23,31 @@
     const effectiveView = $derived(manualSort ? "justified" : settings.preferences.gridView);
     const isJustified = $derived(effectiveView === "justified");
 
+    let emptying = $state(false);
+
+    /**
+     * The count is in the confirmation on purpose: "empty the Trash" is easy to
+     * agree to, "delete 412 assets" is the same sentence with the consequence
+     * spelled out.
+     */
+    async function emptyTrash() {
+        const count = assetLibrary.trashCount;
+        const ok = window.confirm(
+            `Permanently delete ${count.toLocaleString()} ${count === 1 ? "asset" : "assets"}? ` +
+                `The files are removed from disk. This can't be undone.`,
+        );
+        if (!ok) return;
+        emptying = true;
+        try {
+            const purged = await assetLibrary.emptyTrash();
+            toast.success(`Deleted ${purged.toLocaleString()} permanently`);
+        } catch (e) {
+            toast.error(typeof e === "string" ? e : "Couldn't empty the Trash.");
+        } finally {
+            emptying = false;
+        }
+    }
+
     // Local mirror so the slider drags smoothly; persisted on release (onchange).
     let numColumns = $state(settings.preferences.gridColumns);
     $effect(() => {
@@ -30,6 +56,24 @@
 </script>
 
 <div class="flex items-center gap-3">
+    <!-- Only inside the Trash. Emptying is the one irreversible action in the
+         app, so it lives in the place you have to navigate to on purpose rather
+         than sitting permanently in the toolbar of every view. -->
+    {#if assetLibrary.scope.kind === "trash" && assetLibrary.trashCount > 0}
+        <button
+            type="button"
+            onclick={emptyTrash}
+            disabled={emptying}
+            class="flex shrink-0 items-center gap-1.5 rounded border border-red-900/60 px-2 py-1
+                   text-xs text-red-400 transition-colors hover:bg-red-950/40
+                   disabled:opacity-50"
+        >
+            <Flame class="h-3.5 w-3.5" />
+            {emptying ? "Emptying…" : `Empty Trash (${assetLibrary.trashCount.toLocaleString()})`}
+        </button>
+        <div class="h-4 w-px bg-neutral-800"></div>
+    {/if}
+
     <!-- The way in to the filter bar. Shows a dot while filters are active, so a
          narrowed library is legible even with the bar closed — and it can't be
          closed while narrowed, since the bar force-shows in that state. -->

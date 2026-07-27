@@ -10,7 +10,7 @@
     import { PanelLeft, PanelRight, Settings, Download } from "@lucide/svelte";
 
     import { assetLibrary, type ManifestScope } from "$lib/assets.svelte";
-    import { runAction, undoLatest } from "../components/actions/run";
+    import { runAction, undoLatest, undoRun } from "../components/actions/run";
     import { dropzone } from "$lib/dropzone.svelte";
     import type { DropTarget } from "$lib/droptarget";
     import { drag, DRAG_SCROLL_ATTR } from "$lib/dragdrop.svelte";
@@ -60,6 +60,8 @@
         path_links: { [key: string]: string };
         /** Files whose bytes the library already held; skipped, not copied. */
         duplicates: number;
+        /** Of those, how many were in the Trash and came back. */
+        restored: number;
     }
 
     // Tauri commands throw the serialized AppError string on failure.
@@ -185,12 +187,20 @@
         toast.promise<ImportResult>(importPromise, {
             loading: "Import in progress...",
             success: (result) => {
-                const base = `Imported ${result.assets.length} assets across ${result.folders.length} folders.`;
+                const parts = [
+                    `Imported ${result.assets.length} assets across ${result.folders.length} folders.`,
+                ];
                 // Always say so when files were skipped — otherwise re-importing
                 // a folder looks like the import silently failed.
-                return result.duplicates > 0
-                    ? `${base} Skipped ${result.duplicates} already in the library.`
-                    : base;
+                const skipped = result.duplicates - result.restored;
+                if (skipped > 0) parts.push(`Skipped ${skipped} already in the library.`);
+                // Reported separately from "skipped": dropping a file you'd
+                // deleted brings it back, and that's a different outcome from
+                // one that was already there.
+                if (result.restored > 0) {
+                    parts.push(`Restored ${result.restored} from the Trash.`);
+                }
+                return parts.join(" ");
             },
             error: (e) => (typeof e === "string" ? e : "Import failed. Please try again."),
         });
@@ -313,6 +323,7 @@
             // thing telling you which one you're looking at.
             return group ? `Everything in ${group.name}` : "Group";
         }
+        if (scope.kind === "trash") return "Trash";
         return assetLibrary.folders.find((f) => f.id === scope.id)?.name ?? "Folder";
     });
 
@@ -321,9 +332,51 @@
     );
 
     /** Panel shortcuts. Guarded so they don't fire while typing in the search box. */
+    /**
+     * Delete key: move the selection to the Trash.
+     *
+     * Ids snapshotted before the await, like every other bulk operation — the
+     * grid re-streams as rows leave the view.
+     */
+    async function trashSelection() {
+        const assetIds = selection.assetIds;
+        if (assetIds.length === 0) return;
+        // Restoring is what you'd do next, so pressing Delete inside the Trash
+        // restoring instead would be a keystroke that means two opposite things.
+        // It simply does nothing there; the menu has both verbs.
+        if (assetLibrary.scope.kind === "trash") return;
+        try {
+            const summary = await assetLibrary.setAssetsTrashed(assetIds, true);
+            const runId = summary.run_id;
+            const what = `Moved ${summary.asset_count.toLocaleString()} ${
+                summary.asset_count === 1 ? "asset" : "assets"
+            } to the Trash`;
+            if (runId && summary.is_undoable) {
+                toast.success(what, {
+                    action: { label: "Undo", onClick: () => void undoRun(runId) },
+                });
+            } else {
+                toast.success(what);
+            }
+        } catch (e) {
+            handleCommandError(e, "Couldn't move those assets to the Trash.");
+        }
+    }
+
     function onKeydown(e: KeyboardEvent) {
         const el = e.target as HTMLElement | null;
         if (el?.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(el?.tagName ?? "")) return;
+
+        // Delete carries no modifier, so it's checked before the Ctrl gate.
+        // Only ever moves to the Trash — the permanent version lives in the
+        // Trash's own menu, behind a confirmation, and must not be one keystroke
+        // away from a selection you can't fully see.
+        if ((e.key === "Delete" || e.key === "Backspace") && selection.assetCount > 0) {
+            e.preventDefault();
+            void trashSelection();
+            return;
+        }
+
         if (!e.ctrlKey && !e.metaKey) return;
 
         // Ctrl+Shift+1..9 runs the action bound to that digit. Checked before the
