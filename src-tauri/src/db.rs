@@ -127,11 +127,18 @@ impl DbState {
             });
         }
 
+        // The degraded flag describes the library that WAS open; a different one
+        // starts clean. Cleared before the backfill below, which may set it again
+        // if it fails.
+        crate::search::clear_degraded();
+
         // Backfill the search index for a library that just gained the table on
         // migration. No-op once populated. Non-fatal: search degrades, the rest
-        // of the app doesn't, and a manual rebuild can recover it.
+        // of the app doesn't, and a manual rebuild can recover it — and now the
+        // UI says so rather than leaving the user to notice missing results.
         if let Err(e) = crate::search::ensure_indexed(&new_pool).await {
             warn!(error = %e, "Search index backfill failed (non-fatal)");
+            crate::search::mark_degraded();
         }
 
         let handle = LibraryHandle {

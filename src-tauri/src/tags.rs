@@ -11,6 +11,7 @@
 //! predicate have their columns here already but are wired up in later phases.
 
 use anyhow::{Context, Result};
+use crate::reject;
 use serde::{Deserialize, Serialize};
 use sqlx::{sqlite::SqlitePool, FromRow, QueryBuilder, Sqlite};
 use std::collections::HashMap;
@@ -256,7 +257,7 @@ pub async fn rename_tag(pool: &SqlitePool, id: &str, raw_name: &str) -> Result<(
 
     if let Some(existing) = lookup_tag_id(pool, &name).await? {
         if existing != id {
-            anyhow::bail!("A tag named \"{name}\" already exists");
+            reject!("A tag named \"{name}\" already exists");
         }
     }
 
@@ -267,7 +268,7 @@ pub async fn rename_tag(pool: &SqlitePool, id: &str, raw_name: &str) -> Result<(
         .await
         .context("Failed to rename tag")?;
     if res.rows_affected() == 0 {
-        anyhow::bail!("Tag not found");
+        reject!("Tag not found");
     }
 
     // The name feeds every carrying asset's `tag_text`. Assignments are
@@ -411,7 +412,7 @@ pub async fn set_tag_color(pool: &SqlitePool, id: &str, color: Option<String>) -
         .await
         .context("Failed to set tag color")?;
     if res.rows_affected() == 0 {
-        anyhow::bail!("Tag not found");
+        reject!("Tag not found");
     }
     Ok(())
 }
@@ -426,7 +427,7 @@ pub async fn set_tag_starred(pool: &SqlitePool, id: &str, starred: bool) -> Resu
         .await
         .context("Failed to star tag")?;
     if res.rows_affected() == 0 {
-        anyhow::bail!("Tag not found");
+        reject!("Tag not found");
     }
     Ok(())
 }
@@ -442,7 +443,7 @@ pub async fn set_tag_group(pool: &SqlitePool, id: &str, group_id: Option<String>
         .await
         .context("Failed to move tag")?;
     if res.rows_affected() == 0 {
-        anyhow::bail!("Tag not found");
+        reject!("Tag not found");
     }
     Ok(())
 }
@@ -457,7 +458,7 @@ pub async fn set_tag_group(pool: &SqlitePool, id: &str, group_id: Option<String>
 #[instrument(skip(pool))]
 pub async fn merge_tags(pool: &SqlitePool, source: &str, target: &str) -> Result<()> {
     if source == target {
-        anyhow::bail!("Cannot merge a tag into itself");
+        reject!("Cannot merge a tag into itself");
     }
 
     // The source's carriers are exactly the assets whose `tag_text` changes: the
@@ -486,7 +487,7 @@ pub async fn merge_tags(pool: &SqlitePool, source: &str, target: &str) -> Result
         .await
         .context("Failed to delete merged tag")?;
     if res.rows_affected() == 0 {
-        anyhow::bail!("Source tag not found");
+        reject!("Source tag not found");
     }
 
     tx.commit().await.context("Failed to commit tag merge")?;
@@ -503,7 +504,7 @@ pub async fn merge_tags(pool: &SqlitePool, source: &str, target: &str) -> Result
 fn clean_group_name(raw: &str) -> Result<String> {
     let name = raw.trim();
     if name.is_empty() {
-        anyhow::bail!("Group name cannot be empty");
+        reject!("Group name cannot be empty");
     }
     Ok(name.to_string())
 }
@@ -555,7 +556,7 @@ pub async fn rename_tag_group(pool: &SqlitePool, id: &str, raw_name: &str) -> Re
         .await
         .context("Failed to rename tag group")?;
     if res.rows_affected() == 0 {
-        anyhow::bail!("Group not found");
+        reject!("Group not found");
     }
     Ok(())
 }
@@ -570,7 +571,7 @@ pub async fn set_tag_group_color(pool: &SqlitePool, id: &str, color: Option<Stri
         .await
         .context("Failed to set group color")?;
     if res.rows_affected() == 0 {
-        anyhow::bail!("Group not found");
+        reject!("Group not found");
     }
     Ok(())
 }

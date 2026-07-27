@@ -18,6 +18,42 @@ use tracing::instrument;
 /// Mirror of `assets.rs` — keep multi-row statements under SQLite's 32766 bind cap.
 const IDS_PER_QUERY: usize = 8000;
 
+/// Has a reindex failed since this library was opened?
+///
+/// Every caller of [`reindex_assets`] treats a failure as non-fatal, and rightly
+/// so — a failed reindex must not roll back an import the user can already see.
+/// But the consequence is invisible in a way the others aren't: the index is a
+/// derived cache, so a dropped update means SEARCH SILENTLY RETURNS THE WRONG
+/// ANSWER. No error, no missing thumbnail, nothing on screen — just an asset the
+/// user can no longer find, indistinguishable from one they misremembered.
+///
+/// Set INSIDE `reindex_assets` rather than at each of its ~10 call sites, for the
+/// same reason `build_manifest_query` writes the trash predicate itself: a
+/// caller that forgets is a silent leak, and there is no way to forget something
+/// you were never asked to do.
+///
+/// `Relaxed` throughout: this is a hint driving a UI notice, not a happens-before
+/// edge, and a read that lags a write by a few microseconds costs nothing.
+static DEGRADED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether search results should currently be treated as unreliable.
+pub fn is_degraded() -> bool {
+    DEGRADED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Clear the flag. Called on a successful full rebuild (the index is now
+/// correct by construction) and on library connect (the flag is about the open
+/// library, and a different one starts clean).
+pub fn clear_degraded() {
+    DEGRADED.store(false, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Mark the index unreliable from outside `reindex_assets` — currently only the
+/// connect-time backfill, which is the other way the index can end up wrong.
+pub fn mark_degraded() {
+    DEGRADED.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// The denormalisation query: one row per asset with all searchable text. Ends
 /// at `FROM assets a` so callers can append a `WHERE` (or not, to index all).
 ///
@@ -45,6 +81,17 @@ const INSERT_COLS: &str =
 /// rows, fixable by `rebuild_search_index` — never corruption.
 #[instrument(skip(pool, ids), fields(count = ids.len()))]
 pub async fn reindex_assets(pool: &SqlitePool, ids: &[String]) -> Result<()> {
+    // The one wrapper in this module: every failure marks the index degraded, so
+    // no call site has to remember to. See `DEGRADED`.
+    let result = reindex_assets_inner(pool, ids).await;
+    if let Err(e) = &result {
+        DEGRADED.store(true, std::sync::atomic::Ordering::Relaxed);
+        tracing::error!(error = %e, "Search index is now out of date");
+    }
+    result
+}
+
+async fn reindex_assets_inner(pool: &SqlitePool, ids: &[String]) -> Result<()> {
     if ids.is_empty() {
         return Ok(());
     }
@@ -103,6 +150,10 @@ pub async fn rebuild_search_index(pool: &SqlitePool) -> Result<()> {
     tx.commit()
         .await
         .context("Failed to commit index rebuild")?;
+
+    // The index was just re-derived from the source tables in full, so whatever
+    // drift the flag was reporting is gone by construction.
+    clear_degraded();
     Ok(())
 }
 
@@ -475,6 +526,43 @@ pub fn compile_query(input: &str, columns: &[&str]) -> Compiled {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A failed reindex must leave a mark the UI can read.
+    ///
+    /// This is the whole point of the flag: every caller treats a reindex failure
+    /// as non-fatal, which is correct, but the consequence — search quietly
+    /// returning the wrong answer — is the one non-fatal outcome a user cannot
+    /// see for themselves.
+    ///
+    /// NOTE ON GLOBAL STATE: `DEGRADED` is a process-wide static, and cargo runs
+    /// these in parallel threads. This test is safe because nothing else in the
+    /// suite reaches a clearing path — no test calls `rebuild_search_index` or
+    /// `ensure_indexed`, and every other `reindex_assets` call succeeds, so none
+    /// of them touch the flag. If that ever changes, this needs serialising.
+    #[tokio::test]
+    async fn a_failed_reindex_marks_the_index_degraded() {
+        // A pool with `assets` but NO `search_index`, so the insert cannot work.
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::query("CREATE TABLE assets (id TEXT PRIMARY KEY)")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        clear_degraded();
+        assert!(!is_degraded(), "precondition");
+
+        let result = reindex_assets(&pool, &["a1".to_string()]).await;
+
+        assert!(result.is_err(), "the reindex must actually fail");
+        assert!(
+            is_degraded(),
+            "a failed reindex has to be visible to the UI, not just to the log"
+        );
+
+        // A rebuild is the recovery path, so clearing is what it does on success.
+        clear_degraded();
+        assert!(!is_degraded());
+    }
 
     /// A minimal slice of the real schema, enough to exercise the denormalisation.
     async fn schema() -> SqlitePool {

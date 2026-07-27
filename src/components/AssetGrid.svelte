@@ -76,6 +76,7 @@
         assetLibrary.loadQuickActions();
         assetLibrary.loadActionRuns();
         assetLibrary.loadTrashCount();
+        assetLibrary.loadSearchHealth();
         assetLibrary.loadColorCoverage();
         assetLibrary.loadTags();
         assetLibrary.loadTagGroups();

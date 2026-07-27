@@ -1788,6 +1788,10 @@ class AssetLibrary {
     // the hot path here and must not cost an extra round trip for a history
     // entry that was never written.
     if (summary.run_id) await this.loadActionRuns();
+    // Every pipeline reindexes what it touched, so this is the choke point where
+    // drift would first show up. Cheap — the backend reads an atomic and takes no
+    // lock — and not awaited, so a healthy run pays nothing on the critical path.
+    void this.loadSearchHealth();
     return summary;
   }
 
@@ -1819,6 +1823,32 @@ class AssetLibrary {
   // ── Trash ─────────────────────────────────────────────────────────────────
 
   /** How many assets are in the Trash. Drives the sidebar badge. */
+  /**
+   * True when a reindex has failed since this library was opened, so search is
+   * answering from a stale index.
+   *
+   * Surfaced rather than only logged because this is the one non-fatal failure
+   * whose consequence is INVISIBLE: a missing thumbnail is obvious, a wrong
+   * search result is indistinguishable from an asset the user misremembered.
+   * Rendered as a persistent notice, not a toast — the condition holds until
+   * someone rebuilds, and a message that disappears is the wrong shape for it.
+   */
+  searchDegraded = $state(false);
+
+  async loadSearchHealth(): Promise<void> {
+    try {
+      this.searchDegraded = await invoke<boolean>("search_index_degraded");
+    } catch (e) {
+      console.error("Failed to read search index health:", e);
+    }
+  }
+
+  /** Re-derive the whole index from the source tables, then re-check. */
+  async rebuildSearchIndex(): Promise<void> {
+    await invoke("rebuild_search_index");
+    await this.loadSearchHealth();
+  }
+
   trashCount = $state(0);
 
   async loadTrashCount(): Promise<void> {

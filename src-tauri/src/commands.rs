@@ -8,7 +8,6 @@ use crate::error::AppError;
 use crate::library::{self, LibraryInfo};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
-use tauri_plugin_fs::FsExt;
 use tracing::{info, instrument, warn};
 
 struct TauriProgressReporter {
@@ -49,10 +48,12 @@ pub async fn connect_library<R: Runtime>(
         .await
         .inspect_err(|e| tracing::error!(error = %e, "connect_library failed"))?;
 
-    app.fs_scope().allow_directory(&library_path, true).map_err(|e| {
-        tracing::error!(error = %e, path = %library_path, "Failed to allow directory on connect");
-        AppError::Io(std::io::Error::new(std::io::ErrorKind::PermissionDenied, e.to_string(),))
-    })?;
+    // No `fs_scope().allow_directory(...)` here any more. It granted the fs
+    // plugin's scope over the whole library tree, and the capability no longer
+    // carries `fs:default` — so the webview cannot reach those commands at all
+    // and the grant was scope for a door that is bricked up. Images come through
+    // the asset protocol below; everything else goes through a command that
+    // takes IDS and resolves paths in Rust.
 
     // Scope the asset protocol to this library so the webview can load its
     // thumbnails/originals — the static scope is empty, granted per-library here.
@@ -85,15 +86,7 @@ pub async fn create_library<R: Runtime>(
         .await
         .inspect_err(|e| tracing::error!(error = %e, "create_library failed"))?;
 
-    app.fs_scope()
-        .allow_directory(&library_root, true)
-        .map_err(|e| {
-            tracing::error!(error = %e, path = ?library_root, "Failed to grant fs scope");
-            AppError::Io(std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                e.to_string(),
-            ))
-        })?;
+    // No fs-plugin scope grant — see connect_library.
 
     // Scope the asset protocol to the new library (see connect_library).
     app.asset_protocol_scope()
@@ -834,8 +827,22 @@ pub async fn delete_folders(
         .map_err(AppError::from)
 }
 
+/// Whether a reindex has failed since this library was opened.
+///
+/// `true` means search is answering from a stale index — results may be missing
+/// assets that do match. Deliberately a state the UI can render persistently
+/// rather than an event: the condition lasts until someone rebuilds, and a toast
+/// that vanishes after four seconds is the wrong shape for a fact that stays
+/// true. Takes no library lock, so it is cheap to poll after any mutation.
+#[instrument(skip_all)]
+#[tauri::command]
+pub fn search_index_degraded() -> bool {
+    crate::search::is_degraded()
+}
+
 /// Rebuild the full-text search index from scratch. The recovery path if the
 /// derived index ever drifts from the source tables — the maintenance tool.
+/// Clears the degraded flag on success.
 #[instrument(skip_all)]
 #[tauri::command]
 pub async fn rebuild_search_index(state: tauri::State<'_, DbState>) -> Result<(), AppError> {

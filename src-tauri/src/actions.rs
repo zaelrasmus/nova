@@ -23,7 +23,8 @@
 //! actually changed, which is what lets the log live on disk with a budget
 //! instead of in memory with a prayer.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
+use crate::reject;
 use rustc_hash::FxHashSet;
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, QueryBuilder, Sqlite, SqlitePool};
@@ -319,7 +320,7 @@ const ILLEGAL_IN_FILENAME: &[char] = &['<', '>', ':', '"', '/', '\\', '|', '?', 
 /// the mistake is nearly always visible in it.
 fn parse_pattern(pattern: &str) -> Result<Vec<Token>> {
     if pattern.trim().is_empty() {
-        bail!("The pattern is empty");
+        reject!("The pattern is empty");
     }
 
     let mut tokens = Vec::new();
@@ -351,7 +352,7 @@ fn parse_pattern(pattern: &str) -> Result<Vec<Token>> {
                     word.push(c);
                 }
                 if !closed {
-                    bail!("Unclosed {{ — every token needs a closing brace");
+                    reject!("Unclosed {{ — every token needs a closing brace");
                 }
                 tokens.push(match word.trim().to_ascii_lowercase().as_str() {
                     "name" => Token::Name,
@@ -359,15 +360,15 @@ fn parse_pattern(pattern: &str) -> Result<Vec<Token>> {
                     "date" => Token::Date,
                     "width" => Token::Width,
                     "height" => Token::Height,
-                    other => bail!(
+                    other => reject!(
                         "Unknown token {{{other}}} — use name, index, date, width or height"
                     ),
                 });
             }
-            '}' => bail!("Stray }} — write }}}} for a literal brace"),
-            c if c.is_control() => bail!("The pattern contains a control character"),
+            '}' => reject!("Stray }} — write }}}} for a literal brace"),
+            c if c.is_control() => reject!("The pattern contains a control character"),
             c if ILLEGAL_IN_FILENAME.contains(&c) => {
-                bail!("A filename can't contain {c}")
+                reject!("A filename can't contain {c}")
             }
             c => literal.push(c),
         }
@@ -1437,10 +1438,10 @@ async fn fetch_one(pool: &SqlitePool, id: &str) -> Result<QuickAction> {
         .fetch_optional(pool)
         .await
         .context("Failed to read quick action")?
-        .ok_or_else(|| anyhow::anyhow!("Quick action not found"))?;
+        .ok_or_else(|| crate::error::rejected("Quick action not found"))?;
 
     row.decode()
-        .ok_or_else(|| anyhow::anyhow!("This action was saved by a newer version of Nova"))
+        .ok_or_else(|| crate::error::rejected("This action was saved by a newer version of Nova"))
 }
 
 /// Reject a draft the store cannot honour. Runs before any write so a bad edit
@@ -1449,7 +1450,7 @@ async fn validate(pool: &SqlitePool, draft: &QuickActionDraft, editing: Option<&
     let name = crate::assets::clean_name(&draft.name).context("An action needs a name")?;
 
     if draft.steps.is_empty() || !draft.steps.iter().any(|s| s.op.is_active()) {
-        bail!("Add at least one step that does something");
+        reject!("Add at least one step that does something");
     }
     // The same depth cap the smart folder editor enforces, checked here too:
     // an action is another way to author a rule tree, and a document that the
@@ -1461,12 +1462,12 @@ async fn validate(pool: &SqlitePool, draft: &QuickActionDraft, editing: Option<&
     }
     if let Some(color) = &draft.color {
         if !crate::assets::PIN_COLORS.contains(&color.as_str()) {
-            bail!("Unknown colour");
+            reject!("Unknown colour");
         }
     }
     if let Some(n) = draft.shortcut {
         if !(1..=9).contains(&n) {
-            bail!("Shortcuts run from Ctrl+Shift+1 to Ctrl+Shift+9");
+            reject!("Shortcuts run from Ctrl+Shift+1 to Ctrl+Shift+9");
         }
         // Report the conflict by NAME. The unique index would reject this write
         // anyway, but "already used by Archive old" is something the user can
@@ -1480,7 +1481,7 @@ async fn validate(pool: &SqlitePool, draft: &QuickActionDraft, editing: Option<&
         .await
         .context("Failed to check shortcut availability")?;
         if let Some(other) = holder {
-            bail!("Ctrl+Shift+{n} is already used by \"{other}\"");
+            reject!("Ctrl+Shift+{n} is already used by \"{other}\"");
         }
     }
     Ok(name)
@@ -1573,7 +1574,7 @@ pub async fn update_quick_action(
     .context("Failed to update quick action")?;
 
     if res.rows_affected() == 0 {
-        bail!("Quick action not found");
+        reject!("Quick action not found");
     }
     Ok(())
 }
@@ -1822,7 +1823,7 @@ pub async fn preview_rename(
         date_field,
     } = &step.op
     else {
-        bail!("Not a rename step");
+        reject!("Not a rename step");
     };
 
     let tokens = match parse_pattern(pattern) {
@@ -1937,7 +1938,7 @@ pub async fn run_action(
 ) -> Result<RunSummary> {
     let action = fetch_one(pool, action_id).await?;
     if let Some(problem) = broken_refs(pool, &action.steps).await?.into_iter().next() {
-        bail!("{problem}. Edit the action and try again.");
+        reject!("{problem}. Edit the action and try again.");
     }
     run_steps(
         pool,
@@ -1966,7 +1967,7 @@ pub async fn run_steps(
 ) -> Result<RunSummary> {
     let ids = unique(asset_ids);
     if ids.is_empty() {
-        bail!("Select some assets first");
+        reject!("Select some assets first");
     }
     // Belt to `begin_session`'s braces: a run must never be written before the
     // session it belongs to has started, or it would be invisible to undo.
@@ -2104,10 +2105,10 @@ pub async fn undo_run(pool: &SqlitePool, run_id: &str) -> Result<UndoSummary> {
             .fetch_optional(pool)
             .await
             .context("Failed to read the run")?
-            .ok_or_else(|| anyhow::anyhow!("That run is no longer in the history"))?;
+            .ok_or_else(|| crate::error::rejected("That run is no longer in the history"))?;
 
     if !is_undoable {
-        bail!("\"{name}\" was too large to record an undo for");
+        reject!("\"{name}\" was too large to record an undo for");
     }
 
     // DESCENDING: the inverse of (A then B) is (B⁻¹ then A⁻¹).

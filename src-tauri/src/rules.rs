@@ -50,6 +50,7 @@
 //! Every LIKE pattern is escaped (`%` and `_` are wildcards, and filenames are
 //! full of underscores) and carries an explicit `ESCAPE`.
 
+use crate::reject;
 use serde::{Deserialize, Serialize};
 use sqlx::{QueryBuilder, Sqlite};
 
@@ -295,7 +296,7 @@ impl RuleNode {
             match node {
                 RuleNode::Group { children, .. } => {
                     if depth >= MAX_DEPTH {
-                        anyhow::bail!("Rule groups may not nest more than {MAX_DEPTH} deep");
+                        reject!("Rule groups may not nest more than {MAX_DEPTH} deep");
                     }
                     for child in children {
                         walk(child, depth + 1)?;

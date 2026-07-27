@@ -1,5 +1,6 @@
 <script lang="ts">
     import { untrack } from "svelte";
+    import { toast } from "svelte-sonner";
     import {
         assetLibrary,
         allScopes,
@@ -163,6 +164,22 @@
         return () => window.removeEventListener("mousedown", onDown, true);
     });
 
+    // Recovery for a drifted index. Rebuilding is O(library) and the notice is
+    // the only thing that will clear it, so the button reports its own progress
+    // rather than leaving the user wondering whether the click registered.
+    let rebuilding = $state(false);
+    async function rebuildIndex() {
+        rebuilding = true;
+        try {
+            await assetLibrary.rebuildSearchIndex();
+            toast.success("Search index rebuilt.");
+        } catch (e) {
+            toast.error(typeof e === "string" ? e : "Couldn't rebuild the search index.");
+        } finally {
+            rebuilding = false;
+        }
+    }
+
     // The store's search is session state; if it's cleared elsewhere (library
     // switch, or the grid's "Clear" button), empty the box to match. Guarded on
     // `!focused` so it never wipes what the user is actively typing before the
@@ -172,6 +189,41 @@
         if (!active && !focused) untrack(() => (query = ""));
     });
 </script>
+
+<!--
+  Search is answering from a stale index.
+
+  Shown HERE, attached to the control it invalidates, rather than as a toast: the
+  condition holds until someone rebuilds, so a message that fades after a few
+  seconds would be the wrong shape — and it would almost certainly appear while
+  the user was looking somewhere else, since the reindex that failed was a side
+  effect of tagging or importing, not of searching.
+
+  It is also the only non-fatal failure in the app whose consequence is
+  invisible. A missing thumbnail announces itself; a search result that is
+  quietly wrong is indistinguishable from an asset you misremembered.
+-->
+{#if assetLibrary.searchDegraded}
+    <div
+        role="status"
+        class="mx-4 mb-1 mt-2 flex items-center gap-2 rounded-md border border-amber-500/40
+               bg-amber-500/10 px-3 py-1.5 text-xs text-amber-200"
+    >
+        <span aria-hidden="true">⚠</span>
+        <span class="flex-1">
+            Search results may be incomplete — the index didn't finish updating.
+        </span>
+        <button
+            type="button"
+            onclick={rebuildIndex}
+            disabled={rebuilding}
+            class="rounded border border-amber-500/50 px-2 py-0.5 font-medium
+                   hover:bg-amber-500/20 disabled:opacity-50"
+        >
+            {rebuilding ? "Rebuilding…" : "Rebuild"}
+        </button>
+    </div>
+{/if}
 
 <div bind:this={root} class="relative flex items-center gap-2 px-4 py-2">
     <!-- Input -->

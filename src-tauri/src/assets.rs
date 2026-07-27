@@ -2,6 +2,7 @@ use crate::extract;
 use crate::fs;
 use crate::thumbnail;
 use anyhow::{Context, Result};
+use crate::reject;
 use chrono::{DateTime, SecondsFormat, Utc};
 use futures_util::TryStreamExt;
 use rayon::prelude::{IntoParallelIterator, ParallelIterator};
@@ -853,7 +854,7 @@ pub async fn rename_smart_folder_group(pool: &SqlitePool, id: &str, name: &str) 
         .await
         .context("Failed to rename group")?;
     if res.rows_affected() == 0 {
-        anyhow::bail!("Group not found");
+        reject!("Group not found");
     }
     Ok(())
 }
@@ -897,7 +898,7 @@ pub async fn set_smart_folder_group(
         .await
         .context("Failed to move smart folder")?;
     if res.rows_affected() == 0 {
-        anyhow::bail!("Smart folder not found");
+        reject!("Smart folder not found");
     }
     Ok(())
 }
@@ -1202,7 +1203,7 @@ pub async fn set_sort(pool: &SqlitePool, scope: &Scope, sort: Sort) -> Result<()
     .context("Failed to persist sort")?;
 
     if res.rows_affected() == 0 {
-        anyhow::bail!("Folder not found");
+        reject!("Folder not found");
     }
     Ok(())
 }
@@ -1272,7 +1273,7 @@ pub async fn reorder_assets(
         .await
         .context("Failed to read uncategorized order")?,
         // The Trash is a holding area, not an arrangement.
-        Scope::Trash => anyhow::bail!("The Trash can't be reordered"),
+        Scope::Trash => reject!("The Trash can't be reordered"),
         // A smart folder's rank lives in its own table, so that every folder
         // orders independently — reusing the global `manual_position` (as All
         // and Uncategorized do) would make dragging in one smart folder
@@ -1307,7 +1308,7 @@ pub async fn reorder_assets(
         // A group's order is a union of several folders' orders, and there is no
         // answer to "where does this land" that doesn't rewrite somebody else's.
         Scope::SmartGroup { .. } => {
-            anyhow::bail!("A group of smart folders has no manual order");
+            reject!("A group of smart folders has no manual order");
         }
     };
 
@@ -1372,23 +1373,24 @@ pub async fn reorder_assets(
 
     match positions {
         Some(positions) => {
-            for (id, pos) in moved.iter().zip(positions) {
-                write_manual_position(&mut tx, scope, id, pos).await?;
-            }
+            let writes: Vec<(&str, f64)> =
+                moved.iter().copied().zip(positions).collect();
+            write_manual_positions(&mut tx, scope, &writes).await?;
         }
         None => {
             // Rebuild the whole scope 0,1,2… in the intended final order. Rare,
             // and the only way to guarantee distinct ranks once the doubles
             // between two neighbours are used up.
             tracing::info!(scope = ?scope, "Manual positions exhausted; renumbering scope");
-            let final_order = remaining[..insert_at]
+            let writes: Vec<(&str, f64)> = remaining[..insert_at]
                 .iter()
                 .map(|(id, _)| *id)
                 .chain(moved.iter().copied())
-                .chain(remaining[insert_at..].iter().map(|(id, _)| *id));
-            for (rank, id) in final_order.enumerate() {
-                write_manual_position(&mut tx, scope, id, rank as f64).await?;
-            }
+                .chain(remaining[insert_at..].iter().map(|(id, _)| *id))
+                .enumerate()
+                .map(|(rank, id)| (id, rank as f64))
+                .collect();
+            write_manual_positions(&mut tx, scope, &writes).await?;
         }
     }
 
@@ -1398,56 +1400,87 @@ pub async fn reorder_assets(
     Ok(())
 }
 
-/// Write one asset's manual rank into whichever column the scope orders by.
-async fn write_manual_position(
+/// Write manual ranks into whichever column the scope orders by.
+///
+/// Set-based, because BOTH callers can be large. The renumber fallback rewrites
+/// the entire scope — every asset in the library under `Scope::All` — and even
+/// the ordinary bisecting path writes one row per moved asset, which is the
+/// whole selection when someone drags a Ctrl+A. A statement each meant a round
+/// trip each.
+///
+/// The dispatch stays per-variant because the TARGET differs: a folder's rank
+/// lives on the membership row, All/Uncategorized share the asset-level column,
+/// and a smart folder has its own sparse table. There is no shared statement to
+/// factor out — only a shared shape.
+async fn write_manual_positions(
     tx: &mut sqlx::SqliteConnection,
     scope: &Scope,
-    asset_id: &str,
-    position: f64,
+    writes: &[(&str, f64)],
 ) -> Result<()> {
-    match scope {
-        Scope::Folder { id } => {
-            sqlx::query(
-                "UPDATE assets_folders SET position = ? WHERE folder_id = ? AND asset_id = ?",
-            )
-            .bind(position)
-            .bind(id.as_str())
-            .bind(asset_id)
-            .execute(&mut *tx)
-            .await
-            .context("Failed to write folder position")?;
-        }
-        Scope::All | Scope::Uncategorized => {
-            sqlx::query("UPDATE assets SET manual_position = ? WHERE id = ?")
-                .bind(position)
-                .bind(asset_id)
-                .execute(&mut *tx)
-                .await
-                .context("Failed to write manual position")?;
-        }
-        Scope::Trash => anyhow::bail!("The Trash can't be reordered"),
-        // Upsert: `materialize_smart_order` has already given every current
-        // member a row, but an UPDATE that silently affected zero rows would be
-        // the kind of failure that looks like "the drag didn't take".
-        Scope::Smart { id } => {
-            sqlx::query(
-                "INSERT INTO smart_folder_order (smart_folder_id, asset_id, position) \
-                 VALUES (?, ?, ?) \
-                 ON CONFLICT(smart_folder_id, asset_id) DO UPDATE SET position = excluded.position",
-            )
-            .bind(id.as_str())
-            .bind(asset_id)
-            .bind(position)
-            .execute(&mut *tx)
-            .await
-            .context("Failed to write smart folder position")?;
-        }
-        // Unreachable in practice — `reorder_assets` bails before opening the
-        // transaction — but stated rather than swallowed by a catch-all, so the
-        // next scope variant gets a compile error here instead of a silent
-        // write to the wrong column.
-        Scope::SmartGroup { .. } => {
-            anyhow::bail!("A group of smart folders has no manual order");
+    if writes.is_empty() {
+        return Ok(());
+    }
+    // Three binds per row in the widest arm; sized against SQLite's 32766 cap
+    // like every other batched statement here.
+    const ROWS_PER_STATEMENT: usize = 8000;
+
+    for chunk in writes.chunks(ROWS_PER_STATEMENT) {
+        match scope {
+            // A bare SQLite VALUES subquery names its columns column1, column2 —
+            // there is no `AS v(id, pos)` syntax to lean on.
+            Scope::Folder { id } => {
+                let mut qb =
+                    QueryBuilder::<Sqlite>::new("UPDATE assets_folders SET position = v.column2 FROM (");
+                qb.push_values(chunk, |mut b, (asset_id, position)| {
+                    b.push_bind(*asset_id).push_bind(*position);
+                });
+                qb.push(") AS v WHERE assets_folders.asset_id = v.column1 AND assets_folders.folder_id = ")
+                    .push_bind(id.as_str());
+                qb.build()
+                    .execute(&mut *tx)
+                    .await
+                    .context("Failed to write folder positions")?;
+            }
+            Scope::All | Scope::Uncategorized => {
+                let mut qb =
+                    QueryBuilder::<Sqlite>::new("UPDATE assets SET manual_position = v.column2 FROM (");
+                qb.push_values(chunk, |mut b, (asset_id, position)| {
+                    b.push_bind(*asset_id).push_bind(*position);
+                });
+                qb.push(") AS v WHERE assets.id = v.column1");
+                qb.build()
+                    .execute(&mut *tx)
+                    .await
+                    .context("Failed to write manual positions")?;
+            }
+            Scope::Trash => reject!("The Trash can't be reordered"),
+            // Upsert: `materialize_smart_order` has already given every current
+            // member a row, but an UPDATE that silently affected zero rows would
+            // be the kind of failure that looks like "the drag didn't take".
+            Scope::Smart { id } => {
+                let mut qb = QueryBuilder::<Sqlite>::new(
+                    "INSERT INTO smart_folder_order (smart_folder_id, asset_id, position) ",
+                );
+                qb.push_values(chunk, |mut b, (asset_id, position)| {
+                    b.push_bind(id.as_str())
+                        .push_bind(*asset_id)
+                        .push_bind(*position);
+                });
+                qb.push(
+                    " ON CONFLICT(smart_folder_id, asset_id) DO UPDATE SET position = excluded.position",
+                );
+                qb.build()
+                    .execute(&mut *tx)
+                    .await
+                    .context("Failed to write smart folder positions")?;
+            }
+            // Unreachable in practice — `reorder_assets` bails before opening the
+            // transaction — but stated rather than swallowed by a catch-all, so the
+            // next scope variant gets a compile error here instead of a silent
+            // write to the wrong column.
+            Scope::SmartGroup { .. } => {
+                reject!("A group of smart folders has no manual order");
+            }
         }
     }
     Ok(())
@@ -1606,7 +1639,7 @@ pub async fn rename_saved_filter(pool: &SqlitePool, id: &str, name: &str) -> Res
         .await
         .context("Failed to rename saved filter")?;
     if res.rows_affected() == 0 {
-        anyhow::bail!("Saved filter not found");
+        reject!("Saved filter not found");
     }
     Ok(())
 }
@@ -1630,7 +1663,7 @@ pub async fn update_saved_filter(pool: &SqlitePool, id: &str, filters: &FilterSe
         .await
         .context("Failed to update saved filter")?;
     if res.rows_affected() == 0 {
-        anyhow::bail!("Saved filter not found");
+        reject!("Saved filter not found");
     }
     Ok(())
 }
@@ -1820,7 +1853,7 @@ pub async fn update_smart_folder(
         .await
         .context("Failed to update smart folder")?;
     if res.rows_affected() == 0 {
-        anyhow::bail!("Smart folder not found");
+        reject!("Smart folder not found");
     }
 
     // Editing the rules is the one deliberate act that can change membership
@@ -1952,7 +1985,7 @@ pub(crate) fn clean_name(raw: &str) -> Result<String> {
         .chars()
         .filter(|c| !c.is_control() && !matches!(c, '/' | '\\'))
         .collect();
-    blank_to_null(&cleaned).ok_or_else(|| anyhow::anyhow!("Name cannot be empty"))
+    blank_to_null(&cleaned).ok_or_else(|| crate::error::rejected("Name cannot be empty"))
 }
 
 /// Apply `patch` and return the updated row, so the caller refreshes its cache
@@ -1972,7 +2005,7 @@ pub async fn update_asset(
                 .fetch_optional(pool)
                 .await
                 .context("Failed to read asset extension")?
-                .ok_or_else(|| anyhow::anyhow!("Asset not found"))?;
+                .ok_or_else(|| crate::error::rejected("Asset not found"))?;
             // Extensionless files exist; don't leave them with a trailing dot.
             Some(if extension.is_empty() {
                 stem
@@ -2010,7 +2043,7 @@ pub async fn update_asset(
             .await
             .context("Failed to update asset")?;
         if res.rows_affected() == 0 {
-            anyhow::bail!("Asset not found");
+            reject!("Asset not found");
         }
     }
 
@@ -2023,7 +2056,7 @@ pub async fn update_asset(
     fetch_assets_by_ids(pool, root, &ids)
         .await?
         .pop()
-        .ok_or_else(|| anyhow::anyhow!("Asset not found"))
+        .ok_or_else(|| crate::error::rejected("Asset not found"))
 }
 
 #[instrument(skip(pool))]
@@ -2232,7 +2265,7 @@ pub async fn update_folder(pool: &SqlitePool, id: &str, patch: FolderPatch) -> R
             let cleaned = blank_to_null(&raw);
             if let Some(c) = &cleaned {
                 if !PIN_COLORS.contains(&c.as_str()) {
-                    anyhow::bail!("Unknown folder colour");
+                    reject!("Unknown folder colour");
                 }
             }
             Some(cleaned)
@@ -2268,7 +2301,7 @@ pub async fn update_folder(pool: &SqlitePool, id: &str, patch: FolderPatch) -> R
         .await
         .context("Failed to update folder")?;
     if res.rows_affected() == 0 {
-        anyhow::bail!("Folder not found");
+        reject!("Folder not found");
     }
 
     // The folder's name feeds the `folder_text` of its DIRECT members — reindex
@@ -2451,7 +2484,7 @@ async fn assert_not_descendant(
     let mut cursor = new_parent_id.map(str::to_string);
     while let Some(cur) = cursor {
         if cur == id {
-            anyhow::bail!("Cannot move a folder into itself or a descendant");
+            reject!("Cannot move a folder into itself or a descendant");
         }
         cursor =
             sqlx::query_scalar::<_, Option<String>>("SELECT parent_id FROM folders WHERE id = ?")
@@ -2551,7 +2584,7 @@ pub async fn reorder_folder(
         .await
         .context("Failed to reorder folder")?;
     if res.rows_affected() == 0 {
-        anyhow::bail!("Folder not found");
+        reject!("Folder not found");
     }
 
     tx.commit()
@@ -2644,7 +2677,7 @@ pub async fn set_pinned(pool: &SqlitePool, kind: PinKind, id: &str, pinned: bool
         .context("Failed to read pin state")?;
 
     let Some(position) = current else {
-        anyhow::bail!("Not found");
+        reject!("Not found");
     };
     if position.is_some() == pinned {
         return Ok(()); // idempotent: re-pinning must not shuffle the order
@@ -2676,7 +2709,7 @@ pub async fn set_pin_color(
 ) -> Result<()> {
     if let Some(c) = color {
         if !PIN_COLORS.contains(&c) {
-            anyhow::bail!("Unknown pin colour");
+            reject!("Unknown pin colour");
         }
     }
     let sql = format!("UPDATE {} SET color = ? WHERE id = ?", kind.table());
@@ -2687,7 +2720,7 @@ pub async fn set_pin_color(
         .await
         .context("Failed to set pin colour")?;
     if res.rows_affected() == 0 {
-        anyhow::bail!("Not found");
+        reject!("Not found");
     }
     Ok(())
 }
@@ -2774,7 +2807,7 @@ pub async fn reorder_pin(
         .await
         .context("Failed to reorder pin")?;
     if res.rows_affected() == 0 {
-        anyhow::bail!("That item isn't pinned");
+        reject!("That item isn't pinned");
     }
 
     tx.commit()
@@ -2827,7 +2860,7 @@ pub async fn move_folder(pool: &SqlitePool, id: &str, new_parent_id: Option<&str
         .await
         .context("Failed to move folder")?;
     if res.rows_affected() == 0 {
-        anyhow::bail!("Folder not found");
+        reject!("Folder not found");
     }
     Ok(())
 }
@@ -4578,6 +4611,122 @@ mod smart_order_tests {
         reorder(&pool, "v1", None).await;
         prune_smart_order(&pool, SMART, &rules()).await.unwrap();
         assert_eq!(order(&pool).await, vec!["v1", "v3", "v2"]);
+    }
+}
+
+/// Manual order in a FOLDER and in the global scope.
+///
+/// `smart_order_tests` covers `Scope::Smart`, which is the third of the three
+/// targets `write_manual_positions` dispatches to — the folder membership row
+/// and the asset-level column had none. Both are set-based `UPDATE … FROM
+/// (VALUES …)` statements, and the folder one carries an extra bound predicate
+/// after the values list, which is the easiest thing here to get subtly wrong.
+#[cfg(test)]
+mod manual_order_tests {
+    use super::*;
+
+    async fn db() -> SqlitePool {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        for stmt in [
+            "CREATE TABLE assets (id TEXT PRIMARY KEY, manual_position REAL NOT NULL, \
+             deleted_at TEXT)",
+            "CREATE TABLE assets_folders (folder_id TEXT NOT NULL, asset_id TEXT NOT NULL, \
+             position REAL NOT NULL, PRIMARY KEY (folder_id, asset_id))",
+            "INSERT INTO assets VALUES ('a1', 0.0, NULL), ('a2', 1.0, NULL), ('a3', 2.0, NULL)",
+            // a2 and a3 are in BOTH folders — the overlap is the point.
+            "INSERT INTO assets_folders VALUES ('f1','a1',0.0), ('f1','a2',1.0), ('f1','a3',2.0)",
+            "INSERT INTO assets_folders VALUES ('f2','a2',0.0), ('f2','a3',1.0)",
+        ] {
+            sqlx::query(stmt).execute(&pool).await.unwrap();
+        }
+        pool
+    }
+
+    async fn folder_order(pool: &SqlitePool, folder: &str) -> Vec<String> {
+        sqlx::query_scalar(
+            "SELECT asset_id FROM assets_folders WHERE folder_id = ? ORDER BY position, asset_id",
+        )
+        .bind(folder)
+        .fetch_all(pool)
+        .await
+        .unwrap()
+    }
+
+    async fn global_order(pool: &SqlitePool) -> Vec<String> {
+        sqlx::query_scalar("SELECT id FROM assets ORDER BY manual_position, id")
+            .fetch_all(pool)
+            .await
+            .unwrap()
+    }
+
+    /// The folder predicate after the VALUES list, made executable: a reorder
+    /// inside f1 must not move the same assets where they sit in f2. Drop that
+    /// `AND folder_id = ?` and this test is what notices.
+    #[tokio::test]
+    async fn reordering_a_folder_leaves_other_folders_alone() {
+        let pool = db().await;
+        reorder_assets(&pool, &Scope::Folder { id: "f1".into() }, &["a3".into()], None)
+            .await
+            .unwrap();
+
+        assert_eq!(folder_order(&pool, "f1").await, vec!["a3", "a1", "a2"]);
+        assert_eq!(
+            folder_order(&pool, "f2").await,
+            vec!["a2", "a3"],
+            "a reorder in f1 rewrote f2's positions"
+        );
+    }
+
+    /// A folder reorder writes the MEMBERSHIP row, never the asset-level column
+    /// that All and Uncategorized share.
+    #[tokio::test]
+    async fn reordering_a_folder_leaves_the_global_rank_alone() {
+        let pool = db().await;
+        reorder_assets(&pool, &Scope::Folder { id: "f1".into() }, &["a3".into()], None)
+            .await
+            .unwrap();
+        assert_eq!(global_order(&pool).await, vec!["a1", "a2", "a3"]);
+    }
+
+    #[tokio::test]
+    async fn reordering_all_writes_the_global_rank() {
+        let pool = db().await;
+        reorder_assets(&pool, &Scope::All, &["a3".into()], None)
+            .await
+            .unwrap();
+        assert_eq!(global_order(&pool).await, vec!["a3", "a1", "a2"]);
+    }
+
+    /// The renumber fallback — the branch that rewrites the WHOLE scope.
+    ///
+    /// Reached by exhausting the fractional gap, which normally takes ~50 drops
+    /// at the same spot; here the positions are seeded a nanometre apart so it
+    /// fires on the first try. Worth pinning precisely because it is rare: it is
+    /// the path that used to issue one statement per asset in the library.
+    #[tokio::test]
+    async fn an_exhausted_gap_renumbers_the_whole_scope() {
+        let pool = db().await;
+        sqlx::query("UPDATE assets SET manual_position = 1e-9 WHERE id = 'a2'")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // Drop a3 between a1 (0.0) and a2 (1e-9): far too tight to bisect.
+        reorder_assets(&pool, &Scope::All, &["a3".into()], Some("a1"))
+            .await
+            .unwrap();
+
+        assert_eq!(global_order(&pool).await, vec!["a1", "a3", "a2"]);
+        let positions: Vec<f64> =
+            sqlx::query_scalar("SELECT manual_position FROM assets ORDER BY manual_position")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            positions,
+            vec![0.0, 1.0, 2.0],
+            "renumbering must leave clean whole ranks, not a tighter gap"
+        );
     }
 }
 

@@ -33,6 +33,12 @@ pub fn run() {
         .plugin(tauri_plugin_store::Builder::new().build())
         .manage(db::DbState::new())
         .plugin(tauri_plugin_dialog::init())
+        // Registered even though the capability grants no `fs:*` permission and
+        // nothing calls `fs_scope()` any more — do NOT remove it as unused.
+        // `tauri-plugin-dialog` depends on this crate and extends the fs scope
+        // after a file pick, which resolves managed state that only this `init()`
+        // installs. Dropping it makes the import folder-picker panic at the
+        // moment it opens, which no compiler and no test would catch.
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_drag::init())
@@ -43,6 +49,7 @@ pub fn run() {
             commands::start_asset_drag,
             commands::clear_drag_staging,
             commands::rebuild_search_index,
+            commands::search_index_degraded,
             commands::connect_library,
             commands::stream_manifest,
             commands::fetch_folders,
