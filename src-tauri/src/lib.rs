@@ -26,6 +26,9 @@ pub fn run() {
 
     tracing::info!("Starting Nova");
 
+    // Undo is bounded to this session — see `actions::SESSION_START`.
+    actions::begin_session();
+
     tauri::Builder::default()
         .plugin(tauri_plugin_store::Builder::new().build())
         .manage(db::DbState::new())

@@ -416,6 +416,18 @@ impl RenameRow {
         full.get(..10).unwrap_or(full)
     }
 
+    /// The SQL column matching `sort_key`, so a chunk can be ordered in the
+    /// database. The two MUST agree — see `rename_rows`.
+    fn order_column(order: RenameOrder) -> &'static str {
+        match order {
+            RenameOrder::Filename => "filename COLLATE NOCASE",
+            RenameOrder::ImportedDate => "imported_date",
+            RenameOrder::CreationDate => "creation_date",
+            RenameOrder::ModifiedDate => "modified_date",
+            RenameOrder::FileSize => "file_size",
+        }
+    }
+
     /// The sort key, as a string so one comparison serves every order. Numbers
     /// are zero-padded so they compare by magnitude rather than lexically.
     fn sort_key(&self, order: RenameOrder) -> String {
@@ -453,18 +465,25 @@ fn render(
 
 /// The selection's rows, in the order `{index}` counts.
 ///
-/// Sorted in Rust rather than SQL because the ids are fetched in chunks — a
-/// per-chunk `ORDER BY` would number each chunk from the start of its own range,
-/// which is exactly the kind of bug that only appears past 8,000 assets.
+/// The final sort happens in Rust because the ids are fetched in chunks, and a
+/// per-chunk `ORDER BY` alone would number each chunk from the start of its own
+/// range — a bug that only appears past 8,000 assets.
+///
+/// `limit` is for the PREVIEW, which only ever shows a handful of rows. Each
+/// chunk is ordered and limited in SQL first, then the same Rust sort merges
+/// them: the global first *n* is necessarily among the per-chunk first *n*s, so
+/// this is exact, and it turns "read 10,000 rows on every keystroke" into
+/// "read 3 per chunk". The run passes `None` and is unchanged.
 async fn rename_rows(
     conn: &mut sqlx::SqliteConnection,
     asset_ids: &[String],
     order: RenameOrder,
     ascending: bool,
+    limit: Option<usize>,
 ) -> Result<Vec<RenameRow>> {
     const COLS: &str = "SELECT id, filename, extension, width, height, file_size, \
                         imported_date, creation_date, modified_date FROM assets WHERE id IN (";
-    let mut out: Vec<RenameRow> = Vec::with_capacity(asset_ids.len());
+    let mut out: Vec<RenameRow> = Vec::with_capacity(limit.unwrap_or(asset_ids.len()));
     for chunk in asset_ids.chunks(IDS_PER_QUERY) {
         let mut qb = QueryBuilder::<Sqlite>::new(COLS);
         let mut sep = qb.separated(", ");
@@ -472,6 +491,15 @@ async fn rename_rows(
             sep.push_bind(id);
         }
         qb.push(")");
+        if let Some(n) = limit {
+            // Must match `sort_key`, or the rows kept here wouldn't be the ones
+            // the merge below would have chosen.
+            qb.push(" ORDER BY ")
+                .push(RenameRow::order_column(order))
+                .push(if ascending { " ASC" } else { " DESC" })
+                .push(", id ASC LIMIT ")
+                .push_bind(n as i64);
+        }
         out.extend(
             qb.build_query_as::<RenameRow>()
                 .fetch_all(&mut *conn)
@@ -487,6 +515,9 @@ async fn rename_rows(
         let ord = if ascending { ord } else { ord.reverse() };
         ord.then_with(|| a.id.cmp(&b.id))
     });
+    if let Some(n) = limit {
+        out.truncate(n);
+    }
     Ok(out)
 }
 
@@ -727,7 +758,7 @@ impl Op {
             } => {
                 let tokens = parse_pattern(pattern)?;
                 let rows =
-                    rename_rows(&mut *conn, asset_ids, *index_order, *index_ascending).await?;
+                    rename_rows(&mut *conn, asset_ids, *index_order, *index_ascending, None).await?;
                 let renamed =
                     render_all(&tokens, &rows, *index_start, *index_pad, *date_field)?;
 
@@ -1699,7 +1730,7 @@ pub async fn preview_run(
             if ids.is_empty() {
                 continue;
             }
-            let rows = rename_rows(&mut conn, &ids, *index_order, *index_ascending).await?;
+            let rows = rename_rows(&mut conn, &ids, *index_order, *index_ascending, None).await?;
             match render_all(&tokens, &rows, *index_start, *index_pad, *date_field) {
                 Ok(renamed) => {
                     let unique: HashSet<&String> = renamed.iter().map(|(_, n)| n).collect();
@@ -1788,7 +1819,7 @@ pub async fn preview_rename(
     let rows = if ids.is_empty() {
         sample_rows(&mut conn, limit).await?
     } else {
-        rename_rows(&mut conn, &ids, *index_order, *index_ascending).await?
+        rename_rows(&mut conn, &ids, *index_order, *index_ascending, Some(limit)).await?
     };
 
     match render_all(&tokens, &rows, *index_start, *index_pad, *date_field) {
@@ -1909,6 +1940,9 @@ pub async fn run_steps(
     if ids.is_empty() {
         bail!("Select some assets first");
     }
+    // Belt to `begin_session`'s braces: a run must never be written before the
+    // session it belongs to has started, or it would be invisible to undo.
+    begin_session();
 
     let mut tx = pool
         .begin()
@@ -1999,11 +2033,36 @@ pub struct UndoSummary {
     pub skipped: usize,
 }
 
-/// The most recent run that can still be undone, if any. Backs Ctrl+Z.
+/// When this app session began.
+///
+/// `action_runs` is a table, so it outlives the process — without this bound,
+/// launching Nova and pressing Ctrl+Z would silently reverse whatever you did
+/// last week, with nothing on screen to say what changed. Undo is for the thing
+/// you just did and can still picture; past that it's a trap, and the history is
+/// still browsable as history.
+///
+/// Initialised on first touch, which is either the first run or the first undo.
+/// If an undo comes first, nothing qualifies — correct, because nothing has
+/// happened this session yet.
+static SESSION_START: std::sync::LazyLock<String> =
+    std::sync::LazyLock::new(crate::assets::now_stamp);
+
+/// Pin the session start at app launch.
+///
+/// Called from `lib.rs` so "this session" means the process, not "whenever
+/// something first asked". Without it the first touch could land AFTER a run had
+/// already been written, which would put that run outside its own session.
+pub fn begin_session() {
+    std::sync::LazyLock::force(&SESSION_START);
+}
+
+/// The most recent run of THIS SESSION that can still be undone. Backs Ctrl+Z.
 pub async fn latest_undoable_run(pool: &SqlitePool) -> Result<Option<String>> {
     sqlx::query_scalar(
-        "SELECT id FROM action_runs WHERE is_undoable = 1 ORDER BY ran_at DESC, id DESC LIMIT 1",
+        "SELECT id FROM action_runs WHERE is_undoable = 1 AND ran_at >= ? \
+         ORDER BY ran_at DESC, id DESC LIMIT 1",
     )
+    .bind(&*SESSION_START)
     .fetch_optional(pool)
     .await
     .context("Failed to read the run history")
@@ -2080,8 +2139,12 @@ pub async fn undo_run(pool: &SqlitePool, run_id: &str) -> Result<UndoSummary> {
     })
 }
 
-/// The most recent run, if there is one to offer an undo for. Read on library
-/// connect so the toast survives a reload.
+/// Runs from THIS SESSION, newest first.
+///
+/// Session-bounded for the same reason Ctrl+Z is: the ⚡ menu shows these as an
+/// *offer* to undo, and offering to reverse something from a previous session is
+/// the same trap in a different control. A reload inside one session still keeps
+/// its offers, which is what this is for.
 #[derive(Serialize, Debug, FromRow)]
 pub struct ActionRun {
     pub id: String,
@@ -2095,8 +2158,9 @@ pub struct ActionRun {
 pub async fn fetch_recent_runs(pool: &SqlitePool) -> Result<Vec<ActionRun>> {
     sqlx::query_as::<_, ActionRun>(
         "SELECT id, name, ran_at, asset_count, is_undoable FROM action_runs
-         ORDER BY ran_at DESC, id DESC",
+         WHERE ran_at >= ? ORDER BY ran_at DESC, id DESC",
     )
+    .bind(&*SESSION_START)
     .fetch_all(pool)
     .await
     .context("Failed to fetch the run history")
@@ -2862,6 +2926,26 @@ mod exec_tests {
         assert!(summary.run_id.is_some());
     }
 
+    /// A run from a previous session is history, not an undo offer.
+    ///
+    /// `action_runs` outlives the process, so without the session bound,
+    /// launching Nova and pressing Ctrl+Z would reverse last week's work with
+    /// nothing on screen to say what changed.
+    #[tokio::test]
+    async fn a_run_from_before_this_session_is_not_offered() {
+        let pool = db().await;
+        sqlx::query(
+            "INSERT INTO action_runs (id, action_id, name, ran_at, asset_count, is_undoable)
+             VALUES ('old', NULL, 'Last week', '2020-01-01T00:00:00.000Z', 5, 1)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        assert!(latest_undoable_run(&pool).await.unwrap().is_none());
+        assert!(fetch_recent_runs(&pool).await.unwrap().is_empty());
+    }
+
     /// Ctrl+Z reaches the newest undoable run whatever produced it, so a drag
     /// and a quick action share one history.
     #[tokio::test]
@@ -3446,6 +3530,30 @@ mod exec_tests {
                 .unwrap();
         for name in &predicted {
             assert!(actual.contains(name), "{name} was predicted but not produced");
+        }
+    }
+
+    /// The preview reads a handful of rows instead of the whole selection, and
+    /// must still pick the SAME first few the run would number 1, 2, 3.
+    #[tokio::test]
+    async fn a_limited_read_matches_the_full_one() {
+        let pool = db().await;
+        let mut conn = pool.acquire().await.unwrap();
+        let all = ids(&["a1", "a2", "a3"]);
+
+        for (order, asc) in [
+            (RenameOrder::Filename, true),
+            (RenameOrder::Filename, false),
+            (RenameOrder::FileSize, true),
+        ] {
+            let full = rename_rows(&mut conn, &all, order, asc, None).await.unwrap();
+            let limited = rename_rows(&mut conn, &all, order, asc, Some(2)).await.unwrap();
+            assert_eq!(limited.len(), 2);
+            assert_eq!(
+                limited.iter().map(|r| &r.id).collect::<Vec<_>>(),
+                full.iter().take(2).map(|r| &r.id).collect::<Vec<_>>(),
+                "{order:?} ascending={asc}"
+            );
         }
     }
 
