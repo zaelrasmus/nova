@@ -1423,7 +1423,10 @@ pub struct RunPreview {
 
 #[derive(Serialize, Debug)]
 pub struct RunSummary {
-    pub run_id: String,
+    /// `None` when the run left no history entry — a small direct manipulation
+    /// that isn't worth one. Distinct from `is_undoable: false`, which means a
+    /// run WAS recorded but its inverse was too large to keep.
+    pub run_id: Option<String>,
     pub name: String,
     pub asset_count: usize,
     pub is_undoable: bool,
@@ -1684,7 +1687,47 @@ async fn sample_rows(conn: &mut sqlx::SqliteConnection, limit: usize) -> Result<
     .context("Failed to read sample assets")
 }
 
-/// Apply every step of an action to a snapshotted selection, atomically.
+/// Below this, a direct manipulation isn't worth a history entry.
+///
+/// Undo exists for the change you CAN'T see. Moving one asset into a folder is
+/// visible and reversible by dragging it back; moving four hundred is neither.
+/// Recording every single-asset edit would also flood the history so the one
+/// bulk mistake you actually want back is no longer the most recent run.
+///
+/// Quick actions are exempt — a macro is opaque at any size.
+const UNDO_MIN_ASSETS: usize = 2;
+
+/// Where a run came from. Decides whether it earns a place in the history.
+#[derive(Debug)]
+pub enum RunSource<'a> {
+    /// A saved quick action. Always recorded.
+    Action { id: &'a str, name: &'a str },
+    /// Direct manipulation — a drag, a tag toggle. Recorded only above
+    /// `UNDO_MIN_ASSETS`.
+    Direct { name: &'a str },
+}
+
+impl RunSource<'_> {
+    fn name(&self) -> &str {
+        match self {
+            RunSource::Action { name, .. } | RunSource::Direct { name } => name,
+        }
+    }
+    fn action_id(&self) -> Option<&str> {
+        match self {
+            RunSource::Action { id, .. } => Some(id),
+            RunSource::Direct { .. } => None,
+        }
+    }
+    fn records_history(&self, asset_count: usize) -> bool {
+        match self {
+            RunSource::Action { .. } => true,
+            RunSource::Direct { .. } => asset_count >= UNDO_MIN_ASSETS,
+        }
+    }
+}
+
+/// Apply an action to a snapshotted selection, atomically.
 ///
 /// `asset_ids` is the selection as it was when the user triggered this, sent
 /// once and never re-derived: the manifest streams and the watcher fires while a
@@ -1696,14 +1739,38 @@ pub async fn run_action(
     action_id: &str,
     asset_ids: &[String],
 ) -> Result<RunSummary> {
-    let ids = unique(asset_ids);
-    if ids.is_empty() {
-        bail!("Select some assets first");
-    }
-
     let action = fetch_one(pool, action_id).await?;
     if let Some(problem) = broken_refs(pool, &action.steps).await?.into_iter().next() {
         bail!("{problem}. Edit the action and try again.");
+    }
+    run_steps(
+        pool,
+        RunSource::Action {
+            id: &action.id,
+            name: &action.name,
+        },
+        &action.steps,
+        asset_ids,
+    )
+    .await
+}
+
+/// Apply a pipeline that isn't a saved action.
+///
+/// The same machinery, reached from a different door. Direct manipulation —
+/// dragging a selection into a folder, toggling a tag across it — is expressible
+/// as steps, so routing it through here is what gives bulk edits an inverse
+/// without writing undo twice.
+#[instrument(skip(pool, source, steps, asset_ids), fields(steps = steps.len(), count = asset_ids.len()))]
+pub async fn run_steps(
+    pool: &SqlitePool,
+    source: RunSource<'_>,
+    steps: &[Step],
+    asset_ids: &[String],
+) -> Result<RunSummary> {
+    let ids = unique(asset_ids);
+    if ids.is_empty() {
+        bail!("Select some assets first");
     }
 
     let mut tx = pool
@@ -1713,29 +1780,33 @@ pub async fn run_action(
 
     // Every step in ONE transaction: a failure at step 3 of 4 must leave the
     // library exactly as it was, not two-thirds changed.
-    let mut payloads: Vec<String> = Vec::with_capacity(action.steps.len());
-    for step in &action.steps {
+    let mut payloads: Vec<String> = Vec::with_capacity(steps.len());
+    for step in steps {
         let inverse = step.apply(&mut tx, &ids).await?;
         payloads.push(serde_json::to_string(&inverse).context("Failed to encode the undo record")?);
     }
 
     let total: usize = payloads.iter().map(String::len).sum();
     let is_undoable = total <= UNDO_BUDGET_BYTES;
+    let keep = source.records_history(ids.len());
 
     let run_id = uuid::Uuid::new_v4().to_string();
-    sqlx::query(
-        "INSERT INTO action_runs (id, action_id, name, ran_at, asset_count, is_undoable)
-         VALUES (?, ?, ?, ?, ?, ?)",
-    )
-    .bind(&run_id)
-    .bind(&action.id)
-    .bind(&action.name)
-    .bind(crate::assets::now_stamp())
-    .bind(ids.len() as i64)
-    .bind(is_undoable)
-    .execute(&mut *tx)
-    .await
-    .context("Failed to record the run")?;
+    if keep {
+        sqlx::query(
+            "INSERT INTO action_runs (id, action_id, name, ran_at, asset_count, is_undoable)
+             VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&run_id)
+        .bind(source.action_id())
+        .bind(source.name())
+        .bind(crate::assets::now_stamp())
+        .bind(ids.len() as i64)
+        .bind(is_undoable)
+        .execute(&mut *tx)
+        .await
+        .context("Failed to record the run")?;
+    }
+    let is_undoable = is_undoable && keep;
 
     if is_undoable {
         for (seq, payload) in payloads.iter().enumerate() {
@@ -1747,7 +1818,7 @@ pub async fn run_action(
                 .await
                 .context("Failed to record the undo step")?;
         }
-    } else {
+    } else if keep {
         warn!(bytes = total, "Run exceeded the undo budget; recorded as not undoable");
     }
 
@@ -1774,8 +1845,8 @@ pub async fn run_action(
     }
 
     Ok(RunSummary {
-        run_id,
-        name: action.name,
+        run_id: keep.then_some(run_id),
+        name: source.name().to_string(),
         asset_count: ids.len(),
         is_undoable,
     })
@@ -1789,6 +1860,16 @@ pub struct UndoSummary {
     pub name: String,
     pub restored: usize,
     pub skipped: usize,
+}
+
+/// The most recent run that can still be undone, if any. Backs Ctrl+Z.
+pub async fn latest_undoable_run(pool: &SqlitePool) -> Result<Option<String>> {
+    sqlx::query_scalar(
+        "SELECT id FROM action_runs WHERE is_undoable = 1 ORDER BY ran_at DESC, id DESC LIMIT 1",
+    )
+    .fetch_optional(pool)
+    .await
+    .context("Failed to read the run history")
 }
 
 #[instrument(skip(pool))]
@@ -2216,7 +2297,7 @@ mod exec_tests {
         assert!(summary.is_undoable);
         assert_eq!(tagged_with(&pool, "t1").await, ids(&["a1", "a2", "a3"]));
 
-        undo_run(&pool, &summary.run_id).await.unwrap();
+        undo_run(&pool, summary.run_id.as_deref().unwrap()).await.unwrap();
         // a1 keeps the tag it had BEFORE the run. An inverse that stripped the
         // tag from everyone would leave this empty, and would be wrong.
         assert_eq!(tagged_with(&pool, "t1").await, ids(&["a1"]));
@@ -2275,7 +2356,7 @@ mod exec_tests {
         assert_eq!(tagged_with(&pool, "t2").await, ids(&["a1", "a2"]));
         assert!(tagged_with(&pool, "t1").await.is_empty());
 
-        undo_run(&pool, &summary.run_id).await.unwrap();
+        undo_run(&pool, summary.run_id.as_deref().unwrap()).await.unwrap();
         assert!(tagged_with(&pool, "t2").await.is_empty());
         assert_eq!(tagged_with(&pool, "t1").await, ids(&["a1"]));
     }
@@ -2294,8 +2375,8 @@ mod exec_tests {
         .await;
         let summary = run_action(&pool, &a.id, &ids(&["a1"])).await.unwrap();
 
-        undo_run(&pool, &summary.run_id).await.unwrap();
-        assert!(undo_run(&pool, &summary.run_id).await.is_err());
+        undo_run(&pool, summary.run_id.as_deref().unwrap()).await.unwrap();
+        assert!(undo_run(&pool, summary.run_id.as_deref().unwrap()).await.is_err());
     }
 
     /// Deleting an action must not destroy the ability to undo a run of it. The
@@ -2313,7 +2394,7 @@ mod exec_tests {
         let summary = run_action(&pool, &a.id, &ids(&["a1", "a2"])).await.unwrap();
 
         delete_quick_action(&pool, &a.id).await.unwrap();
-        undo_run(&pool, &summary.run_id).await.unwrap();
+        undo_run(&pool, summary.run_id.as_deref().unwrap()).await.unwrap();
         assert!(tagged_with(&pool, "t2").await.is_empty());
     }
 
@@ -2387,7 +2468,7 @@ mod exec_tests {
         let summary = run_action(&pool, &a.id, &ids(&["a1"])).await.unwrap();
         assert!(members_of(&pool, "f1").await.is_empty());
 
-        undo_run(&pool, &summary.run_id).await.unwrap();
+        undo_run(&pool, summary.run_id.as_deref().unwrap()).await.unwrap();
         let restored: (f64, Option<String>) = sqlx::query_as(
             "SELECT position, added_at FROM assets_folders WHERE folder_id = 'f1' AND asset_id = 'a1'",
         )
@@ -2414,7 +2495,7 @@ mod exec_tests {
         let summary = run_action(&pool, &a.id, &ids(&["a1", "a2"])).await.unwrap();
         assert_eq!(members_of(&pool, "f1").await.len(), 2);
 
-        undo_run(&pool, &summary.run_id).await.unwrap();
+        undo_run(&pool, summary.run_id.as_deref().unwrap()).await.unwrap();
         let after = members_of(&pool, "f1").await;
         assert_eq!(after.len(), 1);
         assert_eq!(after[0].0, "a1");
@@ -2435,7 +2516,7 @@ mod exec_tests {
         let summary = run_action(&pool, &a.id, &ids(&["a1"])).await.unwrap();
         assert_eq!(folders_of(&pool, "a1").await, ids(&["f2"]));
 
-        undo_run(&pool, &summary.run_id).await.unwrap();
+        undo_run(&pool, summary.run_id.as_deref().unwrap()).await.unwrap();
         // f2 is gone AND f1 is back: an inverse that only restored f1 would
         // leave the asset in both.
         assert_eq!(folders_of(&pool, "a1").await, ids(&["f1"]));
@@ -2457,7 +2538,7 @@ mod exec_tests {
         let summary = run_action(&pool, &a.id, &ids(&["a1"])).await.unwrap();
         assert!(folders_of(&pool, "a1").await.is_empty());
 
-        undo_run(&pool, &summary.run_id).await.unwrap();
+        undo_run(&pool, summary.run_id.as_deref().unwrap()).await.unwrap();
         assert_eq!(folders_of(&pool, "a1").await, ids(&["f1"]));
     }
 
@@ -2499,7 +2580,7 @@ mod exec_tests {
         let summary = run_action(&pool, &a.id, &ids(&["a1", "a2"])).await.unwrap();
         assert_eq!(note_of(&pool, "a1").await.as_deref(), Some("shot 2026"));
 
-        undo_run(&pool, &summary.run_id).await.unwrap();
+        undo_run(&pool, summary.run_id.as_deref().unwrap()).await.unwrap();
         // Two assets, two different prior values — including a NULL, which must
         // come back as NULL rather than as an empty string.
         assert_eq!(note_of(&pool, "a1").await.as_deref(), Some("keep me"));
@@ -2569,9 +2650,116 @@ mod exec_tests {
         assert!(tagged_with(&pool, "t1").await.is_empty());
         assert!(tagged_with(&pool, "t2").await.is_empty());
 
-        undo_run(&pool, &summary.run_id).await.unwrap();
+        undo_run(&pool, summary.run_id.as_deref().unwrap()).await.unwrap();
         assert_eq!(tagged_with(&pool, "t1").await, ids(&["a1"]));
         assert_eq!(tagged_with(&pool, "t2").await, ids(&["a1", "a2"]));
+    }
+
+    // ── Direct manipulation ──────────────────────────────────────────────────
+
+    /// Dragging a selection into a folder is a pipeline too, and gets the same
+    /// inverse — which is the whole point of routing it through here rather than
+    /// writing undo a second time for direct manipulation.
+    #[tokio::test]
+    async fn a_direct_run_is_undoable_like_an_action() {
+        let pool = db().await;
+        let steps = vec![plain(Op::AddToFolder {
+            folder_id: "f2".into(),
+        })];
+
+        let summary = run_steps(
+            &pool,
+            RunSource::Direct { name: "Add to folder" },
+            &steps,
+            &ids(&["a1", "a2"]),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(members_of(&pool, "f2").await.len(), 2);
+        undo_run(&pool, summary.run_id.as_deref().unwrap()).await.unwrap();
+        assert!(members_of(&pool, "f2").await.is_empty());
+    }
+
+    /// One asset is visible and reversible by hand, so it leaves no history —
+    /// otherwise a single tag click would bury the bulk mistake you actually
+    /// want back.
+    #[tokio::test]
+    async fn a_single_asset_direct_run_leaves_no_history() {
+        let pool = db().await;
+        let steps = vec![plain(Op::AddToFolder {
+            folder_id: "f2".into(),
+        })];
+
+        let summary = run_steps(
+            &pool,
+            RunSource::Direct { name: "Add to folder" },
+            &steps,
+            &ids(&["a1"]),
+        )
+        .await
+        .unwrap();
+
+        // The work still happened; only the bookkeeping was skipped.
+        assert_eq!(members_of(&pool, "f2").await.len(), 1);
+        assert!(summary.run_id.is_none());
+        assert!(!summary.is_undoable);
+        assert!(fetch_recent_runs(&pool).await.unwrap().is_empty());
+    }
+
+    /// A macro is opaque at any size, so it records even for one asset.
+    #[tokio::test]
+    async fn a_one_asset_action_still_records() {
+        let pool = db().await;
+        let a = action(
+            &pool,
+            vec![Op::AddTags {
+                tag_ids: ids(&["t2"]),
+            }],
+        )
+        .await;
+        let summary = run_action(&pool, &a.id, &ids(&["a1"])).await.unwrap();
+        assert!(summary.run_id.is_some());
+    }
+
+    /// Ctrl+Z reaches the newest undoable run whatever produced it, so a drag
+    /// and a quick action share one history.
+    #[tokio::test]
+    async fn undo_latest_spans_both_kinds_of_run() {
+        let pool = db().await;
+        assert!(latest_undoable_run(&pool).await.unwrap().is_none());
+
+        let a = action(
+            &pool,
+            vec![Op::AddTags {
+                tag_ids: ids(&["t2"]),
+            }],
+        )
+        .await;
+        run_action(&pool, &a.id, &ids(&["a1", "a2"])).await.unwrap();
+        run_steps(
+            &pool,
+            RunSource::Direct { name: "Add to folder" },
+            &[plain(Op::AddToFolder {
+                folder_id: "f2".into(),
+            })],
+            &ids(&["a1", "a2"]),
+        )
+        .await
+        .unwrap();
+
+        // Newest first: the drag, then the action.
+        undo_run(&pool, &latest_undoable_run(&pool).await.unwrap().unwrap())
+            .await
+            .unwrap();
+        assert!(members_of(&pool, "f2").await.is_empty());
+        assert_eq!(tagged_with(&pool, "t2").await, ids(&["a1", "a2"]));
+
+        undo_run(&pool, &latest_undoable_run(&pool).await.unwrap().unwrap())
+            .await
+            .unwrap();
+        assert!(tagged_with(&pool, "t2").await.is_empty());
+        assert!(latest_undoable_run(&pool).await.unwrap().is_none());
     }
 
     // ── Conditions ───────────────────────────────────────────────────────────
@@ -2640,7 +2828,7 @@ mod exec_tests {
         let summary = run_action(&pool, &a.id, &ids(&["a1", "a2", "a3"])).await.unwrap();
         assert_eq!(tagged_with(&pool, "t2").await, ids(&["a2", "a3"]));
 
-        undo_run(&pool, &summary.run_id).await.unwrap();
+        undo_run(&pool, summary.run_id.as_deref().unwrap()).await.unwrap();
         // a3 keeps the tag it had before: it never matched, so the inverse never
         // named it.
         assert_eq!(tagged_with(&pool, "t2").await, ids(&["a3"]));
@@ -2842,7 +3030,7 @@ mod exec_tests {
         let summary = run_action(&pool, &a.id, &ids(&["a1", "a2", "a3"])).await.unwrap();
         assert_ne!(names(&pool).await, before);
 
-        undo_run(&pool, &summary.run_id).await.unwrap();
+        undo_run(&pool, summary.run_id.as_deref().unwrap()).await.unwrap();
         assert_eq!(names(&pool).await, before);
     }
 

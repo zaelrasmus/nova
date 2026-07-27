@@ -142,7 +142,12 @@ export interface RunPreview {
 }
 
 export interface RunSummary {
-  run_id: string;
+  /**
+   * `null` when the run left no history entry — a small direct manipulation
+   * that isn't worth one. Distinct from `is_undoable: false`, which means a run
+   * WAS recorded but its inverse was too large to keep.
+   */
+  run_id: string | null;
   name: string;
   asset_count: number;
   is_undoable: boolean;

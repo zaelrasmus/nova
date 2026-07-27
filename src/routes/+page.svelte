@@ -10,7 +10,7 @@
     import { PanelLeft, PanelRight, Settings, Download } from "@lucide/svelte";
 
     import { assetLibrary, type ManifestScope } from "$lib/assets.svelte";
-    import { runAction } from "../components/actions/run";
+    import { runAction, undoLatest } from "../components/actions/run";
     import { dropzone } from "$lib/dropzone.svelte";
     import type { DropTarget } from "$lib/droptarget";
     import { drag, DRAG_SCROLL_ATTR } from "$lib/dragdrop.svelte";
@@ -338,7 +338,14 @@
             return;
         }
 
-        if (e.key === "b") {
+        if (e.key === "z" && !e.shiftKey) {
+            // Undo the newest recorded run, whether it came from a quick action
+            // or from a bulk drag. Deliberately NOT a general app undo stack —
+            // it reverses the changes you can't see, which is the only kind
+            // Nova makes invisibly.
+            e.preventDefault();
+            void undoLatest();
+        } else if (e.key === "b") {
             e.preventDefault();
             layout.toggleSidebar();
         } else if (e.key === "i") {

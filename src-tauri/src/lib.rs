@@ -109,6 +109,8 @@ pub fn run() {
             commands::undo_action_run,
             commands::fetch_action_runs,
             commands::preview_rename,
+            commands::run_steps,
+            commands::undo_latest_run,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -1405,13 +1405,13 @@ class AssetLibrary {
 
   /** Assign a tag to assets. Reloads the tag list so usage counts stay honest. */
   async assignTag(tagId: string, assetIds: string[]): Promise<void> {
-    await invoke("assign_tag", { tagId, assetIds });
+    await this.runSteps("Add tag", [{ op: { type: "add_tags", tag_ids: [tagId] } }], assetIds);
     await this.loadTags();
     await this.#reloadIfTagFiltered();
   }
 
   async unassignTag(tagId: string, assetIds: string[]): Promise<void> {
-    await invoke("unassign_tag", { tagId, assetIds });
+    await this.runSteps("Remove tag", [{ op: { type: "remove_tags", tag_ids: [tagId] } }], assetIds);
     await this.loadTags();
     await this.#reloadIfTagFiltered();
   }
@@ -1712,6 +1712,40 @@ class AssetLibrary {
   }
 
   /**
+   * Run an ad-hoc pipeline — direct manipulation, or a one-off rename.
+   *
+   * The bulk mutations below all funnel through here rather than calling their
+   * own commands, so they get the same single transaction and the same recorded
+   * inverse a quick action does. Runs under `UNDO_MIN_ASSETS` assets come back
+   * with a null `run_id`: the work happened, the history entry didn't.
+   *
+   * Deliberately does NOT reload — every caller already knows which views its
+   * own change can affect, and re-streaming twice would be worse than not at all.
+   */
+  async runSteps(name: string, steps: Step[], assetIds: string[]): Promise<RunSummary> {
+    // An empty set is a no-op, not an error. The commands this replaced all
+    // returned early on one — a drop that lands with nothing selected must not
+    // raise "select some assets first" at the user who selected nothing on
+    // purpose. The Rust side still rejects it, for callers that mean it.
+    if (assetIds.length === 0) {
+      return { run_id: null, name, asset_count: 0, is_undoable: false };
+    }
+    const summary = await invoke<RunSummary>("run_steps", { name, steps, assetIds });
+    // Only when something was actually recorded — a single-asset tag toggle is
+    // the hot path here and must not cost an extra round trip for a history
+    // entry that was never written.
+    if (summary.run_id) await this.loadActionRuns();
+    return summary;
+  }
+
+  /** Undo the newest undoable run, whatever produced it. Backs Ctrl+Z. */
+  async undoLatest(): Promise<UndoSummary | null> {
+    const summary = await invoke<UndoSummary | null>("undo_latest_run");
+    if (summary) await this.#afterActionWrite();
+    return summary;
+  }
+
+  /**
    * Refresh what a run can have changed.
    *
    * A step can now move assets between folders, so the manifest is re-streamed
@@ -1729,7 +1763,11 @@ class AssetLibrary {
 
   /** Add assets to a folder; reload the manifest if the change affects the view. */
   async addAssetsToFolder(folderId: string, assetIds: string[]): Promise<void> {
-    await invoke("add_assets_to_folder", { folderId, assetIds });
+    await this.runSteps(
+      "Add to folder",
+      [{ op: { type: "add_to_folder", folder_id: folderId } }],
+      assetIds,
+    );
     const active = this.scope;
     if (active.kind === "uncategorized" || (active.kind === "folder" && active.id === folderId)) {
       await this.reload();
@@ -1751,7 +1789,21 @@ class AssetLibrary {
     targetFolderId: string,
     assetIds: string[],
   ): Promise<void> {
-    await invoke("move_assets_to_folder", { sourceFolderId, targetFolderId, assetIds });
+    // A move onto its own origin is a drag the user aborted, not an instruction.
+    // The guard used to live in Rust's fused `move_assets_to_folder`; expressed
+    // as steps it MUST live here, because add-then-remove on the same folder
+    // would net out as a removal.
+    if (sourceFolderId === targetFolderId) return;
+    await this.runSteps(
+      "Move to folder",
+      [
+        { op: { type: "add_to_folder", folder_id: targetFolderId } },
+        ...(sourceFolderId
+          ? ([{ op: { type: "remove_from_folder", folder_id: sourceFolderId } }] as Step[])
+          : []),
+      ],
+      assetIds,
+    );
     const active = this.scope;
     if (
       active.kind === "uncategorized" ||
@@ -1762,7 +1814,11 @@ class AssetLibrary {
   }
 
   async removeAssetsFromFolder(folderId: string, assetIds: string[]): Promise<void> {
-    await invoke("remove_assets_from_folder", { folderId, assetIds });
+    await this.runSteps(
+      "Remove from folder",
+      [{ op: { type: "remove_from_folder", folder_id: folderId } }],
+      assetIds,
+    );
     const active = this.scope;
     // "uncategorized" too: dropping an asset's last membership is exactly what
     // makes it appear there.

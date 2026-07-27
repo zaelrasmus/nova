@@ -17,6 +17,8 @@
     import { invoke } from "@tauri-apps/api/core";
     import { startDrag } from "@crabnebula/tauri-plugin-drag";
     import { toast } from "svelte-sonner";
+    import AssetContextMenu from "./AssetContextMenu.svelte";
+    import RenameDialog from "./actions/RenameDialog.svelte";
 
 
     // Manifest = layout source of truth (id, width, height, asset_type).
@@ -74,6 +76,16 @@
 
     // Height too, for justified row virtualization (waterfall gets it from
     // TanStack; the justified path measures the window itself).
+    /**
+     * Right-click menu state, carrying the selection AS IT WAS when the menu
+     * opened. Right-clicking an unselected card selects it first (that's
+     * `pointerDownAsset`, which fires for any button), and right-clicking inside
+     * a multi-selection leaves it intact — so by the time this is set, the
+     * selection is already what the user means.
+     */
+    let assetMenu = $state<{ x: number; y: number; ids: string[] } | null>(null);
+    let renaming = $state<string[] | null>(null);
+
     let containerHeight = $state(0);
     let scrollTop = $state(0);
 
@@ -554,6 +566,17 @@
                 onpointerdown={(e) => {
                     if (!(e.target as HTMLElement).closest('[role="option"]')) selection.clear();
                 }}
+                oncontextmenu={(e) => {
+                    // Right-clicking empty space is a deselect, not a menu — the
+                    // menu acts on a selection and there isn't one.
+                    const card = (e.target as HTMLElement).closest('[role="option"]');
+                    if (!card) return;
+                    e.preventDefault();
+                    // The selection is snapshotted HERE, at open time. A menu
+                    // action can take seconds to confirm, and by then the grid
+                    // may have re-streamed under it.
+                    assetMenu = { x: e.clientX, y: e.clientY, ids: selection.assetIds };
+                }}
                 class="relative flex-1 min-h-0 overflow-y-auto w-full
                        [scrollbar-width:thin] [scrollbar-color:theme(colors.neutral.700)_transparent]"
             >
@@ -688,3 +711,17 @@
         </div>
     {/if}
     </div>
+
+{#if assetMenu}
+    <AssetContextMenu
+        count={assetMenu.ids.length}
+        x={assetMenu.x}
+        y={assetMenu.y}
+        onclose={() => (assetMenu = null)}
+        onRename={() => (renaming = assetMenu!.ids)}
+    />
+{/if}
+
+{#if renaming}
+    <RenameDialog assetIds={renaming} onclose={() => (renaming = null)} />
+{/if}

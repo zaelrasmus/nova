@@ -1,7 +1,13 @@
 import { toast } from "svelte-sonner";
 import { assetLibrary } from "$lib/assets.svelte";
 import { selection } from "$lib/selection.svelte";
-import { CONFIRM_THRESHOLD, describeStep, type NameLookup, type QuickAction } from "$lib/actions";
+import {
+    CONFIRM_THRESHOLD,
+    describeStep,
+    type NameLookup,
+    type QuickAction,
+    type UndoSummary,
+} from "$lib/actions";
 
 /**
  * Running an action, shared by the ⚡ menu and the keyboard shortcuts.
@@ -37,9 +43,10 @@ export async function runAction(action: QuickAction): Promise<void> {
         const what = `${summary.name} · ${summary.asset_count.toLocaleString()} ${
             summary.asset_count === 1 ? "asset" : "assets"
         }`;
-        if (summary.is_undoable) {
+        const runId = summary.run_id;
+        if (runId && summary.is_undoable) {
             toast.success(what, {
-                action: { label: "Undo", onClick: () => void undoRun(summary.run_id) },
+                action: { label: "Undo", onClick: () => void undoRun(runId) },
             });
         } else {
             // Say so at the moment it matters. Discovering there's no undo when
@@ -97,18 +104,38 @@ const names = (): NameLookup => ({
     folderNames: assetLibrary.folderNames,
 });
 
+/**
+ * Ctrl+Z. Reverses the newest recorded run, from any source.
+ *
+ * Silent when the history is empty rather than raising an error: pressing undo
+ * with nothing to undo is a normal thing to do, not a mistake to report.
+ */
+export async function undoLatest(): Promise<void> {
+    try {
+        const summary = await assetLibrary.undoLatest();
+        if (summary) announceUndo(summary);
+    } catch (e) {
+        fail(e, "Couldn't undo that.");
+    }
+}
+
 export async function undoRun(runId: string): Promise<void> {
     try {
-        const summary = await assetLibrary.undoActionRun(runId);
-        // Partial success is a real outcome, not a failure: assets deleted since
-        // the run can't be restored to, and saying nothing would leave the user
-        // believing the undo was complete.
-        toast.success(
-            summary.skipped > 0
-                ? `Undid "${summary.name}" — ${summary.skipped.toLocaleString()} assets no longer exist`
-                : `Undid "${summary.name}"`,
-        );
+        announceUndo(await assetLibrary.undoActionRun(runId));
     } catch (e) {
         fail(e, "Couldn't undo that run.");
     }
+}
+
+/**
+ * Partial success is a real outcome, not a failure: assets deleted since the run
+ * can't be restored to, and saying nothing would leave the user believing the
+ * undo was complete.
+ */
+function announceUndo(summary: UndoSummary): void {
+    toast.success(
+        summary.skipped > 0
+            ? `Undid "${summary.name}" — ${summary.skipped.toLocaleString()} assets no longer exist`
+            : `Undid "${summary.name}"`,
+    );
 }

@@ -1281,3 +1281,53 @@ pub async fn preview_rename(
         .inspect_err(|e| tracing::error!(error = %e, "preview_rename failed"))
         .map_err(AppError::from)
 }
+
+/// Run a pipeline that isn't a saved action.
+///
+/// This is how direct manipulation gets an inverse: dragging a selection into a
+/// folder is `[AddToFolder]`, a bulk tag toggle is `[AddTags]`, and both go
+/// through the same transaction-and-undo machinery a quick action does rather
+/// than reimplementing it. Small edits still skip the history — see
+/// `UNDO_MIN_ASSETS`.
+#[instrument(skip_all, fields(name = %name, steps = steps.len(), count = asset_ids.len()))]
+#[tauri::command]
+pub async fn run_steps(
+    name: String,
+    steps: Vec<actions::Step>,
+    asset_ids: Vec<String>,
+    state: tauri::State<'_, DbState>,
+) -> Result<actions::RunSummary, AppError> {
+    let pool = state.acquire_pool().await?;
+    actions::run_steps(
+        &pool,
+        actions::RunSource::Direct { name: &name },
+        &steps,
+        &asset_ids,
+    )
+    .await
+    .inspect_err(|e| tracing::error!(error = %e, "run_steps failed"))
+    .map_err(AppError::from)
+}
+
+/// Undo the most recent undoable run, whatever produced it. Backs Ctrl+Z.
+///
+/// `None` means there was nothing to undo — not an error, just an empty history,
+/// which is the normal state after a fresh library open.
+#[instrument(skip_all)]
+#[tauri::command]
+pub async fn undo_latest_run(
+    state: tauri::State<'_, DbState>,
+) -> Result<Option<actions::UndoSummary>, AppError> {
+    let pool = state.acquire_pool().await?;
+    let Some(run_id) = actions::latest_undoable_run(&pool)
+        .await
+        .map_err(AppError::from)?
+    else {
+        return Ok(None);
+    };
+    actions::undo_run(&pool, &run_id)
+        .await
+        .map(Some)
+        .inspect_err(|e| tracing::error!(error = %e, "undo_latest_run failed"))
+        .map_err(AppError::from)
+}
