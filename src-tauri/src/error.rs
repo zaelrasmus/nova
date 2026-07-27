@@ -21,6 +21,16 @@ pub enum AppError {
     #[error("A library already exists at the given location")]
     LibraryAlreadyExists,
 
+    /// The library's schema doesn't match this build's migration set — either it
+    /// was written by a newer Nova, or a shipped migration file was edited.
+    ///
+    /// Typed separately from `Database` because it is the ONE failure a user can
+    /// act on: the fix is "get the right version of Nova", and the generic
+    /// "a database error occurred, try restarting" would send them in circles
+    /// forever. See the freeze note at the top of the migration.
+    #[error("Library schema is incompatible with this build: {0}")]
+    LibraryVersion(String),
+
     /// A SQLx database error. Typed so CI test assertions can match on DB failures.
     #[error("Database error: {0}")]
     Database(#[from] sqlx::Error),
@@ -49,6 +59,10 @@ impl AppError {
             Self::NoLibrary => "No library is currently open. Please open or create one.",
             Self::LibraryAlreadyExists => {
                 "A library already exists at this location. Choose a different folder."
+            }
+            Self::LibraryVersion(_) => {
+                "This library was created by a different version of Nova and can't be opened. \
+                 Update Nova, or open it with the version that made it. Your files are untouched."
             }
             Self::Database(_) => "A database error occurred. Please try again or restart the app.",
             Self::Io(_) => "A file system error occurred. Please check folder permissions.",

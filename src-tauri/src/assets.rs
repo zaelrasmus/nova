@@ -1466,6 +1466,9 @@ pub async fn create_saved_filter(
     name: &str,
     filters: &FilterSet,
 ) -> Result<SavedFilter> {
+    // Same cleaning every other named row gets — a saved filter shows up in the
+    // filter bar's list, so an unreadable name is as bad here as anywhere.
+    let name = clean_name(name).context("A saved filter needs a name")?;
     let id = uuid::Uuid::new_v4().to_string();
     // The live search text isn't stripped here any more — it structurally can't
     // reach storage, because it was never part of the tree. That's one of the
@@ -1490,7 +1493,7 @@ pub async fn create_saved_filter(
          VALUES (?, 'filter', ?, ?, ?, ?, ?)",
     )
     .bind(&id)
-    .bind(name)
+    .bind(&name)
     .bind(position)
     .bind(RULE_SET_VERSION)
     .bind(&query_json)
@@ -1501,7 +1504,7 @@ pub async fn create_saved_filter(
 
     Ok(SavedFilter {
         id,
-        name: name.to_string(),
+        name,
         position,
         rules,
     })
@@ -1509,8 +1512,9 @@ pub async fn create_saved_filter(
 
 #[instrument(skip(pool))]
 pub async fn rename_saved_filter(pool: &SqlitePool, id: &str, name: &str) -> Result<()> {
+    let name = clean_name(name).context("A saved filter needs a name")?;
     let res = sqlx::query("UPDATE rule_sets SET name = ? WHERE id = ?")
-        .bind(name)
+        .bind(&name)
         .bind(id)
         .execute(pool)
         .await
@@ -1942,6 +1946,10 @@ pub async fn create_folder(
     name: &str,
     parent_id: Option<&str>,
 ) -> Result<Folder> {
+    // Cleaned here as well as in `update_folder`. Without this a folder could be
+    // CREATED with a name it could never be RENAMED to — and the display name is
+    // what an outbound drag hardlinks under, so "unnameable" is not cosmetic.
+    let name = clean_name(name).context("A folder needs a name")?;
     let id = uuid::Uuid::new_v4().to_string();
     let position = next_folder_position(pool, parent_id).await?;
     // Written explicitly rather than left to the column DEFAULT, so the returned
@@ -1953,7 +1961,7 @@ pub async fn create_folder(
          VALUES (?, ?, ?, ?, ?, 'manual', 1)",
     )
     .bind(&id)
-    .bind(name)
+    .bind(&name)
     .bind(parent_id)
     .bind(position)
     .bind(&created_at)
@@ -1963,7 +1971,7 @@ pub async fn create_folder(
 
     Ok(Folder {
         id,
-        name: name.to_string(),
+        name,
         parent_id: parent_id.map(str::to_string),
         position,
         order_by: OrderBy::Manual,
@@ -3390,7 +3398,12 @@ fn build_asset_metadata(src: PathBuf) -> Option<AssetMetadata> {
         source_path: src.to_string_lossy().into_owned(),
         width: visual.width,
         height: visual.height,
-        file_size: meta.len() as i64,
+        // Saturating, not `as`. SQLite integers are signed, and a bogus length
+        // from a corrupt or exotic filesystem would WRAP under `as i64` — a
+        // negative size that then poisons `SUM(file_size)` in folder stats and
+        // silently inverts every size filter. Clamping is wrong by a rounding
+        // error at a scale no file reaches; wrapping is wrong by 2^64.
+        file_size: i64::try_from(meta.len()).unwrap_or(i64::MAX),
         imported_date: stamp(Utc::now()),
         creation_date: stamp(created),
         modified_date: stamp(modified),
@@ -4090,9 +4103,14 @@ pub async fn color_coverage(pool: &SqlitePool) -> Result<ColorCoverage> {
             .fetch_one(pool)
             .await
             .context("Failed to count images")?;
+    // `deleted_at IS NULL` here too, not just on `total`. Trashed assets keep
+    // their palette rows (restore has to be exact), so without this an analyzed
+    // asset in the Trash counts toward the numerator but not the denominator —
+    // and the UI reports "analyzed 1,050 of 1,000".
     let analyzed: i64 = sqlx::query_scalar(
         "SELECT COUNT(DISTINCT asset_id) FROM asset_colors c \
-         JOIN assets a ON a.id = c.asset_id WHERE a.asset_type = 'image'",
+         JOIN assets a ON a.id = c.asset_id \
+         WHERE a.asset_type = 'image' AND a.deleted_at IS NULL",
     )
     .fetch_one(pool)
     .await

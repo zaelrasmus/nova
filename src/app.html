@@ -8,6 +8,16 @@
     %sveltekit.head%
   </head>
   <body data-sveltekit-preload-data="hover">
-    <div style="display: contents">%sveltekit.body%</div>
+    <!-- Styled by a class (see .app-root in routes/layout.css), NOT by the
+         inline style the SvelteKit scaffold puts here. That was the only style
+         attribute in the production bundle, and this app's CSP is
+         `default-src 'self'` with no style-src, so the webview refuses it and
+         the wrapper falls back to block — a box between body and the app root
+         that breaks the full-height layout. Invisible in `tauri dev`: the CSP
+         applies to the app protocol, not the dev server. Everything else Svelte
+         emits goes through CSSOM, which CSP does not govern. Keep this element:
+         SvelteKit needs its body content wrapped so an injected sibling node
+         can't break hydration. -->
+    <div class="app-root">%sveltekit.body%</div>
   </body>
 </html>

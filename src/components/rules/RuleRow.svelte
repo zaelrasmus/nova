@@ -180,35 +180,64 @@
         }
     }
 
-    function setTextOp(op: string) {
+    // ── Operator switches ────────────────────────────────────────────────────
+    //
+    // Each `op` is typed from its own `<select>`'s option list, NOT as a bare
+    // string, and no branch below asserts `as Condition`. That combination is
+    // load-bearing: `Condition` is a FILE FORMAT (it lands in
+    // `rule_sets.query_json`), and an assertion here would let any string
+    // through to storage, where Rust's `serde_json::from_str` rejects it,
+    // `fetch_smart_folders` logs a warning, and the row is skipped — the user's
+    // smart folder simply disappears from the sidebar with no error anywhere.
+    //
+    // Typing against `typeof X_OPS` rather than against `TextOp["op"]` ties the
+    // handler to the list the user can actually pick from. Adding an entry to
+    // one of those lists now widens the parameter and fails to compile until
+    // this function handles it — which is exactly what `DATE_OPS` needs, since
+    // it deliberately omits `between` and that variant carries `from`/`until`
+    // instead of `date`.
+    type TextOpValue = (typeof TEXT_OPS)[number]["value"];
+    type NumOpValue = (typeof NUM_OPS)[number]["value"];
+    type DateOpValue = (typeof DATE_OPS)[number]["value"];
+
+    // The field the row is already on. The fallback is unreachable by
+    // construction — an operator `<select>` only renders inside the branch for
+    // its own condition type — but narrowing beats asserting even so.
+    const textField = () => (condition.type === "text" ? condition.field : "name");
+    const numField = () => (condition.type === "number" ? condition.field : "file_size");
+    const dateField = () =>
+        condition.type === "date" ? condition.field : "imported_date";
+
+    function setTextOp(op: TextOpValue) {
         const value = "value" in condition ? String(condition.value ?? "") : "";
-        if (op === "is_null" || op === "is_not_null") {
-            onchange({ type: "text", field: (condition as any).field, op } as Condition);
-        } else {
-            onchange({ type: "text", field: (condition as any).field, op, value } as Condition);
-        }
+        const field = textField();
+        onchange(
+            op === "is_null" || op === "is_not_null"
+                ? { type: "text", field, op }
+                : { type: "text", field, op, value },
+        );
     }
 
-    function setNumOp(op: string) {
-        const field = (condition as any).field;
-        if (op === "between") {
-            onchange({ type: "number", field, op: "between", min: 0, max: 0 } as Condition);
-        } else {
-            onchange({ type: "number", field, op, value: 0 } as Condition);
-        }
+    function setNumOp(op: NumOpValue) {
+        const field = numField();
+        onchange(
+            op === "between"
+                ? { type: "number", field, op, min: 0, max: 0 }
+                : { type: "number", field, op, value: 0 },
+        );
     }
 
-    function setDateOp(op: string) {
-        const field = (condition as any).field;
+    function setDateOp(op: DateOpValue) {
+        const field = dateField();
         if (op === "within_last") {
-            onchange({ type: "date", field, op: "within_last", days: 7 } as Condition);
-        } else {
-            // Today, as a local-midnight instant — the same convention the filter
-            // bar uses, because only the client knows the user's timezone.
-            const midnight = new Date();
-            midnight.setHours(0, 0, 0, 0);
-            onchange({ type: "date", field, op, date: midnight.toISOString() } as Condition);
+            onchange({ type: "date", field, op, days: 7 });
+            return;
         }
+        // Today, as a local-midnight instant — the same convention the filter
+        // bar uses, because only the client knows the user's timezone.
+        const midnight = new Date();
+        midnight.setHours(0, 0, 0, 0);
+        onchange({ type: "date", field, op, date: midnight.toISOString() });
     }
 
     /** `<input type="date">` wants a bare day; the tree stores an instant. */
@@ -244,7 +273,7 @@
         <select
             class="{selectClass} w-32 shrink-0"
             value={condition.op}
-            onchange={(e) => setTextOp(e.currentTarget.value)}
+            onchange={(e) => setTextOp(e.currentTarget.value as TextOpValue)}
             aria-label="Operator"
         >
             {#each TEXT_OPS as o (o.value)}
@@ -266,7 +295,7 @@
         <select
             class="{selectClass} w-32 shrink-0"
             value={condition.op}
-            onchange={(e) => setNumOp(e.currentTarget.value)}
+            onchange={(e) => setNumOp(e.currentTarget.value as NumOpValue)}
             aria-label="Operator"
         >
             {#each NUM_OPS as o (o.value)}
@@ -312,7 +341,7 @@
         <select
             class="{selectClass} w-36 shrink-0"
             value={condition.op}
-            onchange={(e) => setDateOp(e.currentTarget.value)}
+            onchange={(e) => setDateOp(e.currentTarget.value as DateOpValue)}
             aria-label="Operator"
         >
             {#each DATE_OPS as o (o.value)}

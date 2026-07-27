@@ -4,7 +4,7 @@ use sqlx::SqlitePool;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::RwLock;
 use tracing::{debug, info, instrument, warn};
 
 #[derive(Clone)]
@@ -15,16 +15,30 @@ pub struct LibraryHandle {
 
 pub struct DbState {
     inner: Arc<RwLock<Option<LibraryHandle>>>,
-    /// Held for the duration of a background thumbnail run. `try_lock` failing
-    /// means a run is already in flight, so a duplicate request is a no-op.
-    pub thumb_gen: Arc<Mutex<()>>,
+    /// Guards the thumbnail/colour pipeline. A reader/writer lock rather than a
+    /// plain mutex, because the two kinds of run are not peers:
+    ///
+    ///   * on-view generation (`generate_thumbnails_for_ids`) takes the SHARED
+    ///     side. Many of these overlap by design — the grid fires one per
+    ///     visible window as you scroll — and they only ever fill in rows where
+    ///     `thumb_hash IS NULL`, so they cannot conflict with each other.
+    ///   * `rebuild_thumbnails` and `analyze_colors` take the EXCLUSIVE side.
+    ///     A rebuild deletes the entire `thumbnails/` directory and NULLs every
+    ///     `thumb_hash`; an on-view batch running through that would be writing
+    ///     files into a directory being removed and re-created, and both would
+    ///     be updating the same rows.
+    ///
+    /// Both sides use the `try_` form, so neither ever blocks a command: a
+    /// rejected exclusive request means "already running" and a rejected shared
+    /// request means "a rebuild is regenerating everything anyway".
+    pub thumb_gen: Arc<RwLock<()>>,
 }
 
 impl DbState {
     pub fn new() -> Self {
         Self {
             inner: Arc::new(RwLock::new(None)),
-            thumb_gen: Arc::new(Mutex::new(())),
+            thumb_gen: Arc::new(RwLock::new(())),
         }
     }
 
@@ -62,13 +76,38 @@ impl DbState {
             .pragma("temp_store", "MEMORY")
             .pragma("mmap_size", "268435456"); // 256 MiB memory mapped reads
 
+        // Snapshot the database before migrations touch it. Best-effort: a
+        // library we can't back up is still a library we should open, and the
+        // common failure (no space, read-only volume) is not one the user can
+        // fix from inside a modal. But when a migration DOES go wrong, this file
+        // is the difference between "restore this" and "sorry".
+        let backup = root.join("library.db.bak");
+        if let Err(e) = std::fs::copy(&db_path, &backup) {
+            warn!(error = %e, path = ?backup, "Pre-migration backup failed (non-fatal)");
+        }
+
         let new_pool = SqlitePool::connect_with(options).await?;
 
-        // Run migrations on connect
-        sqlx::migrate!().run(&new_pool).await.map_err(|e| {
+        // Run migrations on connect.
+        //
+        // A version failure is called out separately from every other database
+        // error because it is the one the user can actually act on — the answer
+        // is "get the matching build of Nova", and the generic "try restarting"
+        // would loop them forever on a library that will never open. The pool is
+        // closed first so a failed connect leaves no handle behind.
+        if let Err(e) = sqlx::migrate!().run(&new_pool).await {
             tracing::error!(error = %e, "Failed to run migrations on connect");
-            AppError::Internal(e.into())
-        })?;
+            new_pool.close().await;
+            return Err(match e {
+                sqlx::migrate::MigrateError::VersionMismatch(v) => {
+                    AppError::LibraryVersion(format!("migration {v} has a different checksum"))
+                }
+                sqlx::migrate::MigrateError::VersionMissing(v) => {
+                    AppError::LibraryVersion(format!("migration {v} is unknown to this build"))
+                }
+                other => AppError::Internal(other.into()),
+            });
+        }
 
         // Backfill the search index for a library that just gained the table on
         // migration. No-op once populated. Non-fatal: search degrades, the rest

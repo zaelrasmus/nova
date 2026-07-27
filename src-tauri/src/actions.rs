@@ -1844,10 +1844,13 @@ pub async fn preview_rename(
 
 /// A few arbitrary assets, for previewing with nothing selected.
 async fn sample_rows(conn: &mut sqlx::SqliteConnection, limit: usize) -> Result<Vec<RenameRow>> {
+    // Live assets only: this is a preview of what a pattern would DO, and
+    // offering a trashed asset as the example promises a rename that would never
+    // be applied to anything the user can see.
     sqlx::query_as::<_, RenameRow>(
         "SELECT id, filename, extension, width, height, file_size, \
                 imported_date, creation_date, modified_date \
-         FROM assets ORDER BY imported_date DESC, id LIMIT ?",
+         FROM assets WHERE deleted_at IS NULL ORDER BY imported_date DESC, id LIMIT ?",
     )
     .bind(limit as i64)
     .fetch_all(&mut *conn)
@@ -2090,12 +2093,21 @@ pub async fn undo_run(pool: &SqlitePool, run_id: &str) -> Result<UndoSummary> {
             .await
             .context("Failed to read the undo record")?;
 
+    // …and DESCENDING again inside each payload, for the same reason. One step
+    // can emit several inverses — `AddToFolder` records the membership it
+    // created and then the auto-tags that membership seeded — and reversing a
+    // sequence means reversing it at BOTH levels, not just the outer one.
+    //
+    // Every `Op` today happens to emit inverses that commute, so a forward inner
+    // loop produced the right answer. That is a property of the current step
+    // vocabulary, not of the algorithm: the first `Op` whose inverses depend on
+    // each other would undo incorrectly, silently, and only for the users who
+    // hit that combination. Cheaper to be right by construction.
     let mut inverses: Vec<Inverse> = Vec::new();
     for payload in &payloads {
-        inverses.extend(
-            serde_json::from_str::<Vec<Inverse>>(payload)
-                .context("The undo record for this run is unreadable")?,
-        );
+        let step: Vec<Inverse> = serde_json::from_str(payload)
+            .context("The undo record for this run is unreadable")?;
+        inverses.extend(step.into_iter().rev());
     }
 
     let touched: Vec<String> = unique(

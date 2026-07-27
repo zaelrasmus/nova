@@ -156,6 +156,18 @@
         args: Record<string, unknown>,
         reveal: ManifestScope,
     ) {
+        // The guard lives HERE, not at the call sites. The pipeline holds a
+        // single DB handle and one progress channel, so two concurrent imports
+        // interleave both — and `handleImport` awaits a file dialog before it
+        // gets here, which is a wide window for a drop to start one underneath
+        // it. Two runs would also mean two `import-progress` listeners writing
+        // the same state, with the first `finally` unlistening while the other
+        // is still emitting.
+        if (isImporting) {
+            toast.error("An import is already running.");
+            return;
+        }
+
         // Reset progress state
         current = 0;
         total = 0;
@@ -228,13 +240,6 @@
             toast.error("Open a library before importing.");
             return;
         }
-        if (isImporting) {
-            // The pipeline holds a single DB handle and one progress channel; a
-            // second concurrent import would interleave both.
-            toast.error("An import is already running.");
-            return;
-        }
-
         // An OS drop onto a pinned smart folder is refused for the same reason
         // an internal one is: membership is derived, so there is nothing to put
         // it into. Said out loud rather than quietly importing to the library at

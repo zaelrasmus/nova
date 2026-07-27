@@ -275,6 +275,18 @@ body {
     overflow: hidden; /* only panes scroll — the window itself never does */
 }
 
+/* SvelteKit's body wrapper (see src/app.html). `display: contents` makes it
+   vanish from layout, so `.layout`'s 100vh grid is a direct child of <body>
+   rather than nested one box deeper.
+
+   Lives here rather than as an inline style on the div — which is what the
+   SvelteKit scaffold ships — because the app's CSP is `default-src 'self'`
+   with no `style-src`, and a style ATTRIBUTE is the one thing in the bundle
+   that policy would refuse. A stylesheet is served from 'self' and is fine. */
+.app-root {
+    display: contents;
+}
+
 .layout {
     display: grid;
     /* minmax(0, 1fr) not 1fr: a plain 1fr refuses to shrink below its content,

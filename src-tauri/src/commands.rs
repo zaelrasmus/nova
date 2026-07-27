@@ -220,7 +220,8 @@ pub async fn rebuild_thumbnails(
 ) -> Result<usize, AppError> {
     let handle = state.acquire().await?;
 
-    let _guard = match state.thumb_gen.try_lock() {
+    // Exclusive: this is about to delete `thumbnails/` wholesale.
+    let _guard = match state.thumb_gen.try_write() {
         Ok(g) => g,
         Err(_) => {
             info!("Thumbnail generation already running; ignoring rebuild request");
@@ -242,9 +243,16 @@ pub async fn rebuild_thumbnails(
 }
 
 /// Generate thumbnails only for the given asset ids that are still missing one —
-/// the on-view (lazy) path. Called per visible window as the user scrolls, so it
-/// runs unlocked (the frontend de-dupes in-flight ids); ids already generated are
-/// filtered out by the query, making repeated calls cheap and idempotent.
+/// the on-view (lazy) path. Called per visible window as the user scrolls, so
+/// these overlap freely with each other (the frontend de-dupes in-flight ids, and
+/// the query filters out ids already generated, making repeated calls cheap and
+/// idempotent).
+///
+/// Takes the SHARED side of `thumb_gen`, which costs these calls nothing against
+/// one another and keeps them out of a rebuild's way — see the lock's comment in
+/// `db.rs`. A rejected `try_read` means a rebuild holds the exclusive side and is
+/// regenerating every one of these rows anyway, so skipping is the whole answer,
+/// not a compromise.
 #[instrument(skip_all, fields(requested = ids.len()))]
 #[tauri::command]
 pub async fn generate_thumbnails_for_ids(
@@ -254,6 +262,12 @@ pub async fn generate_thumbnails_for_ids(
     state: tauri::State<'_, DbState>,
 ) -> Result<usize, AppError> {
     let handle = state.acquire().await?;
+
+    let Ok(_guard) = state.thumb_gen.try_read() else {
+        info!("Rebuild in progress; skipping this on-view thumbnail batch");
+        return Ok(0);
+    };
+
     let config = crate::thumbnail::ThumbConfig::from_settings(&settings);
     let reporter = Arc::new(ThumbProgressEmitter { window });
 
@@ -352,7 +366,7 @@ pub async fn analyze_colors(
 ) -> Result<usize, AppError> {
     let handle = state.acquire().await?;
 
-    let _guard = match state.thumb_gen.try_lock() {
+    let _guard = match state.thumb_gen.try_write() {
         Ok(g) => g,
         Err(_) => {
             info!("Generation already running; ignoring analyze request");

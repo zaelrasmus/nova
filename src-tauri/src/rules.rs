@@ -409,14 +409,20 @@ impl Condition {
             }
 
             Condition::Shape { negate, shape } => {
-                qb.push("(");
-                if *negate {
-                    qb.push("NOT ");
-                }
                 // Dimensionless rows (audio, un-probed files) can't have a
                 // shape, so they're excluded from BOTH sides — "not landscape"
                 // shouldn't sweep in every MP3 in the library.
+                //
+                // The guard therefore sits OUTSIDE the negation. Wrapping the
+                // whole conjunction instead — `NOT (dimensioned AND shape)` —
+                // reads the same and means the opposite: for a 0x0 row that is
+                // `NOT (false)`, which is TRUE, so every audio file matched
+                // every negated shape. See `negated_shape_excludes_dimensionless`.
                 qb.push("(").push(DIMENSIONED).push(" AND ");
+                if *negate {
+                    qb.push("NOT ");
+                }
+                qb.push("(");
                 shape.push_predicate(qb);
                 qb.push("))");
             }
@@ -1026,6 +1032,37 @@ mod exec_tests {
         )
         .unwrap();
         assert_eq!(matching(&pool, &node).await, vec!["v1"]);
+    }
+
+    /// A shape test must never answer "yes" for something that has no shape.
+    ///
+    /// The bug this pins: with the guard written INSIDE the negation, `NOT
+    /// (width > 0 AND height > 0 AND ...)` evaluates to `NOT (false)` for a 0x0
+    /// audio row — so every MP3 in the library matched "not horizontal". The SQL
+    /// read exactly like the intent and meant the opposite of it, which is why
+    /// this is an execution test and not an assertion about the generated text.
+    #[tokio::test]
+    async fn negated_shape_excludes_dimensionless_assets() {
+        let pool = db().await;
+        let node: RuleNode = serde_json::from_str(
+            r#"{"kind":"condition","type":"shape","negate":true,"shape":{"kind":"horizontal"}}"#,
+        )
+        .unwrap();
+        // i1 and v1 are 100x100 — square, so genuinely "not horizontal".
+        // a1 is audio at 0x0 and must be absent from BOTH sides of the test.
+        assert_eq!(matching(&pool, &node).await, vec!["i1", "v1"]);
+    }
+
+    /// The positive side of the same guard, so a future change can't "fix" the
+    /// test above by excluding everything.
+    #[tokio::test]
+    async fn shape_matches_only_dimensioned_assets() {
+        let pool = db().await;
+        let node: RuleNode = serde_json::from_str(
+            r#"{"kind":"condition","type":"shape","negate":false,"shape":{"kind":"square"}}"#,
+        )
+        .unwrap();
+        assert_eq!(matching(&pool, &node).await, vec!["i1", "v1"]);
     }
 
     /// The filter bar's whole payload: several dimensions ANDed as one group.
