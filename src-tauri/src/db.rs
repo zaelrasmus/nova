@@ -2,6 +2,7 @@ use crate::error::AppError;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqliteSynchronous};
 use sqlx::SqlitePool;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
@@ -32,6 +33,22 @@ pub struct DbState {
     /// rejected exclusive request means "already running" and a rejected shared
     /// request means "a rebuild is regenerating everything anyway".
     pub thumb_gen: Arc<RwLock<()>>,
+
+    /// Bumped by every `stream_manifest` call; each request keeps the value it
+    /// got and stops as soon as it no longer matches.
+    ///
+    /// The frontend already discards superseded RESULTS via its own load token,
+    /// but that only stops them being rendered — the query kept running to
+    /// completion. Clicking through five folders in a 100k library meant five
+    /// full manifest scans in flight against a ten-connection pool, four of
+    /// which nobody would ever look at. This is the backend half of the same
+    /// idea, and it is deliberately the same shape so the two stay legible
+    /// together.
+    ///
+    /// A counter rather than a `CancellationToken` because the rule really is
+    /// "only the newest matters" — there is no per-request handle to hold, and
+    /// nothing else needs to trigger the cancel.
+    pub manifest_gen: Arc<AtomicU64>,
 }
 
 impl DbState {
@@ -39,6 +56,7 @@ impl DbState {
         Self {
             inner: Arc::new(RwLock::new(None)),
             thumb_gen: Arc::new(RwLock::new(())),
+            manifest_gen: Arc::new(AtomicU64::new(0)),
         }
     }
 

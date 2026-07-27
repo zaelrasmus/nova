@@ -285,14 +285,34 @@ pub async fn stream_manifest(
     state: tauri::State<'_, DbState>,
 ) -> Result<(), AppError> {
     let pool = state.acquire_pool().await?;
-    let rows = assets::fetch_manifest(&pool, &query).await?;
 
-    // Chunk so first paint starts before the whole manifest is deserialized.
-    for chunk in rows.chunks(5000) {
-        on_chunk
-            .send(chunk.to_vec())
-            .map_err(|e| AppError::Internal(e.into()))?;
-    }
+    // Claim a generation. Any later call bumps this, which is the signal to stop
+    // — see `DbState::manifest_gen`. Taken before the first row so a request
+    // superseded during setup never sends anything at all.
+    let generation = state
+        .manifest_gen
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        + 1;
+    let manifest_gen = std::sync::Arc::clone(&state.manifest_gen);
+
+    // 5,000 rows a batch: large enough that the per-message IPC overhead
+    // disappears against the payload, small enough that the first one lands
+    // while SQLite is still walking the index.
+    let sent = assets::stream_manifest(&pool, &query, 5000, move |batch| {
+        // Checked BETWEEN batches rather than per row: the frontend cannot
+        // render faster than a batch anyway, and this keeps the hot loop free
+        // of an atomic load per asset.
+        if manifest_gen.load(std::sync::atomic::Ordering::SeqCst) != generation {
+            return Ok(false);
+        }
+        // A send failure means the webview is gone (window closed mid-load).
+        // Also a reason to stop, and not an error worth surfacing to a UI that
+        // no longer exists.
+        Ok(on_chunk.send(batch).is_ok())
+    })
+    .await?;
+
+    tracing::debug!(sent, generation, "Manifest stream finished");
     Ok(())
 }
 
@@ -869,53 +889,15 @@ pub async fn move_folder(
         .map_err(AppError::from)
 }
 
-#[instrument(skip_all, fields(count = asset_ids.len()))]
-#[tauri::command]
-pub async fn add_assets_to_folder(
-    folder_id: String,
-    asset_ids: Vec<String>,
-    state: tauri::State<'_, DbState>,
-) -> Result<(), AppError> {
-    let pool = state.acquire_pool().await?;
-    assets::add_assets_to_folder(&pool, &folder_id, &asset_ids)
-        .await
-        .inspect_err(|e| tracing::error!(error = %e, "add_assets_to_folder failed"))
-        .map_err(AppError::from)
-}
-
-#[instrument(skip_all, fields(count = asset_ids.len()))]
-#[tauri::command]
-pub async fn remove_assets_from_folder(
-    folder_id: String,
-    asset_ids: Vec<String>,
-    state: tauri::State<'_, DbState>,
-) -> Result<(), AppError> {
-    let pool = state.acquire_pool().await?;
-    assets::remove_assets_from_folder(&pool, &folder_id, &asset_ids)
-        .await
-        .inspect_err(|e| tracing::error!(error = %e, "remove_assets_from_folder failed"))
-        .map_err(AppError::from)
-}
-
-#[instrument(skip_all, fields(count = asset_ids.len(), ?source_folder_id, target_folder_id))]
-#[tauri::command]
-pub async fn move_assets_to_folder(
-    source_folder_id: Option<String>,
-    target_folder_id: String,
-    asset_ids: Vec<String>,
-    state: tauri::State<'_, DbState>,
-) -> Result<(), AppError> {
-    let pool = state.acquire_pool().await?;
-    assets::move_assets_to_folder(
-        &pool,
-        source_folder_id.as_deref(),
-        &target_folder_id,
-        &asset_ids,
-    )
-    .await
-    .inspect_err(|e| tracing::error!(error = %e, "move_assets_to_folder failed"))
-    .map_err(AppError::from)
-}
+// REMOVED: add_assets_to_folder, move_assets_to_folder, remove_assets_from_folder,
+// assign_tag, unassign_tag.
+//
+// Unreferenced since membership and tagging were rerouted through `run_steps`,
+// but still registered in `generate_handler!` — which made them live IPC surface
+// the webview could call, doing the same work with NO undo record and no run
+// history. A second way to do the same thing, minus the guarantees the first one
+// exists to provide. The `_in` primitives they wrapped are still there and still
+// used by the step engine.
 
 // ── Tags ────────────────────────────────────────────────────────────────────
 
@@ -962,35 +944,6 @@ pub async fn delete_tag(id: String, state: tauri::State<'_, DbState>) -> Result<
     tags::delete_tag(&pool, &id)
         .await
         .inspect_err(|e| tracing::error!(error = %e, "delete_tag failed"))
-        .map_err(AppError::from)
-}
-
-/// Assign an existing tag to a set of assets. Idempotent per asset.
-#[instrument(skip_all, fields(count = asset_ids.len()))]
-#[tauri::command]
-pub async fn assign_tag(
-    tag_id: String,
-    asset_ids: Vec<String>,
-    state: tauri::State<'_, DbState>,
-) -> Result<(), AppError> {
-    let pool = state.acquire_pool().await?;
-    tags::assign_tag(&pool, &tag_id, &asset_ids)
-        .await
-        .inspect_err(|e| tracing::error!(error = %e, "assign_tag failed"))
-        .map_err(AppError::from)
-}
-
-#[instrument(skip_all, fields(count = asset_ids.len()))]
-#[tauri::command]
-pub async fn unassign_tag(
-    tag_id: String,
-    asset_ids: Vec<String>,
-    state: tauri::State<'_, DbState>,
-) -> Result<(), AppError> {
-    let pool = state.acquire_pool().await?;
-    tags::unassign_tag(&pool, &tag_id, &asset_ids)
-        .await
-        .inspect_err(|e| tracing::error!(error = %e, "unassign_tag failed"))
         .map_err(AppError::from)
 }
 

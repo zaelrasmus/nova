@@ -48,11 +48,15 @@
         }
     }
 
-    // Local mirror so the slider drags smoothly; persisted on release (onchange).
-    let numColumns = $state(settings.preferences.gridColumns);
-    $effect(() => {
-        numColumns = settings.preferences.gridColumns;
-    });
+    // A WRITABLE $derived: `bind:value` assigns to it on every slider tick so the
+    // drag is smooth, and the value is persisted on release (onchange). The
+    // assignment stands until the source preference changes, which is precisely
+    // the "local mirror, re-synced when settings hydrate from disk" this wants.
+    //
+    // Was $state plus an $effect copying the preference in. Besides being the
+    // canonical Svelte 5 anti-pattern, that effect re-ran on the slider's OWN
+    // `settings.set` — the write below fed straight back into it.
+    let numColumns = $derived(settings.preferences.gridColumns);
 </script>
 
 <div class="flex items-center gap-3">

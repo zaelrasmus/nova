@@ -9,7 +9,12 @@
     import { toast } from "svelte-sonner";
     import { PanelLeft, PanelRight, Settings, Download } from "@lucide/svelte";
 
-    import { assetLibrary, type ManifestScope } from "$lib/assets.svelte";
+    import {
+        assetLibrary,
+        type AssetMetadata,
+        type Folder,
+        type ManifestScope,
+    } from "$lib/assets.svelte";
     import { runAction, undoLatest, undoRun } from "../components/actions/run";
     import { dropzone } from "$lib/dropzone.svelte";
     import type { DropTarget } from "$lib/droptarget";
@@ -55,8 +60,8 @@
     }
 
     interface ImportResult {
-        assets: any[];
-        folders: any[];
+        assets: AssetMetadata[];
+        folders: Folder[];
         path_links: { [key: string]: string };
         /** Files whose bytes the library already held; skipped, not copied. */
         duplicates: number;
@@ -572,7 +577,7 @@
                                     Settings
                                 </p>
 
-                                {#each SETTINGS_SECTIONS as section}
+                                {#each SETTINGS_SECTIONS as section (section.id)}
                                     {#if section.dividerAbove}
                                         <div
                                             class="my-2 mx-1 h-px w-full bg-neutral-800"
@@ -594,7 +599,7 @@
 
                             <!-- Content panels — each section gets its own Tabs.Content -->
                             <div class="flex flex-col flex-1 min-w-0 overflow-hidden h-full">
-                                {#each SETTINGS_SECTIONS as section}
+                                {#each SETTINGS_SECTIONS as section (section.id)}
                                     {@const SectionComponent = sectionComponents[section.id]}
                                     <Tabs.Content
                                         value={section.id}

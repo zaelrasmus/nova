@@ -24,6 +24,7 @@
 //! instead of in memory with a prayer.
 
 use anyhow::{bail, Context, Result};
+use rustc_hash::FxHashSet;
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, QueryBuilder, Sqlite, SqlitePool};
 use std::collections::HashSet;
@@ -121,7 +122,7 @@ async fn matching_assets(
     rules: &crate::rules::RuleNode,
     asset_ids: &[String],
 ) -> Result<Vec<String>> {
-    let mut matched = HashSet::new();
+    let mut matched = FxHashSet::default();
     for chunk in asset_ids.chunks(IDS_PER_QUERY) {
         let mut qb = QueryBuilder::<Sqlite>::new("SELECT a.id FROM assets a WHERE a.id IN (");
         let mut sep = qb.separated(", ");
@@ -901,7 +902,7 @@ impl Inverse {
     /// asset that no longer exists would trip the foreign key and abort the
     /// whole undo, so a missing asset is dropped from the inverse instead —
     /// the caller reports the shortfall rather than failing.
-    fn retaining(&self, alive: &HashSet<String>) -> Self {
+    fn retaining(&self, alive: &FxHashSet<String>) -> Self {
         let keep = |ids: &[String]| -> Vec<String> {
             ids.iter().filter(|id| alive.contains(*id)).cloned().collect()
         };
@@ -960,8 +961,8 @@ async fn assets_with_tag(
     conn: &mut sqlx::SqliteConnection,
     tag_id: &str,
     asset_ids: &[String],
-) -> Result<HashSet<String>> {
-    let mut out = HashSet::new();
+) -> Result<FxHashSet<String>> {
+    let mut out = FxHashSet::default();
     for chunk in asset_ids.chunks(IDS_PER_QUERY) {
         let mut qb =
             QueryBuilder::<Sqlite>::new("SELECT asset_id FROM assets_tags WHERE tag_id = ");
@@ -1188,23 +1189,44 @@ async fn capture_text(
 
 /// Write per-asset text back.
 ///
-/// One statement per asset, deliberately. Every value differs, so the only
-/// set-based alternative is a `CASE id WHEN … END` with thousands of branches —
-/// which risks SQLite's expression limits to save milliseconds inside a
-/// transaction that is already committed as a unit.
+/// Every value differs, so this is a join, not a broadcast: the pairs are
+/// supplied as a `VALUES` list and matched against `assets.id` in ONE statement
+/// per chunk.
+///
+/// This used to be one statement per asset, on the reasoning that the only
+/// set-based alternative was a `CASE id WHEN … END` with thousands of branches.
+/// That was the wrong pair of options — `UPDATE … FROM (VALUES …)` (SQLite 3.33)
+/// expresses it directly, with no expression-depth risk — and the cost was
+/// mis-stated: renaming a 100,000-asset selection is 100,000 round trips, which
+/// is seconds, not the milliseconds the old note claimed.
+///
+/// A `VALUES` row here is two binds, so the chunk is sized against SQLite's
+/// 32766 parameter cap like every other batched statement in this file.
 async fn write_text_values(
     conn: &mut sqlx::SqliteConnection,
     field: TextTarget,
     values: &[(String, Option<String>)],
 ) -> Result<()> {
-    let sql = format!("UPDATE assets SET {} = ? WHERE id = ?", field.column());
-    for (asset_id, value) in values {
-        sqlx::query(&sql)
-            .bind(value)
-            .bind(asset_id)
+    if values.is_empty() {
+        return Ok(());
+    }
+    const ROWS_PER_UPDATE: usize = 8000;
+    let col = field.column();
+
+    for chunk in values.chunks(ROWS_PER_UPDATE) {
+        // A bare SQLite `VALUES` subquery names its columns `column1`,
+        // `column2`, … — there is no `AS v(id, val)` syntax to lean on.
+        let mut qb = QueryBuilder::<Sqlite>::new("UPDATE assets SET ");
+        qb.push(col).push(" = v.column2 FROM (");
+        qb.push_values(chunk, |mut b, (asset_id, value)| {
+            b.push_bind(asset_id).push_bind(value);
+        });
+        qb.push(") AS v WHERE assets.id = v.column1");
+
+        qb.build()
             .execute(&mut *conn)
             .await
-            .context("Failed to restore text")?;
+            .with_context(|| format!("Failed to write {col}"))?;
     }
     Ok(())
 }
@@ -1304,8 +1326,11 @@ async fn set_trashed(
 async fn alive_assets(
     conn: &mut sqlx::SqliteConnection,
     asset_ids: &[String],
-) -> Result<HashSet<String>> {
-    let mut out = HashSet::new();
+) -> Result<FxHashSet<String>> {
+    // Nearly every id is expected to still exist — undo runs seconds after the
+    // work it reverses — so sizing to the input is a good bet rather than a
+    // guess that over-allocates.
+    let mut out = FxHashSet::with_capacity_and_hasher(asset_ids.len(), Default::default());
     for chunk in asset_ids.chunks(IDS_PER_QUERY) {
         let mut qb = QueryBuilder::<Sqlite>::new("SELECT id FROM assets WHERE id IN (");
         let mut sep = qb.separated(", ");
@@ -3769,7 +3794,7 @@ mod undo_tests {
     /// from the inverse rather than aborting the whole undo on a foreign key.
     #[test]
     fn inverse_drops_assets_that_no_longer_exist() {
-        let alive: HashSet<String> = ids(&["a1", "a3"]).into_iter().collect();
+        let alive: FxHashSet<String> = ids(&["a1", "a3"]).into_iter().collect();
         let inverse = Inverse::RemoveTag {
             tag_id: "t1".into(),
             asset_ids: ids(&["a1", "a2", "a3"]),

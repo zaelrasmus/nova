@@ -28,13 +28,19 @@
     // reads this one filtered view.
     const assets = $derived(assetLibrary.displayed);
 
-    // User-controlled column count, persisted in preferences. Local mirror so the
-    // slider drags smoothly; we persist on release (onchange). A $effect re-syncs
-    // it if settings hydrate from disk after this component mounts.
-    let numColumns = $state(settings.preferences.gridColumns);
-    $effect(() => {
-        numColumns = settings.preferences.gridColumns;
-    });
+    // User-controlled column count, persisted in preferences.
+    //
+    // A WRITABLE $derived: it tracks the stored preference, and the slider
+    // assigns straight to it for a smooth drag, with the write persisted on
+    // release (onchange). The assignment holds until the source changes, which
+    // is exactly the "local mirror, re-synced when settings hydrate from disk"
+    // this needs.
+    //
+    // Was $state + an $effect that copied the preference into it. That is the
+    // canonical Svelte 5 anti-pattern, and here it also misbehaved: the effect
+    // re-ran on the slider's OWN persisted write, and on any unrelated change to
+    // the settings object, stomping the value mid-drag.
+    let numColumns = $derived(settings.preferences.gridColumns);
 
     // Scroll container - passed to the virtualizer's getScrollElement
     let scrollEl = $state<HTMLDivElement | null>(null);
@@ -135,14 +141,37 @@
     let containerHeight = $state(0);
     let scrollTop = $state(0);
 
+    // rAF-coalesced, exactly like the scroll listener below — and for a stronger
+    // reason. `containerWidth` feeds `columnWidth`, which feeds the `justified`
+    // derived, which allocates one object PER ASSET for the whole manifest. A
+    // ResizeObserver fires many times per second while a window edge is dragged,
+    // so writing these raw meant a full relayout of 100,000 items per frame.
+    //
+    // Coalescing here rather than debouncing keeps the resize visually live: the
+    // layout still updates every frame, it just updates once.
     $effect(() => {
         if (!scrollEl) return;
+        let frame = 0;
+        let pendingW = 0;
+        let pendingH = 0;
         const observer = new ResizeObserver(([entry]) => {
-            containerWidth = entry.contentRect.width;
-            containerHeight = entry.contentRect.height;
+            // Latest wins. Recording the size on every event and reading it in
+            // the frame gives the trailing edge; capturing it at schedule time
+            // would pin the FIRST size of the frame and lag the drag by one.
+            pendingW = entry.contentRect.width;
+            pendingH = entry.contentRect.height;
+            if (frame) return;
+            frame = requestAnimationFrame(() => {
+                frame = 0;
+                containerWidth = pendingW;
+                containerHeight = pendingH;
+            });
         });
         observer.observe(scrollEl);
-        return () => observer.disconnect();
+        return () => {
+            if (frame) cancelAnimationFrame(frame);
+            observer.disconnect();
+        };
     });
 
     // Track scroll position for the justified layout's visible-row window. rAF-

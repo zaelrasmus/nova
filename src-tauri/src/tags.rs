@@ -312,23 +312,11 @@ pub async fn delete_tag(pool: &SqlitePool, id: &str) -> Result<()> {
     Ok(())
 }
 
-/// Apply a tag to a set of assets. `INSERT OR IGNORE`, so re-applying to an asset
-/// that already has it is a silent no-op — which is exactly what the tri-state
-/// "apply to all" needs.
-#[instrument(skip(pool, asset_ids), fields(assets = asset_ids.len()))]
-pub async fn assign_tag(pool: &SqlitePool, tag_id: &str, asset_ids: &[String]) -> Result<()> {
-    if asset_ids.is_empty() {
-        return Ok(());
-    }
-    let mut tx = pool.begin().await.context("Failed to begin tag assignment")?;
-    assign_tag_in(&mut tx, tag_id, asset_ids).await?;
-    tx.commit().await.context("Failed to commit tag assignment")?;
-
-    if let Err(e) = crate::search::reindex_assets(pool, asset_ids).await {
-        tracing::warn!(error = %e, "Reindex after tag assign failed (non-fatal)");
-    }
-    Ok(())
-}
+// The pool-owning `assign_tag` / `unassign_tag` wrappers are gone with the
+// commands that were their only callers. Tagging goes through `run_steps` now,
+// which owns the transaction and reindexes once for the whole pipeline — so a
+// wrapper that did its own of each was a second path to the same rows with no
+// undo record attached.
 
 /// Apply a tag inside a caller-owned transaction. See the `_in` contract in
 /// `assets.rs`: SQL only, no transaction of its own and no reindex.
@@ -347,22 +335,6 @@ pub(crate) async fn assign_tag_in(
             .execute(&mut *conn)
             .await
             .context("Failed to assign tag")?;
-    }
-    Ok(())
-}
-
-/// Remove a tag from a set of assets. Never touches the tag row itself.
-#[instrument(skip(pool, asset_ids), fields(assets = asset_ids.len()))]
-pub async fn unassign_tag(pool: &SqlitePool, tag_id: &str, asset_ids: &[String]) -> Result<()> {
-    if asset_ids.is_empty() {
-        return Ok(());
-    }
-    let mut tx = pool.begin().await.context("Failed to begin tag removal")?;
-    unassign_tag_in(&mut tx, tag_id, asset_ids).await?;
-    tx.commit().await.context("Failed to commit tag removal")?;
-
-    if let Err(e) = crate::search::reindex_assets(pool, asset_ids).await {
-        tracing::warn!(error = %e, "Reindex after tag unassign failed (non-fatal)");
     }
     Ok(())
 }

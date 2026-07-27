@@ -19,13 +19,19 @@ pub trait MetadataExtractor {
     fn extract(&self, src: &Path) -> Result<ExtractedVisual>;
 }
 
-/// Dispatch to the extractor for a given asset type.
-pub fn extractor_for(asset_type: AssetType) -> Box<dyn MetadataExtractor> {
+/// Read the cheap visual metadata for a file of `asset_type`.
+///
+/// Static dispatch. This used to hand back a `Box<dyn MetadataExtractor>`, which
+/// heap-allocated once per file — for four ZERO-SIZED structs, inside the Rayon
+/// `par_iter` that walks every file in an import. The trait stays because it is
+/// what states the contract each extractor has to honour (cheap metadata only,
+/// no full decode, no writes); nothing ever needed the trait OBJECT.
+pub fn extract_visual(asset_type: AssetType, src: &Path) -> Result<ExtractedVisual> {
     match asset_type {
-        AssetType::Image => Box::new(ImageExtractor),
-        AssetType::Video => Box::new(VideoExtractor),
-        AssetType::Audio => Box::new(AudioExtractor),
-        AssetType::Unknown => Box::new(NoopExtractor),
+        AssetType::Image => ImageExtractor.extract(src),
+        AssetType::Video => VideoExtractor.extract(src),
+        AssetType::Audio => AudioExtractor.extract(src),
+        AssetType::Unknown => NoopExtractor.extract(src),
     }
 }
 

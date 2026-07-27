@@ -46,10 +46,46 @@ base64 = "0.22.1"
 # it disappear next to the file copy that follows it.
 blake3 = "1.8.5"
 thiserror = "2.0.18"
+# `TryStreamExt`, so the manifest can be consumed row-by-row instead of collected.
+# Already compiled as part of the sqlx tree, so naming it here costs no build time
+# — it only makes the dependency honest.
+futures-util = { version = "0.3", default-features = false }
+# Faster hashing for the id-keyed maps on the import and bulk-action paths.
+# std's SipHash is DoS-resistant, which is the right default for a server
+# hashing attacker-supplied keys — Nova hashes its OWN uuids, in-process, at six
+# figures per import, and pays for a guarantee it cannot use.
+rustc-hash = "2"
 tracing = "0.1.44"
 tracing-subscriber = { version ="0.3.23", features = ["env-filter"] }
 # TODO  — uncomment when file-based logs for CI artifacts / crash reports:
 # tracing-appender = "0.2"
+
+# ── Lints ─────────────────────────────────────────────────────────────────────
+#
+# Declared here rather than left to whoever remembers the right clippy
+# invocation. CI runs `-D warnings` on top of this, so the two agree instead of
+# drifting.
+#
+# `correctness` is DENY because every lint in that group is "this is a bug", not
+# "this is a style" — there is no version of the codebase where shipping one is
+# the right call. The rest are warn: they are worth seeing and worth arguing
+# with, and a lint that blocks a release over a matter of taste teaches people
+# to reach for `#[allow]` reflexively.
+#
+# Not enabled: `pedantic`. It fires on things this codebase does deliberately
+# (long literal SQL, `as` casts in the colour maths), and a hundred suppressions
+# would say less than the handful of comments already explaining those choices.
+[lints.clippy]
+correctness = "deny"
+suspicious = "warn"
+complexity = "warn"
+perf = "warn"
+
+# Tried and rejected: `unused_crate_dependencies`. With the lib+bin split this
+# crate needs for mobile, `main.rs` is a passthrough to `nova_lib::run()` — so
+# from the BIN's point of view every one of the 20 dependencies is unused, and
+# the lint emits 23 warnings that are all wrong. Exactly the reflex-`#[allow]`
+# trainer described above.
 
 # ── Build profiles ────────────────────────────────────────────────────────────
 

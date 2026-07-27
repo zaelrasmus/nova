@@ -648,7 +648,14 @@ fn push_date<'a>(qb: &mut QueryBuilder<'a, Sqlite>, field: DateField, op: &'a Da
                     .push_bind(date.as_str())
                     .push(" AND ")
                     .push(col)
-                    .push(" < datetime(")
+                    // `strftime` with the stored format, NOT `datetime(...)`.
+                    // `datetime` emits "YYYY-MM-DD HH:MM:SS" — a different shape
+                    // from every stamp in the database — so the comparison
+                    // happened to work only because ASCII puts ' ' before 'T'.
+                    // That is precisely the invisible ordering dependency the
+                    // `stamp()` doc comment exists to warn about, and the
+                    // `within_last` arm below already does it correctly.
+                    .push(" < strftime('%Y-%m-%dT%H:%M:%fZ', ")
                     .push_bind(date.as_str())
                     .push(", '+1 day'))");
             } else {

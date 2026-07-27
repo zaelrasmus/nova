@@ -698,6 +698,18 @@ export interface FolderStats {
 }
 
 // ThumbHash (base64) -> data URL, memoized (cards mount/unmount on scroll).
+//
+// The `data:` here is why `img-src` in tauri.conf.json's CSP includes `data:`.
+// It cannot be a comment there (JSON), so it lives at the producer: without it
+// every placeholder is refused in a PRODUCTION build — the CSP is applied to the
+// app protocol and not to the dev server, so `tauri dev` shows nothing wrong.
+// The symptom is a card flashing as a broken image and then resolving once the
+// real thumbnail arrives over `asset:`, worst on reload when every placeholder
+// renders at once.
+//
+// `data:` in `img-src` specifically is the narrow relaxation: it does not widen
+// `default-src`, and an SVG loaded through `<img>` cannot execute script — which
+// is the reason `data:` is dangerous in `script-src` and unremarkable here.
 const thumbUrlCache = new Map<string, string>();
 export function thumbHashUrl(hash: string | null): string | null {
   if (!hash) return null;
@@ -715,6 +727,20 @@ export function thumbHashUrl(hash: string | null): string | null {
 // Cap on hydrated heavy rows kept in memory. A few sccreenfuls of slacks.
 const MAX_HEAVY = 600;
 
+/**
+ * Plain-data copy of a value on its way across the IPC boundary.
+ *
+ * Anything reachable from `$state` is a Proxy, and what goes over the wire has
+ * to be inert data. Tauri's IPC happens to serialise a proxy correctly today —
+ * so this is not a bug being fixed — but "we rely on the transport's traversal
+ * behaviour" is a worse contract than "we hand it plain objects", and it is the
+ * contract the code already claimed to have.
+ *
+ * Cheap: these payloads are rule trees, step lists and small patches, never the
+ * manifest. The cast restores the input type, which `$state.snapshot` widens.
+ */
+const wire = <T>(value: T): T => $state.snapshot(value) as T;
+
 class AssetLibrary {
   /** Layout source of truth: light rows for every asset, sort order from Rust. */
 
@@ -730,14 +756,31 @@ class AssetLibrary {
    */
   #nameFilter = $state<string | null>(null);
 
-  /** The manifest the GRID renders: `manifest`, narrowed by the instant name
-   *  filter when one is active. Every consumer reads THIS, so selection, count,
-   *  and layout all see the same filtered set. */
-  get displayed(): AssetLightRow[] {
+  /**
+   * The manifest the GRID renders: `manifest`, narrowed by the instant name
+   * filter when one is active. Every consumer reads THIS, so selection, count,
+   * and layout all see the same filtered set.
+   *
+   * `$derived.by`, not a plain getter. A getter re-runs on EVERY read, and with
+   * a name filter active each read is a full pass over the manifest plus a new
+   * array — at 100k rows that is real work, and it returns a fresh identity each
+   * time, so anything deriving from it re-runs unconditionally. `AssetGrid`
+   * wrapped its own read in `$derived` and was fine; `+page.svelte`'s row count
+   * and `viewer.displayed` read it raw and were not. Memoising here fixes every
+   * call site at once instead of asking each one to remember.
+   *
+   * (A `$derived` field in a class is legal Svelte 5 — the "no $derived outside
+   * a component" rule is about bare module scope, not class bodies.)
+   */
+  #displayed = $derived.by(() => {
     const q = this.#nameFilter;
     if (q === null) return this.manifest;
     const needle = q.toLowerCase();
     return this.manifest.filter((r) => r.filename.toLowerCase().includes(needle));
+  });
+
+  get displayed(): AssetLightRow[] {
+    return this.#displayed;
   }
 
   /** True while the instant name filter is hiding some rows — for the "filtered"
@@ -770,8 +813,13 @@ class AssetLibrary {
    * Lives here so the three places that summarise a rule set agree, and so a
    * folder rename shows up in every one of them at once.
    */
+  /* Memoised for the same reason as `displayed`: this is read inside per-item
+   * lambdas (a chip renderer calls `folderNames.get(id)` per chip), and as a
+   * plain getter each of those calls rebuilt the whole Map. */
+  #folderNames = $derived(new Map(this.folders.map((f) => [f.id, f.name])));
+
   get folderNames(): ReadonlyMap<string, string> {
-    return new Map(this.folders.map((f) => [f.id, f.name]));
+    return this.#folderNames;
   }
 
   /** Named filter combinations for this library, refreshed on library switch. */
@@ -933,18 +981,16 @@ class AssetLibrary {
       // The one place the UI's flat dimensions become the rule tree the engine
       // actually speaks. `#rulesOverride` wins when a saved filter said
       // something the filter bar can't draw — see `applySavedFilter`.
-      // `$state.snapshot` before crossing the IPC boundary, as every other
-      // invoke in this file does: what goes over the wire must be plain data,
-      // not reactive proxies.
-      const plain = $state.snapshot(filters) as FilterSet;
-      const wire = {
-        rules: this.#rulesOverride
-          ? ($state.snapshot(this.#rulesOverride) as RuleNode)
-          : toRuleTree(plain),
+      // Snapshotted before crossing the IPC boundary, as every other invoke in
+      // this file now does via `wire()`: what goes over the wire must be plain
+      // data, not reactive proxies.
+      const plain = wire(filters);
+      const filterSet = {
+        rules: this.#rulesOverride ? wire(this.#rulesOverride) : toRuleTree(plain),
         text: plain.text,
       };
       await invoke("stream_manifest", {
-        query: { scope, filters: wire, sort },
+        query: { scope, filters: filterSet, sort },
         onChunk: channel,
       });
       // Swap in whatever streamed before the invoke resolved. Zero chunks is a
@@ -1218,7 +1264,7 @@ class AssetLibrary {
   }
 
   async createSmartFolder(name: string, rules: RuleNode): Promise<SmartFolder> {
-    const created = await invoke<SmartFolder>("create_smart_folder", { name, rules });
+    const created = await invoke<SmartFolder>("create_smart_folder", { name, rules: wire(rules) });
     await this.loadSmartFolders();
     return created;
   }
@@ -1229,7 +1275,7 @@ class AssetLibrary {
    * the old rows up would show assets that no longer belong here.
    */
   async updateSmartFolder(id: string, patch: SmartFolderPatch): Promise<void> {
-    await invoke("update_smart_folder", { id, patch });
+    await invoke("update_smart_folder", { id, patch: wire(patch) });
     await this.loadSmartFolders();
     if (this.scope.kind === "smart" && this.scope.id === id) await this.reload();
   }
@@ -1250,7 +1296,7 @@ class AssetLibrary {
 
   /** Live "Found N items" for the rule editor. Callers debounce. */
   countMatching(rules: RuleNode): Promise<number> {
-    return invoke<number>("count_matching", { rules });
+    return invoke<number>("count_matching", { rules: wire(rules) });
   }
 
   // ── Smart folder groups ────────────────────────────────────────────────────
@@ -1518,7 +1564,7 @@ class AssetLibrary {
    * changes the sibling ordering (`ORDER BY parent_id, position, name`).
    */
   async updateFolder(id: string, patch: FolderPatch): Promise<void> {
-    await invoke("update_folder", { id, patch });
+    await invoke("update_folder", { id, patch: wire(patch) });
     await this.loadFolders();
   }
 
@@ -1528,7 +1574,7 @@ class AssetLibrary {
    * name, since the grid renders from `heavy`, not from the inspector.
    */
   async updateAsset(id: string, patch: AssetPatch): Promise<void> {
-    const row = await invoke<AssetMetadata>("update_asset", { id, patch });
+    const row = await invoke<AssetMetadata>("update_asset", { id, patch: wire(patch) });
     if (this.heavy.has(id)) this.heavy.set(id, row);
 
     // A rename moves the row under a filename sort. Reload once, here on commit —
@@ -1634,7 +1680,7 @@ class AssetLibrary {
 
   /** A few of a rule set's current matches, for the sidebar preview. */
   previewMatches(rules: RuleNode, limit = 9): Promise<AssetLightRow[]> {
-    return invoke<AssetLightRow[]>("preview_matches", { rules, limit });
+    return invoke<AssetLightRow[]>("preview_matches", { rules: wire(rules), limit });
   }
 
   // ── Quick actions ─────────────────────────────────────────────────────────
@@ -1667,12 +1713,12 @@ class AssetLibrary {
   }
 
   async createQuickAction(draft: QuickActionDraft): Promise<void> {
-    await invoke<QuickAction>("create_quick_action", { draft });
+    await invoke<QuickAction>("create_quick_action", { draft: wire(draft) });
     await this.loadQuickActions();
   }
 
   async updateQuickAction(id: string, draft: QuickActionDraft): Promise<void> {
-    await invoke("update_quick_action", { id, draft });
+    await invoke("update_quick_action", { id, draft: wire(draft) });
     await this.loadQuickActions();
   }
 
@@ -1737,7 +1783,7 @@ class AssetLibrary {
     if (assetIds.length === 0) {
       return { run_id: null, name, asset_count: 0, is_undoable: false };
     }
-    const summary = await invoke<RunSummary>("run_steps", { name, steps, assetIds });
+    const summary = await invoke<RunSummary>("run_steps", { name, steps: wire(steps), assetIds });
     // Only when something was actually recorded — a single-asset tag toggle is
     // the hot path here and must not cost an extra round trip for a history
     // entry that was never written.

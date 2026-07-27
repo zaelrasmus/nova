@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capability for the main window",
+  "description": "Capability for the main window. NOTE: no `fs:default` — the webview cannot touch the filesystem directly. It reads images through the asset protocol (scoped per-library in connect_library) and everything else through a command that takes IDS and resolves paths in Rust. Adding fs:default back would hand the webview read/write over the whole library tree for no feature that needs it.",
   "windows": ["main"],
   "permissions": [
     "core:default",
@@ -11,7 +11,6 @@
     "core:window:allow-close",
     "opener:default",
     "drag:default",
-    "fs:default",
     "dialog:default",
     "store:default"
   ]

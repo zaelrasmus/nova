@@ -3,9 +3,11 @@ use crate::fs;
 use crate::thumbnail;
 use anyhow::{Context, Result};
 use chrono::{DateTime, SecondsFormat, Utc};
+use futures_util::TryStreamExt;
 use rayon::prelude::{IntoParallelIterator, ParallelIterator};
 use serde::{Deserialize, Serialize};
 use sqlx::{sqlite::SqlitePool, FromRow, QueryBuilder, Sqlite, Type};
+use rustc_hash::FxHashMap;
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
@@ -60,17 +62,34 @@ pub enum Scope {
     Trash,
 }
 
+/// Where a scope's persisted sort actually lives.
+///
+/// Total, where this used to be an `Option<String>` whose `None` meant "it must
+/// be a folder" — a fact both call sites then re-derived with an
+/// `unreachable!()`. Adding a `Scope` variant and forgetting to handle it was a
+/// runtime panic; now it fails to compile in the one place that decides.
+pub(crate) enum SortHome<'a> {
+    /// On the folder's own row, cleaned up by the FK cascade when it is deleted.
+    FolderRow(&'a str),
+    /// Under this key in `view_settings`, which has no FK and is swept by hand.
+    ViewKey(String),
+}
+
 impl Scope {
-    /// The `view_settings.view_key` a non-folder scope persists its sort under.
-    /// Folders keep theirs on their own row, so they have no key here.
-    fn view_key(&self) -> Option<String> {
+    /// Where this scope keeps its sort.
+    ///
+    /// Making the STORAGE uniform (sentinel folder rows for the fixed views) was
+    /// the alternative, and it would have cost a guard in every membership query
+    /// instead. This is the only place the split exists; everything downstream
+    /// just receives a `Sort`.
+    pub(crate) fn sort_home(&self) -> SortHome<'_> {
         match self {
-            Scope::All => Some("all".into()),
-            Scope::Uncategorized => Some("uncategorized".into()),
-            Scope::Smart { id } => Some(format!("smart:{id}")),
-            Scope::SmartGroup { id } => Some(format!("smartgroup:{id}")),
-            Scope::Trash => Some("trash".into()),
-            Scope::Folder { .. } => None,
+            Scope::All => SortHome::ViewKey("all".into()),
+            Scope::Uncategorized => SortHome::ViewKey("uncategorized".into()),
+            Scope::Smart { id } => SortHome::ViewKey(format!("smart:{id}")),
+            Scope::SmartGroup { id } => SortHome::ViewKey(format!("smartgroup:{id}")),
+            Scope::Trash => SortHome::ViewKey("trash".into()),
+            Scope::Folder { id } => SortHome::FolderRow(id),
         }
     }
 }
@@ -534,8 +553,15 @@ pub struct ImportResult {
     pub restored: usize,
 }
 
+/// Which phase an import is in, as the progress event reports it.
+///
+/// Serialized with serde's DEFAULT unit-variant naming — the variant name
+/// verbatim, `"ProcessingMetadata"` — which is what `+page.svelte`'s
+/// `ImportStage` union mirrors. A `rename_all` here would silently rename the
+/// wire values and the frontend's type would still compile, so the absence of
+/// one is the contract. (There was a commented-out `camelCase` attribute here;
+/// applying it would have broken exactly that.)
 #[derive(Serialize, Clone, Debug)]
-// #[serde(rename_all = "camelCase")]
 pub enum ImportStage {
     Scanning,
     ProcessingMetadata,
@@ -560,20 +586,29 @@ const IMG_EXTS: &[&str] = &["bmp", "gif", "jfif", "jpeg", "jpg", "png", "webp"];
 const VID_EXTS: &[&str] = &["avi", "mkv", "mov", "mp4", "webm"];
 const AUD_EXTS: &[&str] = &["flac", "m4a", "mp3", "ogg", "wav"];
 
+/// `contains`, not `binary_search`.
+///
+/// These lists are five to seven entries — a linear scan over that fits in a
+/// cache line and beats a branchy binary search outright. More to the point,
+/// `binary_search` silently requires the list to be SORTED, and nothing enforced
+/// it: adding `"tiff"` to the end of `IMG_EXTS` would have made every TIFF
+/// undetectable, which import turns into "the file was silently dropped". A
+/// correctness footgun in exchange for negative performance.
 fn detect_asset_type(path: &Path) -> AssetType {
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
         .map(|e| e.to_ascii_lowercase())
         .unwrap_or_default();
+    let ext = ext.as_str();
 
-    if IMG_EXTS.binary_search(&ext.as_str()).is_ok() {
+    if IMG_EXTS.contains(&ext) {
         return AssetType::Image;
     }
-    if VID_EXTS.binary_search(&ext.as_str()).is_ok() {
+    if VID_EXTS.contains(&ext) {
         return AssetType::Video;
     }
-    if AUD_EXTS.binary_search(&ext.as_str()).is_ok() {
+    if AUD_EXTS.contains(&ext) {
         return AssetType::Audio;
     }
 
@@ -1011,11 +1046,27 @@ pub(crate) async fn resolve_scope_rules(
     }
 }
 
-#[instrument(skip(pool))]
-pub async fn fetch_manifest(
+/// Stream the manifest to `sink` in batches of `chunk_size`, newest batch first.
+///
+/// Rows are pulled off the SQLite cursor and handed over as they arrive, rather
+/// than collected and then sliced. At 100,000 assets that is the difference
+/// between the grid painting after the whole result set has been decoded (~20 MB
+/// materialised, and cloned again per chunk on the way out) and painting as soon
+/// as the first batch lands, with peak memory bounded by one batch.
+///
+/// `sink` returns whether to KEEP GOING. Returning `false` abandons the rest of
+/// the cursor — that is how a superseded request stops paying for rows nobody
+/// will look at, and it is a normal outcome rather than an error.
+#[instrument(skip(pool, sink))]
+pub async fn stream_manifest<F>(
     pool: &SqlitePool,
     query: &ManifestQuery,
-) -> Result<Vec<AssetLightRow>> {
+    chunk_size: usize,
+    mut sink: F,
+) -> Result<usize>
+where
+    F: FnMut(Vec<AssetLightRow>) -> Result<bool>,
+{
     let sort = match query.sort {
         Some(s) => s,
         None => resolve_sort(pool, &query.scope).await?,
@@ -1032,11 +1083,44 @@ pub async fn fetch_manifest(
         prune_smart_order(pool, id, rules).await?;
     }
 
-    build_manifest_query(&query.scope, scope_rules.as_ref(), &query.filters, sort)
-        .build_query_as::<AssetLightRow>()
-        .fetch_all(pool)
+    // `qb` borrows `scope_rules`, and the cursor borrows `qb` — so both have to
+    // outlive the loop. Declaring them in this order does that: locals drop in
+    // reverse, so the cursor goes first and the tree it depends on goes last.
+    let mut qb = build_manifest_query(&query.scope, scope_rules.as_ref(), &query.filters, sort);
+    let mut cursor = qb.build_query_as::<AssetLightRow>().fetch(pool);
+
+    let mut buf: Vec<AssetLightRow> = Vec::with_capacity(chunk_size);
+    let mut total = 0usize;
+
+    while let Some(row) = cursor
+        .try_next()
         .await
-        .context("Failed to fetch asset manifest")
+        .context("Failed to read the asset manifest")?
+    {
+        buf.push(row);
+        if buf.len() >= chunk_size {
+            total += buf.len();
+            // `take` hands the buffer over whole — no clone of the batch, which
+            // is what the old `chunk.to_vec()` was paying for.
+            if !sink(std::mem::take(&mut buf))? {
+                return Ok(total);
+            }
+            buf.reserve(chunk_size);
+        }
+    }
+
+    // The partial tail. A result set of ZERO sends nothing at all, which is
+    // deliberate and is the contract the frontend already expects — it treats
+    // "the invoke resolved having seen no batches" as a legitimate empty result
+    // and swaps to an empty grid on that basis. Emitting an empty batch here
+    // would be a second way to say the same thing, and the caller would have to
+    // handle both.
+    if !buf.is_empty() {
+        total += buf.len();
+        sink(buf)?;
+    }
+
+    Ok(total)
 }
 
 // ── Persisted sort ────────────────────────────────────────────────────────────
@@ -1054,17 +1138,14 @@ const VIEW_SORT_SQL: &str = "SELECT order_by, is_ascending FROM view_settings WH
 /// membership query instead.
 #[instrument(skip(pool))]
 pub async fn resolve_sort(pool: &SqlitePool, scope: &Scope) -> Result<Sort> {
-    let row: Option<(OrderBy, bool)> = match scope.view_key() {
-        None => {
-            let Scope::Folder { id } = scope else {
-                unreachable!("only folders have no view key")
-            };
+    let row: Option<(OrderBy, bool)> = match scope.sort_home() {
+        SortHome::FolderRow(id) => {
             sqlx::query_as(FOLDER_SORT_SQL)
-                .bind(id.as_str())
+                .bind(id)
                 .fetch_optional(pool)
                 .await
         }
-        Some(key) => {
+        SortHome::ViewKey(key) => {
             sqlx::query_as(VIEW_SORT_SQL)
                 .bind(key)
                 .fetch_optional(pool)
@@ -1094,21 +1175,18 @@ pub async fn resolve_sort(pool: &SqlitePool, scope: &Scope) -> Result<Sort> {
 
 #[instrument(skip(pool))]
 pub async fn set_sort(pool: &SqlitePool, scope: &Scope, sort: Sort) -> Result<()> {
-    let res = match scope.view_key() {
-        None => {
-            let Scope::Folder { id } = scope else {
-                unreachable!("only folders have no view key")
-            };
+    let res = match scope.sort_home() {
+        SortHome::FolderRow(id) => {
             sqlx::query("UPDATE folders SET order_by = ?, is_ascending = ? WHERE id = ?")
                 .bind(sort.order_by)
                 .bind(sort.is_ascending)
-                .bind(id.as_str())
+                .bind(id)
                 .execute(pool)
                 .await
         }
         // Upsert, so a view keeps working even with no seed row — which is
         // always the case for a smart folder, whose key is minted on first sort.
-        Some(key) => {
+        SortHome::ViewKey(key) => {
             sqlx::query(
                 "INSERT INTO view_settings (view_key, order_by, is_ascending) VALUES (?, ?, ?) \
                  ON CONFLICT(view_key) DO UPDATE \
@@ -1235,6 +1313,14 @@ pub async fn reorder_assets(
 
     let moved_set: std::collections::HashSet<&str> =
         moved_ids.iter().map(String::as_str).collect();
+    // Membership index over the SCOPE, for the stale-selection pass below.
+    // `ordered` is the whole scope — every asset in the library under
+    // `Scope::All` — so testing each moved id against it with a linear scan was
+    // O(moved x scope): dragging a 10k selection in a 100k library came to 10^9
+    // string comparisons and a multi-second freeze. Built once, used once, and
+    // the set above already does the same job in the other direction.
+    let in_scope: std::collections::HashSet<&str> =
+        ordered.iter().map(|(id, _)| id.as_str()).collect();
 
     // The block keeps the scope's own order, not the order the ids arrived in —
     // a selection is a set, so its click order is meaningless for placement.
@@ -1246,7 +1332,7 @@ pub async fn reorder_assets(
     // Any moved id not present in the scope (a stale selection) still gets
     // placed, appended after the ones that were found.
     for id in moved_ids {
-        if !ordered.iter().any(|(oid, _)| oid == id) {
+        if !in_scope.contains(id.as_str()) {
             moved.push(id.as_str());
         }
     }
@@ -2762,38 +2848,21 @@ pub async fn move_folder(pool: &SqlitePool, id: &str, new_parent_id: Option<&str
 // the outer form; a quick action sequences several of these and needs them to
 // commit or fail as one, so it needs the inner form.
 //
-// `move_assets_to_folder` is the evidence this split was already overdue: it
-// exists as its own function purely because add + remove could not share a
-// transaction from a caller, and every future "X and Y together" would have
-// needed the same hand-fusing.
-//
 // The contract for an `_in` function is SQL and nothing else — no `begin()` (it
 // has no pool to begin from, so the signature makes that unrepresentable), no
 // reindex, and no logging of a commit that hasn't happened yet.
-
-/// Add assets to a folder, appended after its existing members. `INSERT OR IGNORE`
-/// makes re-adding an already-present asset a no-op (keeps its current position).
-#[instrument(skip(pool, asset_ids), fields(count = asset_ids.len()))]
-pub async fn add_assets_to_folder(
-    pool: &SqlitePool,
-    folder_id: &str,
-    asset_ids: &[String],
-) -> Result<()> {
-    if asset_ids.is_empty() {
-        return Ok(());
-    }
-    let mut tx = pool
-        .begin()
-        .await
-        .context("Failed to begin membership transaction")?;
-    add_assets_to_folder_in(&mut tx, folder_id, asset_ids).await?;
-    tx.commit()
-        .await
-        .context("Failed to commit membership transaction")?;
-
-    reindex_membership(pool, asset_ids).await;
-    Ok(())
-}
+//
+// The OUTER halves are gone. `add_assets_to_folder`, `move_assets_to_folder` and
+// `remove_assets_from_folder` each owned a transaction and a reindex for exactly
+// one caller — a Tauri command — and those commands were deleted when membership
+// was rerouted through `run_steps`, which sequences the `_in` halves inside a
+// transaction it owns and reindexes once for the whole pipeline. Keeping them
+// would have preserved a second path to the same writes with no undo record.
+//
+// `move_assets_to_folder` in particular was noted here as evidence the split was
+// overdue: it existed only because add + remove could not share a transaction
+// from a caller. `Op::SetFolders` is that capability, generalised — so the
+// hand-fused special case retired with the problem it worked around.
 
 // ── Permanent deletion ───────────────────────────────────────────────────────
 //
@@ -3025,14 +3094,6 @@ pub async fn folder_member_ids(pool: &SqlitePool, folder_id: &str) -> Result<Vec
         .context("Failed to read the folder's members")
 }
 
-/// Reindex assets whose folder membership just changed. A tiny shared wrapper so
-/// the three membership mutations don't each repeat the non-fatal boilerplate.
-async fn reindex_membership(pool: &SqlitePool, asset_ids: &[String]) {
-    if let Err(e) = crate::search::reindex_assets(pool, asset_ids).await {
-        warn!(error = %e, "Reindex after membership change failed (non-fatal)");
-    }
-}
-
 /// Append assets to a folder inside a caller-owned transaction.
 ///
 /// `INSERT OR IGNORE` keeps an already-present asset at the position it has, so
@@ -3042,7 +3103,7 @@ pub(crate) async fn add_assets_to_folder_in(
     folder_id: &str,
     asset_ids: &[String],
 ) -> Result<()> {
-    let mut position = sqlx::query_scalar::<_, Option<f64>>(
+    let base = sqlx::query_scalar::<_, Option<f64>>(
         "SELECT MAX(position) FROM assets_folders WHERE folder_id = ?",
     )
     .bind(folder_id)
@@ -3052,17 +3113,35 @@ pub(crate) async fn add_assets_to_folder_in(
     .map(|m| m + 1.0)
     .unwrap_or(0.0);
 
-    for id in asset_ids {
-        sqlx::query(
-            "INSERT OR IGNORE INTO assets_folders (folder_id, asset_id, position) VALUES (?, ?, ?)",
-        )
-        .bind(folder_id)
-        .bind(id)
-        .bind(position)
-        .execute(&mut *conn)
-        .await
-        .context("Failed to add asset to folder")?;
-        position += 1.0;
+    // Multi-row INSERT, not one statement per asset. This is the path a Ctrl+A
+    // followed by a drag into a folder takes, so its input is the SELECTION —
+    // which can be the whole library — and a statement each meant one round trip
+    // per asset. `remove_assets_from_folder_in` below has always chunked; this
+    // half simply never caught up.
+    //
+    // Three binds per row, so the chunk is sized against SQLite's 32766
+    // parameter cap the same way `persist_import` sizes its own.
+    const ROWS_PER_INSERT: usize = 8000;
+
+    for (chunk_idx, chunk) in asset_ids.chunks(ROWS_PER_INSERT).enumerate() {
+        // Position continues across chunks, so the folder's order is the order
+        // the ids arrived in rather than restarting at `base` every 8,000.
+        let chunk_base = base + (chunk_idx * ROWS_PER_INSERT) as f64;
+        let mut offset = 0.0f64;
+
+        let mut qb = QueryBuilder::new(
+            "INSERT OR IGNORE INTO assets_folders (folder_id, asset_id, position) ",
+        );
+        qb.push_values(chunk, |mut b, id| {
+            b.push_bind(folder_id)
+                .push_bind(id)
+                .push_bind(chunk_base + offset);
+            offset += 1.0;
+        });
+        qb.build()
+            .execute(&mut *conn)
+            .await
+            .context("Failed to add assets to folder")?;
     }
     Ok(())
 }
@@ -3093,84 +3172,6 @@ pub(crate) async fn remove_assets_from_folder_in(
     Ok(())
 }
 
-/// Move assets between folders inside a caller-owned transaction.
-///
-/// Same `source == target` no-op as the outer form: it's a drag the user
-/// aborted onto its own origin, and a step configured that way is not an error
-/// either.
-pub(crate) async fn move_assets_to_folder_in(
-    conn: &mut sqlx::SqliteConnection,
-    source: Option<&str>,
-    target: &str,
-    asset_ids: &[String],
-) -> Result<()> {
-    if source == Some(target) {
-        return Ok(());
-    }
-    add_assets_to_folder_in(conn, target, asset_ids).await?;
-    if let Some(source) = source {
-        remove_assets_from_folder_in(conn, source, asset_ids).await?;
-    }
-    Ok(())
-}
-
-/// Move assets out of one folder and into another, atomically.
-///
-/// Not add-then-remove from the frontend: a failure between the two calls leaves
-/// every dragged asset in BOTH folders, which is the one outcome the user did
-/// not ask for and the hardest to notice. One transaction, one round trip.
-///
-/// `source` is the folder the drag started in. `None` degrades this to a plain
-/// add — dragging out of "All" or "Uncategorized" has no membership to remove,
-/// because there is nothing to move *from*. Same folder in and out is a no-op
-/// rather than an error: it's a drag the user aborted onto its own origin.
-#[instrument(skip(pool, asset_ids), fields(count = asset_ids.len()))]
-pub async fn move_assets_to_folder(
-    pool: &SqlitePool,
-    source: Option<&str>,
-    target: &str,
-    asset_ids: &[String],
-) -> Result<()> {
-    if asset_ids.is_empty() || source == Some(target) {
-        return Ok(());
-    }
-
-    let mut tx = pool
-        .begin()
-        .await
-        .context("Failed to begin move transaction")?;
-
-    move_assets_to_folder_in(&mut tx, source, target, asset_ids).await?;
-
-    tx.commit()
-        .await
-        .context("Failed to commit move transaction")?;
-
-    reindex_membership(pool, asset_ids).await;
-    Ok(())
-}
-
-#[instrument(skip(pool, asset_ids), fields(count = asset_ids.len()))]
-pub async fn remove_assets_from_folder(
-    pool: &SqlitePool,
-    folder_id: &str,
-    asset_ids: &[String],
-) -> Result<()> {
-    if asset_ids.is_empty() {
-        return Ok(());
-    }
-    let mut tx = pool
-        .begin()
-        .await
-        .context("Failed to begin membership transaction")?;
-    remove_assets_from_folder_in(&mut tx, folder_id, asset_ids).await?;
-    tx.commit()
-        .await
-        .context("Failed to commit membership transaction")?;
-
-    reindex_membership(pool, asset_ids).await;
-    Ok(())
-}
 
 #[instrument(skip(pool, ids), fields(count = ids.len()))]
 pub async fn fetch_assets_by_ids(
@@ -3377,8 +3378,7 @@ fn build_asset_metadata(src: PathBuf) -> Option<AssetMetadata> {
     // The thumbnail + ThumbHash are produced later by the background pipeline, so
     // import never blocks on decode/encode. A failure yields "no visual" — the
     // asset still persists (never drop a user's file).
-    let visual = extract::extractor_for(asset_type)
-        .extract(&src)
+    let visual = extract::extract_visual(asset_type, &src)
         .unwrap_or_else(|e| {
             warn!(path = ?src, error = %e, "Metadata extraction failed; keeping asset with no visual");
             extract::ExtractedVisual::default()
@@ -3486,7 +3486,13 @@ async fn split_duplicates(pool: &SqlitePool, staged: Vec<AssetMetadata>) -> Resu
         .collect();
 
     // hash -> id of whichever asset owns those bytes.
-    let mut owner: HashMap<String, String> = HashMap::new();
+    //
+    // Sized up front and Fx-hashed: this is one entry per staged file plus one
+    // per pre-existing match, so a 100k-file import fills it 100k+ times with
+    // 64-char hex keys. Both the rehash-and-move on growth and SipHash's
+    // per-key cost are pure overhead on a map that never leaves this function.
+    let mut owner: FxHashMap<String, String> =
+        FxHashMap::with_capacity_and_hasher(staged.len(), Default::default());
 
     for chunk in hashes.chunks(IDS_PER_QUERY) {
         let mut qb = QueryBuilder::new("SELECT content_hash, id FROM assets WHERE content_hash IN (");
@@ -4130,17 +4136,25 @@ async fn replace_palette(
         .await
         .context("Failed to clear existing palette")?;
 
-    for entry in palette {
-        sqlx::query("INSERT INTO asset_colors (asset_id, l, a, b, ratio) VALUES (?, ?, ?, ?, ?)")
-            .bind(asset_id)
-            .bind(entry.lab.l as f64)
-            .bind(entry.lab.a as f64)
-            .bind(entry.lab.b as f64)
-            .bind(entry.ratio as f64)
-            .execute(&mut **tx)
-            .await
-            .context("Failed to insert palette entry")?;
+    // One multi-row INSERT rather than one per swatch. A palette is ~8 entries,
+    // so per asset this is small — but it runs for EVERY image, and the caller
+    // does a chunk of 64 at a time: the old form cost ~576 statements per chunk,
+    // and a full-library colour pass over 10,000 images cost ~90,000.
+    if palette.is_empty() {
+        return Ok(());
     }
+    let mut qb = QueryBuilder::<Sqlite>::new("INSERT INTO asset_colors (asset_id, l, a, b, ratio) ");
+    qb.push_values(palette, |mut b, entry| {
+        b.push_bind(asset_id)
+            .push_bind(entry.lab.l as f64)
+            .push_bind(entry.lab.a as f64)
+            .push_bind(entry.lab.b as f64)
+            .push_bind(entry.ratio as f64);
+    });
+    qb.build()
+        .execute(&mut **tx)
+        .await
+        .context("Failed to insert palette entries")?;
     Ok(())
 }
 
@@ -4326,6 +4340,70 @@ mod manifest_tests {
         )
         .await;
         assert_eq!(ids, vec!["v1"], "clicking Videos must not leave images in");
+    }
+
+    /// The batching itself, which is what the grid's first paint depends on.
+    ///
+    /// `sort` is passed explicitly so these don't need a `view_settings` table —
+    /// `resolve_sort` is covered by its own tests, and this is about the cursor.
+    async fn stream_batches(
+        pool: &SqlitePool,
+        scope: Scope,
+        chunk: usize,
+        stop_after: Option<usize>,
+    ) -> (Vec<Vec<String>>, usize) {
+        let query = ManifestQuery {
+            scope,
+            filters: FilterSet::default(),
+            sort: Some(DEFAULT_SORT),
+        };
+        let mut batches: Vec<Vec<String>> = Vec::new();
+        let total = stream_manifest(pool, &query, chunk, |b| {
+            batches.push(b.into_iter().map(|r| r.id).collect());
+            Ok(stop_after.is_none_or(|n| batches.len() < n))
+        })
+        .await
+        .unwrap();
+        (batches, total)
+    }
+
+    /// Rows arrive split across batches, in order, with none lost at the seam.
+    #[tokio::test]
+    async fn streaming_splits_rows_into_batches() {
+        let pool = db().await;
+        let (batches, total) = stream_batches(&pool, Scope::All, 1, None).await;
+        assert_eq!(batches, vec![vec!["v1"], vec!["i1"]]);
+        assert_eq!(total, 2);
+    }
+
+    /// A chunk larger than the result set is one batch, not one per row.
+    #[tokio::test]
+    async fn streaming_sends_one_batch_when_it_fits() {
+        let pool = db().await;
+        let (batches, total) = stream_batches(&pool, Scope::All, 100, None).await;
+        assert_eq!(batches, vec![vec!["v1", "i1"]]);
+        assert_eq!(total, 2);
+    }
+
+    /// A superseded request abandons the cursor rather than paying for rows
+    /// nobody will render — the backend half of the frontend's load token.
+    #[tokio::test]
+    async fn streaming_stops_when_the_sink_declines() {
+        let pool = db().await;
+        let (batches, total) = stream_batches(&pool, Scope::All, 1, Some(1)).await;
+        assert_eq!(batches, vec![vec!["v1"]], "must not keep draining");
+        assert_eq!(total, 1, "the count reports what was actually sent");
+    }
+
+    /// Zero matches sends ZERO batches. The frontend treats "resolved having
+    /// seen nothing" as a legitimate empty result, so an empty batch would be a
+    /// redundant second way to say it.
+    #[tokio::test]
+    async fn streaming_an_empty_result_sends_nothing() {
+        let pool = db().await;
+        let (batches, total) = stream_batches(&pool, Scope::Trash, 10, None).await;
+        assert!(batches.is_empty(), "got {batches:?}");
+        assert_eq!(total, 0);
     }
 
     /// And when you select a tag to include.
