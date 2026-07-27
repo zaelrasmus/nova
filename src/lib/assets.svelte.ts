@@ -1738,6 +1738,31 @@ class AssetLibrary {
     return summary;
   }
 
+  // ── Folder auto-tags ──────────────────────────────────────────────────────
+
+  /** Tags this folder seeds onto assets that arrive in it. */
+  fetchFolderAutoTags(folderId: string): Promise<string[]> {
+    return invoke<string[]>("fetch_folder_auto_tags", { folderId });
+  }
+
+  /** Replace the whole set. Takes effect on the NEXT arrival, never backwards. */
+  setFolderAutoTags(folderId: string, tagIds: string[]): Promise<void> {
+    return invoke("set_folder_auto_tags", { folderId, tagIds });
+  }
+
+  /**
+   * Apply the folder's auto-tags to what's already in it.
+   *
+   * The only retroactive path, and explicitly invoked — turning auto-tags on
+   * must not silently rewrite assets filed before the rule existed.
+   */
+  async applyFolderAutoTags(folderId: string): Promise<RunSummary> {
+    const summary = await invoke<RunSummary>("apply_folder_auto_tags", { folderId });
+    await this.loadTags();
+    if (summary.run_id) await this.loadActionRuns();
+    return summary;
+  }
+
   /** Undo the newest undoable run, whatever produced it. Backs Ctrl+Z. */
   async undoLatest(): Promise<UndoSummary | null> {
     const summary = await invoke<UndoSummary | null>("undo_latest_run");
@@ -1768,6 +1793,10 @@ class AssetLibrary {
       [{ op: { type: "add_to_folder", folder_id: folderId } }],
       assetIds,
     );
+    // The target folder may seed auto-tags, which changes usage counts and what
+    // the inspector shows. Cheap enough to do unconditionally: the summary
+    // doesn't say whether any fired, and a drag is not a hot path.
+    await this.loadTags();
     const active = this.scope;
     if (active.kind === "uncategorized" || (active.kind === "folder" && active.id === folderId)) {
       await this.reload();
@@ -1804,6 +1833,7 @@ class AssetLibrary {
       ],
       assetIds,
     );
+    await this.loadTags(); // the target may seed auto-tags
     const active = this.scope;
     if (
       active.kind === "uncategorized" ||

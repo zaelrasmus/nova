@@ -111,6 +111,9 @@ pub fn run() {
             commands::preview_rename,
             commands::run_steps,
             commands::undo_latest_run,
+            commands::fetch_folder_auto_tags,
+            commands::set_folder_auto_tags,
+            commands::apply_folder_auto_tags,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

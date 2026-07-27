@@ -14,6 +14,7 @@
     import { Pin, PinOff } from "@lucide/svelte";
     import PaletteSection from "./PaletteSection.svelte";
     import FolderMembership from "./FolderMembership.svelte";
+    import FolderAutoTags from "./FolderAutoTags.svelte";
     import TagEditor from "./TagEditor.svelte";
     import PinSwatches from "./PinSwatches.svelte";
 
@@ -372,6 +373,12 @@
         </label>
 
         {@render notesField()}
+
+        <div class="h-px bg-neutral-800"></div>
+
+        <!-- Auto-tags sit above pinning because they change what the folder DOES
+             to assets, which is a bigger claim than how it looks in the sidebar. -->
+        <FolderAutoTags folderId={folder.id} {legendClass} />
 
         <div class="h-px bg-neutral-800"></div>
 

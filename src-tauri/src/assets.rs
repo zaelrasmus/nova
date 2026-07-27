@@ -2748,6 +2748,113 @@ pub async fn add_assets_to_folder(
     Ok(())
 }
 
+// ── Folder auto-tags ─────────────────────────────────────────────────────────
+
+/// The tags this folder seeds onto arriving assets.
+#[instrument(skip(pool))]
+pub async fn fetch_folder_auto_tags(pool: &SqlitePool, folder_id: &str) -> Result<Vec<String>> {
+    sqlx::query_scalar("SELECT tag_id FROM folder_auto_tags WHERE folder_id = ?")
+        .bind(folder_id)
+        .fetch_all(pool)
+        .await
+        .context("Failed to read the folder's auto-tags")
+}
+
+/// Replace the whole set. A set, not a list — order carries no meaning here, so
+/// delete-then-insert is both correct and the smallest thing that works.
+#[instrument(skip(pool, tag_ids), fields(count = tag_ids.len()))]
+pub async fn set_folder_auto_tags(
+    pool: &SqlitePool,
+    folder_id: &str,
+    tag_ids: &[String],
+) -> Result<()> {
+    let mut tx = pool
+        .begin()
+        .await
+        .context("Failed to begin the auto-tag transaction")?;
+
+    sqlx::query("DELETE FROM folder_auto_tags WHERE folder_id = ?")
+        .bind(folder_id)
+        .execute(&mut *tx)
+        .await
+        .context("Failed to clear the folder's auto-tags")?;
+
+    if !tag_ids.is_empty() {
+        let mut qb = QueryBuilder::new("INSERT OR IGNORE INTO folder_auto_tags (folder_id, tag_id) ");
+        qb.push_values(tag_ids, |mut b, tag_id| {
+            b.push_bind(folder_id).push_bind(tag_id);
+        });
+        qb.build()
+            .execute(&mut *tx)
+            .await
+            .context("Failed to set the folder's auto-tags")?;
+    }
+
+    tx.commit()
+        .await
+        .context("Failed to commit the auto-tag transaction")?;
+    Ok(())
+}
+
+/// The auto-tags of one folder, inside a caller-owned transaction.
+///
+/// Deliberately does NOT walk ancestors: a folder seeds only its own tags. See
+/// the migration for why inheritance is left out of v1.
+pub(crate) async fn auto_tags_of(
+    conn: &mut sqlx::SqliteConnection,
+    folder_id: &str,
+) -> Result<Vec<String>> {
+    sqlx::query_scalar("SELECT tag_id FROM folder_auto_tags WHERE folder_id = ?")
+        .bind(folder_id)
+        .fetch_all(&mut *conn)
+        .await
+        .context("Failed to read the folder's auto-tags")
+}
+
+/// Seed auto-tags for every folder an import just filed assets into.
+///
+/// Grouped by folder so a 2,000-file import into three folders costs three
+/// lookups rather than two thousand. Not recorded as an undoable run: import has
+/// no undo at all today, and a half-undoable import would be worse than a
+/// consistently un-undoable one.
+async fn seed_import_auto_tags(pool: &SqlitePool, links: &[FolderLink]) -> Result<()> {
+    if links.is_empty() {
+        return Ok(());
+    }
+    let mut by_folder: HashMap<&str, Vec<String>> = HashMap::new();
+    for link in links {
+        by_folder
+            .entry(link.folder_id.as_str())
+            .or_default()
+            .push(link.asset_id.clone());
+    }
+
+    let mut tx = pool
+        .begin()
+        .await
+        .context("Failed to begin the auto-tag transaction")?;
+    for (folder_id, asset_ids) in by_folder {
+        for tag_id in auto_tags_of(&mut tx, folder_id).await? {
+            crate::tags::assign_tag_in(&mut tx, &tag_id, &asset_ids).await?;
+        }
+    }
+    tx.commit()
+        .await
+        .context("Failed to commit the auto-tag transaction")?;
+    Ok(())
+}
+
+/// Every asset currently in a folder. Backs the explicit "apply to what's
+/// already here" one-off, which is the only retroactive path.
+#[instrument(skip(pool))]
+pub async fn folder_member_ids(pool: &SqlitePool, folder_id: &str) -> Result<Vec<String>> {
+    sqlx::query_scalar("SELECT asset_id FROM assets_folders WHERE folder_id = ?")
+        .bind(folder_id)
+        .fetch_all(pool)
+        .await
+        .context("Failed to read the folder's members")
+}
+
 /// Reindex assets whose folder membership just changed. A tiny shared wrapper so
 /// the three membership mutations don't each repeat the non-fatal boilerplate.
 async fn reindex_membership(pool: &SqlitePool, asset_ids: &[String]) {
@@ -3457,6 +3564,17 @@ pub async fn import_assets(
     if let Err(e) = persist_import(&pool, &staged_assets, &folders, &links).await {
         cleanup_orphans(&library_root, &staged_assets).await;
         return Err(e);
+    }
+
+    // Folders seed their auto-tags onto what just landed in them. Import writes
+    // membership rows directly rather than through `add_assets_to_folder_in`, so
+    // this is the second (and only other) place membership is created.
+    //
+    // Non-fatal, and deliberately AFTER the point of no return: the assets are
+    // on disk and in the database, and failing to tag them is not a reason to
+    // undo an import the user can already see.
+    if let Err(e) = seed_import_auto_tags(&pool, &links).await {
+        warn!(error = %e, "Auto-tagging after import failed (non-fatal)");
     }
 
     // Index the new assets AND the deduped ones — a duplicate wasn't copied but

@@ -632,6 +632,11 @@ impl Op {
                         asset_ids: gained,
                     });
                 }
+                // Seeded on ARRIVAL, for everything in the operation rather than
+                // only what gained membership: "I dragged these here, they
+                // should pick up the folder's tags" holds whether or not one of
+                // them happened to already be filed here.
+                inverses.extend(seed_auto_tags(&mut *conn, folder_id, asset_ids).await?);
             }
 
             Op::RemoveFromFolder { folder_id } => {
@@ -652,6 +657,7 @@ impl Op {
                 for folder_id in folder_ids {
                     crate::assets::add_assets_to_folder_in(&mut *conn, folder_id, asset_ids)
                         .await?;
+                    inverses.extend(seed_auto_tags(&mut *conn, folder_id, asset_ids).await?);
                 }
                 inverses.push(Inverse::ReplaceFolderMembers {
                     asset_ids: asset_ids.to_vec(),
@@ -1130,6 +1136,41 @@ async fn write_text_values(
             .context("Failed to restore text")?;
     }
     Ok(())
+}
+
+/// Apply a folder's auto-tags to assets that just arrived in it, returning the
+/// inverse of what actually changed.
+///
+/// Called from the steps that CREATE membership, and deliberately not from
+/// `insert_folder_members` — that path restores membership during an undo, and
+/// seeding there would re-add the very tags the undo is removing. The two paths
+/// being separate functions is what makes this safe by construction rather than
+/// by remembering.
+///
+/// The delta is computed exactly as `AddTags` computes it, so an asset that
+/// already carried the tag contributes nothing and undo will not take it away.
+async fn seed_auto_tags(
+    conn: &mut sqlx::SqliteConnection,
+    folder_id: &str,
+    asset_ids: &[String],
+) -> Result<Vec<Inverse>> {
+    let mut inverses = Vec::new();
+    for tag_id in crate::assets::auto_tags_of(&mut *conn, folder_id).await? {
+        let already = assets_with_tag(&mut *conn, &tag_id, asset_ids).await?;
+        let gained: Vec<String> = asset_ids
+            .iter()
+            .filter(|id| !already.contains(*id))
+            .cloned()
+            .collect();
+        crate::tags::assign_tag_in(&mut *conn, &tag_id, asset_ids).await?;
+        if !gained.is_empty() {
+            inverses.push(Inverse::RemoveTag {
+                tag_id,
+                asset_ids: gained,
+            });
+        }
+    }
+    Ok(inverses)
 }
 
 /// Which of `asset_ids` still exist. Used only by undo.
@@ -2214,7 +2255,8 @@ mod exec_tests {
              creation_date TEXT NOT NULL DEFAULT '2024-01-15T08:00:00.000Z', \
              modified_date TEXT NOT NULL DEFAULT '2025-03-03T00:00:00.000Z')",
             "CREATE TABLE tags (id TEXT PRIMARY KEY, name TEXT)",
-            "CREATE TABLE folders (id TEXT PRIMARY KEY, name TEXT)",
+            "CREATE TABLE folders (id TEXT PRIMARY KEY, name TEXT, parent_id TEXT)",
+            "CREATE TABLE folder_auto_tags (folder_id TEXT, tag_id TEXT, PRIMARY KEY (folder_id, tag_id))",
             "CREATE TABLE assets_folders (folder_id TEXT, asset_id TEXT, position REAL, \
              added_at TEXT, PRIMARY KEY (folder_id, asset_id))",
             // The PK is what makes `INSERT OR IGNORE` a no-op rather than a
@@ -2229,7 +2271,7 @@ mod exec_tests {
             "INSERT INTO assets (id, filename, notes) VALUES \
              ('a1','one.png','keep me'), ('a2','two.png',NULL), ('a3','three.png',NULL)",
             "INSERT INTO tags VALUES ('t1','hero'), ('t2','draft')",
-            "INSERT INTO folders VALUES ('f1','Work'), ('f2','Archive')",
+            "INSERT INTO folders (id, name) VALUES ('f1','Work'), ('f2','Archive')",
             // a1 ALREADY carries t1 — the asset that must survive an undo intact.
             "INSERT INTO assets_tags VALUES ('a1','t1')",
             // a1 sits in f1 at a hand-arranged position, with a known added_at.
@@ -2760,6 +2802,149 @@ mod exec_tests {
             .unwrap();
         assert!(tagged_with(&pool, "t2").await.is_empty());
         assert!(latest_undoable_run(&pool).await.unwrap().is_none());
+    }
+
+    // ── Folder auto-tags ─────────────────────────────────────────────────────
+
+    async fn seed(pool: &SqlitePool, folder: &str, tag: &str) {
+        sqlx::query("INSERT INTO folder_auto_tags VALUES (?, ?)")
+            .bind(folder)
+            .bind(tag)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_folder_seeds_its_tags_onto_arriving_assets() {
+        let pool = db().await;
+        seed(&pool, "f2", "t2").await;
+
+        let a = action(
+            &pool,
+            vec![Op::AddToFolder {
+                folder_id: "f2".into(),
+            }],
+        )
+        .await;
+        run_action(&pool, &a.id, &ids(&["a1", "a2"])).await.unwrap();
+        assert_eq!(tagged_with(&pool, "t2").await, ids(&["a1", "a2"]));
+    }
+
+    /// The one that would silently break: undo removes the membership AND the
+    /// tags that membership caused. An inverse covering only the folder link
+    /// would leave the tags stranded.
+    #[tokio::test]
+    async fn undo_removes_the_tags_the_folder_seeded() {
+        let pool = db().await;
+        seed(&pool, "f2", "t2").await;
+
+        let a = action(
+            &pool,
+            vec![Op::AddToFolder {
+                folder_id: "f2".into(),
+            }],
+        )
+        .await;
+        let summary = run_action(&pool, &a.id, &ids(&["a1", "a2"])).await.unwrap();
+
+        undo_run(&pool, summary.run_id.as_deref().unwrap()).await.unwrap();
+        assert!(members_of(&pool, "f2").await.is_empty());
+        assert!(tagged_with(&pool, "t2").await.is_empty(), "seeded tags survived the undo");
+    }
+
+    /// An asset that already carried the tag keeps it after an undo — the seed
+    /// delta is computed exactly like `AddTags`, so undo can't take away
+    /// something the folder didn't give.
+    #[tokio::test]
+    async fn undo_leaves_tags_the_asset_already_had() {
+        let pool = db().await;
+        seed(&pool, "f2", "t1").await; // a1 already carries t1
+
+        let a = action(
+            &pool,
+            vec![Op::AddToFolder {
+                folder_id: "f2".into(),
+            }],
+        )
+        .await;
+        let summary = run_action(&pool, &a.id, &ids(&["a1", "a2"])).await.unwrap();
+        assert_eq!(tagged_with(&pool, "t1").await, ids(&["a1", "a2"]));
+
+        undo_run(&pool, summary.run_id.as_deref().unwrap()).await.unwrap();
+        assert_eq!(tagged_with(&pool, "t1").await, ids(&["a1"]));
+    }
+
+    /// Leaving a folder does NOT take the tag back: by then it's the user's
+    /// data, and auto-removal would delete work someone may rely on.
+    #[tokio::test]
+    async fn leaving_a_folder_keeps_the_seeded_tags() {
+        let pool = db().await;
+        seed(&pool, "f2", "t2").await;
+
+        let add = action(
+            &pool,
+            vec![Op::AddToFolder {
+                folder_id: "f2".into(),
+            }],
+        )
+        .await;
+        run_action(&pool, &add.id, &ids(&["a1"])).await.unwrap();
+
+        let remove = action(
+            &pool,
+            vec![Op::RemoveFromFolder {
+                folder_id: "f2".into(),
+            }],
+        )
+        .await;
+        run_action(&pool, &remove.id, &ids(&["a1"])).await.unwrap();
+
+        assert!(members_of(&pool, "f2").await.is_empty());
+        assert_eq!(tagged_with(&pool, "t2").await, ids(&["a1"]));
+    }
+
+    /// `SetFolders` creates membership too, so it seeds as well — and seeds from
+    /// every target, not just the first.
+    #[tokio::test]
+    async fn set_folders_seeds_from_every_target() {
+        let pool = db().await;
+        seed(&pool, "f1", "t1").await;
+        seed(&pool, "f2", "t2").await;
+
+        let a = action(
+            &pool,
+            vec![Op::SetFolders {
+                folder_ids: ids(&["f1", "f2"]),
+            }],
+        )
+        .await;
+        run_action(&pool, &a.id, &ids(&["a2"])).await.unwrap();
+
+        assert!(tagged_with(&pool, "t1").await.contains(&"a2".to_string()));
+        assert!(tagged_with(&pool, "t2").await.contains(&"a2".to_string()));
+    }
+
+    /// A folder seeds only its OWN tags. No inheritance in v1 — see the
+    /// migration for why. This test is the guard against it arriving by accident.
+    #[tokio::test]
+    async fn a_subfolder_does_not_inherit_its_parents_tags() {
+        let pool = db().await;
+        sqlx::query("INSERT INTO folders (id, name, parent_id) VALUES ('f3', 'Child', 'f1')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        seed(&pool, "f1", "t1").await;
+
+        let a = action(
+            &pool,
+            vec![Op::AddToFolder {
+                folder_id: "f3".into(),
+            }],
+        )
+        .await;
+        run_action(&pool, &a.id, &ids(&["a2"])).await.unwrap();
+        assert!(!tagged_with(&pool, "t1").await.contains(&"a2".to_string()));
     }
 
     // ── Conditions ───────────────────────────────────────────────────────────

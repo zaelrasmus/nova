@@ -1331,3 +1331,77 @@ pub async fn undo_latest_run(
         .inspect_err(|e| tracing::error!(error = %e, "undo_latest_run failed"))
         .map_err(AppError::from)
 }
+
+// ── Folder auto-tags ──────────────────────────────────────────────────────────
+
+#[instrument(skip_all)]
+#[tauri::command]
+pub async fn fetch_folder_auto_tags(
+    folder_id: String,
+    state: tauri::State<'_, DbState>,
+) -> Result<Vec<String>, AppError> {
+    let pool = state.acquire_pool().await?;
+    assets::fetch_folder_auto_tags(&pool, &folder_id)
+        .await
+        .inspect_err(|e| tracing::error!(error = %e, "fetch_folder_auto_tags failed"))
+        .map_err(AppError::from)
+}
+
+#[instrument(skip_all, fields(count = tag_ids.len()))]
+#[tauri::command]
+pub async fn set_folder_auto_tags(
+    folder_id: String,
+    tag_ids: Vec<String>,
+    state: tauri::State<'_, DbState>,
+) -> Result<(), AppError> {
+    let pool = state.acquire_pool().await?;
+    assets::set_folder_auto_tags(&pool, &folder_id, &tag_ids)
+        .await
+        .inspect_err(|e| tracing::error!(error = %e, "set_folder_auto_tags failed"))
+        .map_err(AppError::from)
+}
+
+/// Apply a folder's auto-tags to what's ALREADY in it.
+///
+/// The only retroactive path, and it's explicit on purpose: turning auto-tags on
+/// must not silently rewrite thousands of assets that were filed before the rule
+/// existed. Routed through the action pipeline so the backfill is undoable like
+/// any other bulk change.
+#[instrument(skip_all)]
+#[tauri::command]
+pub async fn apply_folder_auto_tags(
+    folder_id: String,
+    state: tauri::State<'_, DbState>,
+) -> Result<actions::RunSummary, AppError> {
+    let pool = state.acquire_pool().await?;
+    let tag_ids = assets::fetch_folder_auto_tags(&pool, &folder_id)
+        .await
+        .map_err(AppError::from)?;
+    let asset_ids = assets::folder_member_ids(&pool, &folder_id)
+        .await
+        .map_err(AppError::from)?;
+
+    if tag_ids.is_empty() || asset_ids.is_empty() {
+        return Ok(actions::RunSummary {
+            run_id: None,
+            name: "Auto-tag folder".into(),
+            asset_count: 0,
+            is_undoable: false,
+        });
+    }
+
+    actions::run_steps(
+        &pool,
+        actions::RunSource::Direct {
+            name: "Auto-tag folder",
+        },
+        &[actions::Step {
+            op: actions::Op::AddTags { tag_ids },
+            when: None,
+        }],
+        &asset_ids,
+    )
+    .await
+    .inspect_err(|e| tracing::error!(error = %e, "apply_folder_auto_tags failed"))
+    .map_err(AppError::from)
+}

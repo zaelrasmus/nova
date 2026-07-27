@@ -413,3 +413,32 @@ CREATE TABLE IF NOT EXISTS action_undo (
     payload_json TEXT NOT NULL,
     PRIMARY KEY (run_id, seq)
 ) WITHOUT ROWID;
+
+-- ── Folder auto-tags ─────────────────────────────────────────────────────────
+--
+-- Tags a folder SEEDS onto assets that arrive in it.
+--
+-- A plain relation, not a JSON document — unlike `rule_sets.query_json` and
+-- `quick_actions.steps_json`, which are LANGUAGES that serde owns and tests pin.
+-- This is a set of ids with no grammar, so it's a table, and the cascades below
+-- do the work a validation layer would otherwise have to: deleting a tag removes
+-- it from every folder that seeded it, so a dangling reference is unrepresentable
+-- rather than merely checked for.
+--
+-- Three semantics worth stating where the data lives:
+--   * SEEDS, never owns. An asset that leaves the folder KEEPS the tags — by
+--     then they're the user's data, and auto-removal would silently delete work.
+--   * No inheritance. A subfolder does not seed its parent's tags. Collecting
+--     four tags from ancestors you can't see is the kind of magic that erodes
+--     trust in the tag list; inheritance can be added later without breaking a
+--     library, and could not be removed later.
+--   * Not retroactive. Turning auto-tags on doesn't rewrite what's already
+--     there; the inspector offers that as an explicit, undoable one-off.
+CREATE TABLE IF NOT EXISTS folder_auto_tags (
+    folder_id TEXT NOT NULL REFERENCES folders(id) ON DELETE CASCADE,
+    tag_id    TEXT NOT NULL REFERENCES tags(id)    ON DELETE CASCADE,
+    PRIMARY KEY (folder_id, tag_id)
+) WITHOUT ROWID;
+
+-- Reverse lookup, for "which folders seed this tag" in the tag manager.
+CREATE INDEX IF NOT EXISTS idx_folder_auto_tags_reverse ON folder_auto_tags (tag_id, folder_id);
