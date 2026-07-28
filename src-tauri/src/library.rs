@@ -1,3 +1,5 @@
+//! Creating a new `.library` folder. Opening an existing one lives in `db`.
+
 use crate::error::AppError;
 use anyhow::Context;
 use serde::Serialize;
@@ -23,7 +25,9 @@ pub async fn create_library(location: &str, name: &str) -> Result<PathBuf, AppEr
 
     debug!(root = ?library_root, "Starting library creation");
 
-    // All setup steps run inside this block so a single `if let Err` can rollback cleanly.
+    // Every setup step runs inside this block so one `if let Err` can roll the
+    // whole thing back — a half-built library (assets/ but no schema) would be
+    // opened happily on the next launch and fail much later, much less clearly.
     let setup_result: anyhow::Result<()> = async {
         tokio::fs::create_dir_all(library_root.join("assets"))
             .await

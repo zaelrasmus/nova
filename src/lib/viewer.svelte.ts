@@ -53,6 +53,8 @@ class Viewer {
     this.#syncSelection(true);
   }
 
+  /** Open a specific asset. A no-op if it isn't in the current view — the viewer
+   *  only ever navigates what the grid is showing. */
   openById(id: string, mode: Exclude<ViewerMode, "closed"> = "quicklook"): void {
     const i = this.list.findIndex((a) => a.id === id);
     if (i >= 0) this.open(i, mode);
@@ -69,6 +71,8 @@ class Viewer {
     this.open(i >= 0 ? i : 0, mode);
   }
 
+  /** Close the viewer. Cancels the pending selection sync — the selection is
+   *  already correct, and firing after close would be a stray write. */
   close(): void {
     this.mode = "closed";
     clearTimeout(this.#syncTimer);
@@ -76,10 +80,12 @@ class Viewer {
 
   // ── Navigation ───────────────────────────────────────────────────────────
 
+  /** Next asset in the grid's order. */
   next(): void {
     this.#step(1);
   }
 
+  /** Previous asset in the grid's order. */
   prev(): void {
     this.#step(-1);
   }

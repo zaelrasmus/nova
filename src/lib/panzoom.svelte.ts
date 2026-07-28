@@ -93,6 +93,8 @@ export class PanZoom {
     );
   }
 
+  /** Detach every listener and observer. The viewer MUST call this when closing
+   *  — the listeners live on `window`, so they outlive the element otherwise. */
   destroy(): void {
     for (const fn of this.#cleanup) fn();
     this.#cleanup = [];
@@ -144,6 +146,8 @@ export class PanZoom {
   zoomIn(): void {
     this.#zoomBy(1.25, this.#container.clientWidth / 2, this.#container.clientHeight / 2);
   }
+  /** Step zoom out about the viewport center. Inverse ratio of `zoomIn`, so the
+   *  two round-trip exactly. */
   zoomOut(): void {
     this.#zoomBy(1 / 1.25, this.#container.clientWidth / 2, this.#container.clientHeight / 2);
   }
@@ -156,6 +160,7 @@ export class PanZoom {
     return Math.min(this.#min, this.#fitScale);
   }
 
+  /** Constrain a proposed scale to [floor, max]. */
   #clampScale(s: number): number {
     return Math.min(Math.max(s, this.#floor()), this.#max);
   }
@@ -171,6 +176,15 @@ export class PanZoom {
     this.#ty = sh <= ch ? (ch - sh) / 2 : Math.min(0, Math.max(ch - sh, this.#ty));
   }
 
+  /**
+   * Commit the current transform to the DOM — the ONLY writer of the image's
+   * inline `style.transform`.
+   *
+   * This is why the viewer must never put a Svelte `style=` on that img: Svelte
+   * would rewrite the attribute on its own schedule and fight this. Use classes
+   * there instead. `pct`/`fitted` are the only state mirrored into runes, for
+   * the toolbar readout.
+   */
   #apply(): void {
     this.#clampPan();
     this.#image.style.transform = `translate3d(${this.#tx}px, ${this.#ty}px, 0) scale(${this.#scale})`;
@@ -183,6 +197,8 @@ export class PanZoom {
     this.#zoomTo(this.#clampScale(this.#scale * factor), cx, cy);
   }
 
+  /** Zoom TO an absolute scale, keeping the image point under (cx, cy) fixed —
+   *  the "zoom to cursor" primitive every other zoom entry point routes through. */
   #zoomTo(next: number, cx: number, cy: number): void {
     next = this.#clampScale(next);
     if (next === this.#scale) return;

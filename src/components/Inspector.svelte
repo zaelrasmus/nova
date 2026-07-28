@@ -1,3 +1,17 @@
+<!--
+  Inspector — the right pane. Shows and edits whatever is selected.
+
+  Four mutually exclusive modes, branched off the ONE union `selection.current`
+  so "3 assets and a folder" is unrepresentable: nothing · one asset · many
+  assets · one folder.
+
+  It RENDERS the selection and never owns it (see selection.svelte.ts), so
+  collapsing this panel can't destroy what the user picked.
+
+  Text edits are local drafts saved on a debounce, so typing never waits on IPC.
+  Bulk edits route through `run_steps`, which is what gives them undo — note
+  they're currently silent (no toast), unlike the grid's bulk actions.
+-->
 <script lang="ts">
     import { untrack } from "svelte";
     import { toast } from "svelte-sonner";

@@ -1,3 +1,24 @@
+<!--
+  The application. Nova is a single-route app, so this file is the shell that
+  composes everything else — there is no router to follow, and this is the place
+  to start reading the frontend.
+
+  LAYOUT — three resizable panes under a custom (frameless) title bar:
+    sidebar (system views · pinned · smart folders · folder tree)
+    | grid (search + toolbar + AssetGrid) | inspector.
+  There is no header bar; window controls are an overlay. See layout.svelte.ts.
+
+  OWNS, because these are app-wide and have nowhere lower to live:
+    * library lifecycle — create/open/switch, and the first-run empty state;
+    * import — the dialog and drop entry points, plus the `import-progress`
+      and `thumbnail-progress` event listeners;
+    * global keyboard shortcuts, including Ctrl+Z (undo the last run) and
+      Ctrl+Shift+1..9 (quick actions);
+    * the settings dialog.
+
+  State lives in the stores (`assetLibrary`, `selection`, `viewer`, `layout`,
+  `dropzone`), not here — this wires them together and renders the frame.
+-->
 <script lang="ts">
     import { onMount } from "svelte";
     import { invoke } from "@tauri-apps/api/core";

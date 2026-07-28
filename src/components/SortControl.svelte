@@ -1,3 +1,11 @@
+<!--
+  SortControl — the grid toolbar's sort criterion + direction.
+
+  A sort belongs to the SCOPE and is persisted there, so each place remembers how
+  you left it. Options are filtered per scope: the two scope-relative criteria
+  ("Date added to folder", "Manual") mean something precise in a folder and
+  degrade to a fallback elsewhere, so they're only offered where they're honest.
+-->
 <script lang="ts">
     import { assetLibrary, ORDER_BY_LABELS, type OrderBy } from "$lib/assets.svelte";
 

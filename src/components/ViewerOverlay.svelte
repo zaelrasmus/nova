@@ -1,3 +1,16 @@
+<!--
+  ViewerOverlay — the lightbox (QuickLook and Fullscreen), rendered above the
+  grid. Navigation state lives in `viewer.svelte.ts`; this is the presentation.
+
+  Images load in three layers, cheapest first, so something is on screen
+  immediately: ThumbHash blur → cached thumbnail → full-resolution original,
+  which fades in once decoded.
+
+  PanZoom OWNS the image's inline `style` and writes the transform imperatively
+  every frame. Never put a Svelte `style=` on that <img> — the two writers fight.
+  Use classes instead, and note it also needs `max-width: none` to escape
+  Tailwind Preflight.
+-->
 <script lang="ts">
     import { untrack } from "svelte";
     import { convertFileSrc } from "@tauri-apps/api/core";

@@ -1,3 +1,10 @@
+//! Library connection lifecycle: opening a `.library` folder's SQLite database,
+//! migrating it, and handing out the pool.
+//!
+//! Exactly one library is open at a time. Everything downstream reaches the
+//! database through `DbState::acquire*`, so "no library open" is a single error
+//! (`AppError::NoLibrary`) rather than a check scattered across commands.
+
 use crate::error::AppError;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqliteSynchronous};
 use sqlx::SqlitePool;
@@ -8,46 +15,44 @@ use std::time::Duration;
 use tokio::sync::RwLock;
 use tracing::{debug, info, instrument, warn};
 
+/// A pool plus the library root, so callers that touch files (`assets/`,
+/// `thumbnails/`) don't have to resolve the path separately.
 #[derive(Clone)]
 pub struct LibraryHandle {
     pub pool: SqlitePool,
     pub root: PathBuf,
 }
 
+/// Process-wide state: the open library plus the two concurrency guards that
+/// keep background work from trampling foreground work.
 pub struct DbState {
     inner: Arc<RwLock<Option<LibraryHandle>>>,
-    /// Guards the thumbnail/colour pipeline. A reader/writer lock rather than a
-    /// plain mutex, because the two kinds of run are not peers:
+
+    /// Guards the thumbnail/colour pipeline. A read/write lock, not a mutex,
+    /// because the two kinds of run aren't peers:
+    ///   * SHARED — on-view generation (`generate_thumbnails_for_ids`). These
+    ///     overlap by design (the grid fires one per visible window as you
+    ///     scroll) and only fill rows where `thumb_hash IS NULL`, so they can't
+    ///     conflict with each other.
+    ///   * EXCLUSIVE — `rebuild_thumbnails` / `analyze_colors`, which delete the
+    ///     whole `thumbnails/` dir and NULL every `thumb_hash`. An on-view batch
+    ///     running through that would write into a directory being re-created,
+    ///     and both would update the same rows.
     ///
-    ///   * on-view generation (`generate_thumbnails_for_ids`) takes the SHARED
-    ///     side. Many of these overlap by design — the grid fires one per
-    ///     visible window as you scroll — and they only ever fill in rows where
-    ///     `thumb_hash IS NULL`, so they cannot conflict with each other.
-    ///   * `rebuild_thumbnails` and `analyze_colors` take the EXCLUSIVE side.
-    ///     A rebuild deletes the entire `thumbnails/` directory and NULLs every
-    ///     `thumb_hash`; an on-view batch running through that would be writing
-    ///     files into a directory being removed and re-created, and both would
-    ///     be updating the same rows.
-    ///
-    /// Both sides use the `try_` form, so neither ever blocks a command: a
-    /// rejected exclusive request means "already running" and a rejected shared
-    /// request means "a rebuild is regenerating everything anyway".
+    /// Both sides use `try_`, so neither blocks a command: a rejected exclusive
+    /// means "already running", a rejected shared means "a rebuild is
+    /// regenerating everything anyway".
     pub thumb_gen: Arc<RwLock<()>>,
 
-    /// Bumped by every `stream_manifest` call; each request keeps the value it
-    /// got and stops as soon as it no longer matches.
+    /// Backend half of "only the newest manifest matters". Bumped by every
+    /// `stream_manifest`; each request keeps the value it got and bails once it
+    /// no longer matches.
     ///
-    /// The frontend already discards superseded RESULTS via its own load token,
-    /// but that only stops them being rendered — the query kept running to
-    /// completion. Clicking through five folders in a 100k library meant five
-    /// full manifest scans in flight against a ten-connection pool, four of
-    /// which nobody would ever look at. This is the backend half of the same
-    /// idea, and it is deliberately the same shape so the two stay legible
-    /// together.
-    ///
-    /// A counter rather than a `CancellationToken` because the rule really is
-    /// "only the newest matters" — there is no per-request handle to hold, and
-    /// nothing else needs to trigger the cancel.
+    /// The frontend's load token already discards superseded RESULTS, but the
+    /// query kept running — clicking through five folders in a 100k library put
+    /// five full scans on a ten-connection pool, four of them unwanted. A plain
+    /// counter (not a `CancellationToken`) because there is no per-request
+    /// handle to hold and nothing else ever triggers the cancel.
     pub manifest_gen: Arc<AtomicU64>,
 }
 
@@ -60,7 +65,7 @@ impl DbState {
         }
     }
 
-    // Full handle (pool + root path). Errors if no library is open
+    /// Full handle (pool + root path). Errors if no library is open.
     pub async fn acquire(&self) -> Result<LibraryHandle, AppError> {
         let lock = self.inner.read().await;
         lock.as_ref().cloned().ok_or(AppError::NoLibrary)
@@ -84,6 +89,12 @@ impl DbState {
 
         debug!(db_path = ?db_path, "Opening SQLite connection pool");
 
+        // Tuned for the 100k-asset target: WAL so manifest reads never block on
+        // an import writing, and generous cache/mmap so repeated scans of a big
+        // library stay off the disk. `Normal` synchronous is the standard WAL
+        // trade — a crash can cost the last transaction, not the database.
+        // Foreign keys ON is load-bearing: the schema leans on ON DELETE CASCADE
+        // to make dangling folder/tag rows unrepresentable.
         let options = SqliteConnectOptions::new()
             .filename(&db_path)
             .journal_mode(SqliteJournalMode::Wal)
@@ -106,13 +117,11 @@ impl DbState {
 
         let new_pool = SqlitePool::connect_with(options).await?;
 
-        // Run migrations on connect.
-        //
-        // A version failure is called out separately from every other database
-        // error because it is the one the user can actually act on — the answer
-        // is "get the matching build of Nova", and the generic "try restarting"
-        // would loop them forever on a library that will never open. The pool is
-        // closed first so a failed connect leaves no handle behind.
+        // Migrate on connect. A version failure gets its own error variant
+        // because it's the one the user can act on — "get the matching build of
+        // Nova", where the generic "try restarting" would loop them forever on a
+        // library that will never open. Pool is closed first so a failed connect
+        // leaves no handle behind.
         if let Err(e) = sqlx::migrate!().run(&new_pool).await {
             tracing::error!(error = %e, "Failed to run migrations on connect");
             new_pool.close().await;

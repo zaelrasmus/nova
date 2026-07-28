@@ -1,3 +1,6 @@
+//! Filesystem primitives for import: content hashing (the dedup identity) and
+//! the directory walks that turn dropped paths into folder rows + file lists.
+
 use anyhow::{Context, Result};
 use std::io::Read;
 use std::path::{Path, PathBuf};

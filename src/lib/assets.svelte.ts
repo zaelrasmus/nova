@@ -1,4 +1,34 @@
-// Streams the manifest via Channel. Caches Heavy rows by id with batched loading + eviction.
+/**
+ * `assetLibrary` — the frontend's single source of truth for what the library
+ * contains and what the current view shows. Nearly every component reads from
+ * this store; almost none of them call `invoke` themselves.
+ *
+ * ## The two-tier read model
+ *
+ * The whole 100k-asset story lives here. A scope's assets arrive as LIGHT rows
+ * (`manifest`) streamed over a Tauri `Channel` — just enough to lay out and
+ * place a card. HEAVY rows (`heavy`) are hydrated per visible window and evicted
+ * past `MAX_HEAVY`, so memory tracks the viewport, not the library.
+ *
+ * ## The spine, mirrored from Rust
+ *
+ * `scope` (a place) + `filters` (an ephemeral lens) + `sort` compile to one
+ * `ManifestQuery`. Changing any of them reloads the manifest. See `assets.rs`.
+ *
+ * ## Read `displayed`, not `manifest`
+ *
+ * `displayed` is `manifest` narrowed by the instant name filter — the frontend
+ * half of the search hybrid, where a short name-only query is answered in memory
+ * with no round trip. The grid, selection and viewer must all agree on the
+ * visible set, so they all read `displayed`.
+ *
+ * ## Concurrency
+ *
+ * Two independent tokens guard the caches, and conflating them is a real bug:
+ * `#loadToken` invalidates an in-flight manifest stream (scope/sort change),
+ * while `#libraryToken` invalidates the heavy/thumbnail caches (library switch
+ * only). Rows are keyed by id, so re-sorting must NOT discard hydration work.
+ */
 
 import { invoke, Channel } from "@tauri-apps/api/core";
 import { SvelteMap } from "svelte/reactivity";
@@ -724,7 +754,9 @@ export function thumbHashUrl(hash: string | null): string | null {
   return url;
 }
 
-// Cap on hydrated heavy rows kept in memory. A few sccreenfuls of slacks.
+// Cap on hydrated heavy rows kept in memory — a few screenfuls' worth. Past
+// this, the rows furthest from the viewport are evicted; they re-hydrate from
+// SQLite in a single batched call if the user scrolls back.
 const MAX_HEAVY = 600;
 
 /**
@@ -742,8 +774,11 @@ const MAX_HEAVY = 600;
 const wire = <T>(value: T): T => $state.snapshot(value) as T;
 
 class AssetLibrary {
-  /** Layout source of truth: light rows for every asset, sort order from Rust. */
-
+  /**
+   * Layout source of truth: light rows for every asset in the scope, already in
+   * the order Rust sorted them. Components should read `displayed` instead —
+   * this one isn't narrowed by the instant name filter.
+   */
   manifest = $state<AssetLightRow[]>([]);
   isLoading = $state(false);
   error = $state<string | null>(null);

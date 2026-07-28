@@ -81,6 +81,7 @@ export class RangeSelection {
     return this.#ids.has(id);
   }
 
+  /** Deselect everything and forget the range anchor. */
   clear(): void {
     this.#ids.clear();
     this.#anchor = null;
@@ -138,6 +139,7 @@ export class RangeSelection {
     this.replace(orderedIds, orderedIds[0] ?? null);
   }
 
+  /** Overwrite the selection wholesale and set the range anchor. */
   replace(ids: readonly string[], anchor: string | null): void {
     this.#ids.clear();
     for (const id of ids) this.#ids.add(id);
@@ -145,6 +147,11 @@ export class RangeSelection {
     this.#pendingCollapse = null;
   }
 
+  /**
+   * The click-semantics core: plain click replaces, Ctrl toggles, Shift extends
+   * from the anchor (and Ctrl+Shift adds the range). One private method so the
+   * three modifier combinations can't drift apart between entry points.
+   */
   #apply(orderedIds: readonly string[], index: number, mods: ClickModifiers): void {
     const id = orderedIds[index];
 
@@ -217,6 +224,8 @@ class SelectionStore {
     return this.assets.has(id);
   }
 
+  /** Deselect everything — assets AND any folder. Used on library switch, where
+   *  ids from the old library would otherwise linger. */
   clear(): void {
     this.clearAssets();
     this.#folder = null;
@@ -249,21 +258,30 @@ class SelectionStore {
   }
 
   // ── Asset conveniences (the grid's entry points) ──────────────────────────
+  //
+  // Thin delegates to `assets`, each of which also drops the folder selection:
+  // selecting an asset means the asset is now the inspected object. `clickAsset`
+  // is the exception — it only resolves what `pointerDownAsset` deferred, so a
+  // folder was already cleared by then.
 
+  /** Press on the asset at `index`. See `SelectionModel.pointerDown`. */
   pointerDownAsset(orderedIds: readonly string[], index: number, mods: ClickModifiers): void {
     this.#folder = null;
     this.assets.pointerDown(orderedIds, index, mods);
   }
 
+  /** Release on an asset without dragging — collapses a deferred multi-select. */
   clickAsset(id: string): void {
     this.assets.click(id);
   }
 
+  /** Select exactly one asset (keyboard activation, reveal-in-grid). */
   selectOnlyAsset(id: string): void {
     this.#folder = null;
     this.assets.selectOnly(id);
   }
 
+  /** Ctrl+A. The caller passes the VISIBLE list, so this means "all shown". */
   selectAllAssets(orderedIds: readonly string[]): void {
     this.#folder = null;
     this.assets.selectAll(orderedIds);

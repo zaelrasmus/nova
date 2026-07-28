@@ -1,3 +1,8 @@
+<!--
+  PinnedFolders — the sidebar's curated shortlist, mixing real folders and smart
+  folders in one user-defined order. Renders in both the rail and the expanded
+  sidebar from a single component; only the row template differs.
+-->
 <script lang="ts">
     import { Folder as FolderIcon, Sparkles } from "@lucide/svelte";
     import {

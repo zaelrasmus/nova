@@ -1,3 +1,18 @@
+<!--
+  FilterBar — the flat filter dimensions (type · shape · date · size · colour ·
+  tags), each of which narrows the current scope.
+
+  These are a LENS, never a place: they compose with wherever you already are,
+  and they are not persisted across restarts (a filter that survives a restart is
+  the classic "my library is empty, the app is broken" bug). They DO survive
+  switching folders within a session, which is why the clear affordance stays
+  visible.
+
+  Everything set here is compiled to a flat rule tree by `toRuleTree` — the same
+  language a smart folder uses — so a saved filter and a smart folder are the
+  same document underneath. A saved filter too complex for these controls to draw
+  is applied via `#rulesOverride` instead.
+-->
 <script lang="ts">
     import {
         assetLibrary,

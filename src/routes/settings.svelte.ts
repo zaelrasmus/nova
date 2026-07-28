@@ -1,3 +1,16 @@
+/**
+ * Persisted app state: user preferences, and which library is open.
+ *
+ * Two stores, both backed by `settings.json` via tauri-plugin-store, and both
+ * APP-level rather than library-level — they follow the user, not the `.library`
+ * folder. (Anything belonging to a library — sorts, filters, pins — lives in
+ * that library's own database instead.)
+ *
+ * Preferences merge over `DEFAULT_PREFERENCES` on load, so adding a field can
+ * never break an existing installation: an older settings.json simply picks up
+ * the new default.
+ */
+
 import { LazyStore } from "@tauri-apps/plugin-store";
 import { invoke } from "@tauri-apps/api/core";
 

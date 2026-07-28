@@ -15,12 +15,11 @@ use tracing::debug;
 /// Target for the SHORTER edge of a generated thumbnail (px). Pinning the short
 /// edge (not the long one) keeps every masonry card crisp regardless of aspect.
 const THUMB_SHORT_EDGE: u32 = 320;
-/// Hard cap on the LONGER edge (px) — a pure out-of-memory / disk guardrail for
+/// Hard cap on the LONGER edge (px) — an out-of-memory/disk guardrail for
 /// pathological aspect ratios, NOT a quality knob. At 8192 the short edge keeps
-/// its full THUMB_SHORT_EDGE for any ratio up to ~25.6:1 (covers webtoons /
-/// tall art); only beyond that does the short edge start to shrink. Note that
-/// very tall sources whose short edge is already <= THUMB_SHORT_EDGE never reach
-/// here at all — they hit the skip branch and show the original.
+/// its full `THUMB_SHORT_EDGE` up to ~25.6:1 (covers webtoons/tall art); only
+/// past that does it start to shrink. Very tall sources whose short edge is
+/// already small never reach here — they take the skip branch below.
 const THUMB_LONG_MAX: u32 = 8192;
 /// ThumbHash expects a small input; cap the edge used to compute it
 const HASH_MAX: u32 = 100;
@@ -93,7 +92,8 @@ impl ThumbConfig {
 pub struct ThumbOutput {
     pub thumb_hash: String,
     pub thumb_config: String,
-    /// False when the source was already small enough. Its unnecesary to generate a thumbnail in this case.
+    /// False when the source was already small enough that a thumbnail would be
+    /// no smaller — the grid shows the original instead.
     pub wrote_file: bool,
     /// Dominant colors, extracted from the same decode. Riding along here is the
     /// whole reason color analysis is affordable: a separate pass would have to
@@ -130,17 +130,15 @@ pub fn generate(src: &Path, dest: &Path, config: ThumbConfig) -> Result<ThumbOut
 
     let encode_start = std::time::Instant::now();
 
-    // Downscale the full-resolution source exactly ONCE. The encode input, the
-    // ThumbHash source, and the flat-graphic check are all derived from this one
-    // thumb — not from independent resizes of the (up to 12MP) original, which was
-    // the import-speed regression. Triangle is ~3x faster than Lanczos3 and
-    // visually indistinguishable at thumbnail size. (Switch to FilterType::CatmullRom
-    // for slightly sharper edges at a small cost.)
+    // Downscale the full-resolution source exactly ONCE: the encode input, the
+    // ThumbHash source and the flat-graphic check all derive from this one thumb.
+    // Independent resizes of the (up to 12MP) original were the import-speed
+    // regression. Triangle is ~3x faster than Lanczos3 and indistinguishable at
+    // this size (CatmullRom for sharper edges, at a cost).
     //
-    // Pin the SHORT edge to THUMB_SHORT_EDGE, but never let the LONG edge exceed
-    // THUMB_LONG_MAX. Whichever constraint is tighter wins: for normal images the
-    // short-edge rule dominates (matching Eagle); the long cap only clamps extreme
-    // aspect ratios (very tall comics, panoramas).
+    // Pin the SHORT edge, but never let the LONG edge exceed THUMB_LONG_MAX;
+    // tighter constraint wins. Normally the short-edge rule dominates (matching
+    // Eagle) and the long cap only clamps panoramas and tall comics.
     let long = w.max(h);
     let scale =
         (THUMB_SHORT_EDGE as f32 / short as f32).min(THUMB_LONG_MAX as f32 / long as f32);

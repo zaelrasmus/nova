@@ -1,3 +1,11 @@
+<!--
+  Settings › Display. Thumbnail encoding and grid presentation.
+
+  Changing quality only affects NEW thumbnails, so this section also owns the
+  "rebuild all" action — the only way to apply a changed setting to a library
+  that already has them. A rebuild wipes `thumbnails/` and re-generates, holding
+  the exclusive side of the backend's `thumb_gen` lock.
+-->
 <script lang="ts">
     import { settings } from "../../routes/settings.svelte";
     import { assetLibrary } from "$lib/assets.svelte";

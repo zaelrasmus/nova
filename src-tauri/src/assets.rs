@@ -1,3 +1,23 @@
+//! Assets, folders and the read path — the core of the library.
+//!
+//! Two things here are worth understanding before anything else:
+//!
+//! **The spine.** A view is always `scope + filters + sort`, bundled as one
+//! [`ManifestQuery`] and compiled by [`build_manifest_query`] into ONE statement.
+//!   * *scope* is a PLACE (all / a folder / uncategorized / a smart folder / a
+//!     group / the trash). It decides which rows exist, and owns a persisted sort.
+//!   * *filters* ([`FilterSet`]) are an ephemeral LENS that narrows a scope.
+//!   * Because both compile to predicates in the same WHERE, "smart folder AND
+//!     saved filter" composes for free.
+//!
+//! **Files vs. metadata.** Bytes live at `assets/{uuid}.{ext}` and are never
+//! moved or renamed after import. `assets.filename` is pure metadata, so renaming
+//! an asset touches no bytes — but it must stay filesystem-legal, because
+//! outbound drag hardlinks under that name.
+//!
+//! The read path streams LIGHT rows (id, dimensions, thumb hash, filename) to the
+//! frontend over a Tauri `Channel`; heavy metadata is hydrated on demand.
+
 use crate::extract;
 use crate::fs;
 use crate::thumbnail;
@@ -20,6 +40,9 @@ use std::{
 use tokio::sync::Semaphore;
 use tracing::{debug, info, instrument, warn};
 
+/// Broad media class, derived from the file EXTENSION at import (see
+/// `detect_asset_type`) and stored as TEXT. `Unknown` still imports — an
+/// unrecognised file is kept and shown without a preview, never dropped.
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Type)]
 #[sqlx(rename_all = "lowercase")]
 #[serde(rename_all = "lowercase")]
@@ -350,6 +373,12 @@ const DEFAULT_SORT: Sort = Sort {
     is_ascending: false,
 };
 
+/// The LIGHT row: the only per-asset data streamed for a whole scope.
+///
+/// Deliberately minimal — just enough to lay the grid out and paint a
+/// placeholder. At 100k assets every extra field is 100k copies across the IPC
+/// boundary, so anything not needed to render a card waits for
+/// [`fetch_assets_by_ids`] to hydrate the visible window.
 #[derive(Serialize, Clone, Debug, FromRow)]
 pub struct AssetLightRow {
     pub id: String,
@@ -364,6 +393,12 @@ pub struct AssetLightRow {
     pub filename: String,
 }
 
+/// The HEAVY row: everything about one asset, hydrated only for the visible
+/// window (and used as the staging record during import).
+///
+/// A few fields are not columns — `source_path` and `thumb_path` are runtime
+/// only, and `content_hash` is `#[serde(skip)]` so a fingerprint of every file
+/// never reaches the webview.
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, FromRow)]
 pub struct AssetMetadata {
     pub id: String,
@@ -483,6 +518,12 @@ struct FolderLink {
     position: f64,
 }
 
+/// A real folder in the sidebar tree. Membership is an explicit list
+/// (`assets_folders`), unlike a smart folder, whose membership is a query.
+///
+/// Note the tree is flat here: `parent_id` + `position` describe it, and the
+/// frontend assembles the hierarchy. One `fetch_folders` call returns every
+/// folder, so the sidebar never issues a query per level.
 #[derive(Serialize, Deserialize, Debug, Clone, FromRow)]
 pub struct Folder {
     pub id: String,
@@ -539,10 +580,13 @@ pub struct ImportRequest {
     pub include_roots: bool,
 }
 
+/// What an import produced, reported back so the UI can update without a reload.
 #[derive(Serialize, Deserialize, Debug)]
 pub struct ImportResult {
     pub folders: Vec<Folder>,
     pub assets: Vec<AssetMetadata>,
+    /// Source directory path → the folder id created for it, so the frontend can
+    /// reveal where a dropped tree landed.
     pub path_links: HashMap<String, String>,
     /// Files skipped because the library already held their exact bytes. Worth
     /// reporting rather than hiding: "imported 3 of 200" with no explanation
@@ -578,6 +622,8 @@ pub struct ImportProgress {
     pub message: String,
 }
 
+/// How import reports progress, injected rather than hardcoded so the pipeline
+/// has no dependency on Tauri — the app emits an event, tests use a no-op.
 pub trait ProgressReporter: Send + Sync {
     fn report(&self, progress: ImportProgress);
 }
@@ -761,7 +807,7 @@ fn build_manifest_query<'a>(
         }
     }
 
-    // 3. Sort. The `a.id` tie-break runs in the SAME direction as the sort column
+    // 4. Sort. The `a.id` tie-break runs in the SAME direction as the sort column
     //    so the composite (col, id) indexes stay usable scanning either way.
     let dir = if sort.is_ascending { " ASC" } else { " DESC" };
 
@@ -2059,6 +2105,8 @@ pub async fn update_asset(
         .ok_or_else(|| crate::error::rejected("Asset not found"))
 }
 
+/// Create an empty folder, appended after its siblings. Returns the full row so
+/// the sidebar can insert it without refetching the whole tree.
 #[instrument(skip(pool))]
 pub async fn create_folder(
     pool: &SqlitePool,
@@ -2125,6 +2173,9 @@ pub struct SelectionSummary {
     pub total_bytes: i64,
 }
 
+/// Count and total size of a selection. Exact rather than estimated, and
+/// computed in SQL rather than summed from the manifest, because the frontend
+/// only holds light rows — `file_size` isn't among them.
 #[instrument(skip(pool, ids), fields(ids = ids.len()))]
 pub async fn selection_summary(pool: &SqlitePool, ids: &[String]) -> Result<SelectionSummary> {
     let ids = unique_ids(ids);
@@ -2249,6 +2300,9 @@ pub async fn folder_stats(pool: &SqlitePool, folder_id: &str) -> Result<FolderSt
     })
 }
 
+/// Apply a partial edit to a folder. Every field of [`FolderPatch`] is optional
+/// and `None` means "leave alone", so the inspector can save one field without
+/// read-modify-writing the whole row (and without racing another editor).
 #[instrument(skip(pool))]
 pub async fn update_folder(pool: &SqlitePool, id: &str, patch: FolderPatch) -> Result<()> {
     let name = match patch.name {
@@ -3207,6 +3261,13 @@ pub(crate) async fn remove_assets_from_folder_in(
 
 
 #[instrument(skip(pool, ids), fields(count = ids.len()))]
+/// Hydrate HEAVY metadata for a window of ids — the second half of the read
+/// path, called for what's actually on screen.
+///
+/// The manifest streams light rows (id, dimensions, thumb hash, filename) for
+/// every asset in a scope; this fills in the rest only for the visible window,
+/// which is what keeps a 100k-asset scope affordable. Also resolves the two
+/// stored-relative paths into absolute ones the webview can load.
 pub async fn fetch_assets_by_ids(
     pool: &SqlitePool,
     root: &Path,
@@ -3252,6 +3313,13 @@ pub async fn fetch_assets_by_ids(
     Ok(rows)
 }
 
+/// Write a staged import to the database in ONE transaction: folders, then
+/// assets, then memberships. Ordering is load-bearing — foreign keys are checked
+/// immediately, so each stage must already exist when the next references it.
+///
+/// Everything is batched into multi-row INSERTs. At 100k assets a statement per
+/// row is a round trip per row, which is the difference between an import that
+/// takes seconds and one that takes minutes.
 #[instrument(skip(pool, assets, folders, links),
     fields(assets = assets.len(), folders = folders.len(), links = links.len()))]
 async fn persist_import(
@@ -3339,7 +3407,8 @@ async fn persist_import(
             .context("Failed to batch insert asset chunk")?;
     }
 
-    // 3. Menbership links last - each references a folder and asset inserted above
+    // 3. Membership links last — each references a folder and an asset inserted
+    //    above.
     //
     // OR IGNORE because dedup can route a link to an EXISTING asset that is
     // already a member of that folder — re-importing a folder you've imported
@@ -3364,9 +3433,8 @@ async fn persist_import(
         .await
         .context("Failed to commit asset transaction")?;
 
-    // Fold the WAL back into the main DB after a large write so the -wal file
-    // doesnt grow too large. Non-fatal: The data is already comitted.
-
+    // Fold the WAL back into the main DB after a large write, so the -wal file
+    // doesn't keep growing. Non-fatal: the data is already committed.
     if let Err(e) = sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
         .execute(pool)
         .await
@@ -3384,6 +3452,15 @@ async fn persist_import(
     Ok(())
 }
 
+/// Stage one source file into an `AssetMetadata` row — the per-file half of
+/// import, run inside a Rayon `par_iter`.
+///
+/// Does everything that can happen before the library is touched: mint the id
+/// and destination path, read filesystem timestamps, extract cheap visual
+/// metadata, and hash the bytes for dedup. Writes nothing.
+///
+/// `None` means "skip this file" (unreadable metadata, or no extension to key
+/// the type off). Skipping one file never fails the import.
 fn build_asset_metadata(src: PathBuf) -> Option<AssetMetadata> {
     let asset_type = detect_asset_type(&src);
     let meta = std::fs::metadata(&src)
@@ -3652,6 +3729,28 @@ async fn cleanup_orphans(root: &Path, assets: &[AssetMetadata]) {
     }
 }
 
+/// The import pipeline: turn dropped/picked paths into assets on disk and rows
+/// in the database. ONE path serves both the dialog and drag & drop — they
+/// differ only in the [`ImportRequest`] they build.
+///
+/// Staged so each phase uses the right kind of parallelism, and so the expensive
+/// work is skipped for files we turn out not to need:
+///
+///   1. scan directories → folder rows, and collect every file;
+///   2. build metadata in parallel (Rayon — CPU-bound: header reads + hashing);
+///   3. split off duplicates by `content_hash`, BEFORE any copying, so a
+///      re-dropped file costs a hash comparison instead of a disk write;
+///   4. copy the survivors with bounded concurrency (Tokio — I/O-bound);
+///   5. persist folders + assets + memberships in one transaction.
+///
+/// Two things deliberately do NOT happen here: thumbnails (generated later,
+/// on view — see the background pipeline below) and any failure that aborts the
+/// whole run. A single unreadable or uncopyable file is dropped with a warning;
+/// only a failed persist rolls back, and it cleans up the files it copied.
+///
+/// Duplicates are not merely skipped — they still pick up the folder membership
+/// the drop implied, and are restored if they were in the Trash, so re-dropping
+/// a folder you already imported organises rather than doing nothing.
 #[instrument(skip(reporter, pool, request),
     fields(sources = request.sources.len(), target = ?request.target_folder))]
 pub async fn import_assets(

@@ -1,3 +1,9 @@
+//! Import-time metadata extraction: the cheap, header-only read that gives an
+//! asset its dimensions before any pixels are decoded.
+//!
+//! Split from `thumbnail` on purpose — this runs for every file during import
+//! and must stay fast; thumbnails are generated later, on view.
+
 use crate::assets::AssetType;
 use crate::thumbnail;
 use anyhow::Result;
@@ -5,7 +11,6 @@ use std::path::Path;
 
 /// The cheap, import-time visual metadata of an asset. Defaults to "no visual",
 /// so a type without a renderer (or a failed read) still yields a valid asset.
-///
 #[derive(Default)]
 pub struct ExtractedVisual {
     pub width: u32,

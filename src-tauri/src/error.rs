@@ -13,16 +13,14 @@ use thiserror::Error;
 
 /// Marker for an error whose message was written FOR the user.
 ///
-/// The default for an internal `anyhow` error is to be replaced by a generic
-/// sentence, because it may carry a path, a SQL statement or an OS message. This
-/// opts a specific error out of that: the string is one the app authored — a
-/// shortcut conflict, a malformed rename pattern, a folder dropped into itself —
-/// and replacing it with "an unexpected error occurred" throws away the only
-/// thing that would have told the user what to do.
+/// Internal `anyhow` errors are replaced by a generic sentence, since they can
+/// carry a path, a SQL statement or an OS message. This opts one out: the string
+/// was authored by the app — a shortcut conflict, a bad rename pattern, a folder
+/// dropped into itself — and generalising it throws away the only thing that
+/// told the user what to do.
 ///
-/// The distinction is already structural in this codebase: `reject!` carries a
-/// sentence, `.context()` carries a breadcrumb. This makes the compiler aware of
-/// it.
+/// Makes an existing convention checkable by the compiler: `reject!` carries a
+/// sentence, `.context()` carries a breadcrumb.
 #[derive(Debug, Error)]
 #[error("{0}")]
 pub struct Rejected(pub String);

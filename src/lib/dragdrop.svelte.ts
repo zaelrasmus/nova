@@ -187,6 +187,7 @@ export function draggable(node: HTMLElement, options: DraggableOptions) {
         : false;
   }
 
+  /** Cancel a pending long-press. Safe to call when none is armed. */
   function clearTouchTimer() {
     if (touchTimer !== null) {
       clearTimeout(touchTimer);
@@ -194,6 +195,8 @@ export function draggable(node: HTMLElement, options: DraggableOptions) {
     }
   }
 
+  /** Promote a pending press into a real drag: publish the payload, snapshot the
+   *  scrollable containers, and start the auto-scroll frame loop. */
   function begin(e: PointerEvent) {
     if (!pending) return;
     started = true;
@@ -242,6 +245,8 @@ export function draggable(node: HTMLElement, options: DraggableOptions) {
     raf = requestAnimationFrame(autoScroll);
   }
 
+  /** Tear the gesture down and clear the shared drag state. Idempotent, and
+   *  called on every exit path — drop, cancel, Escape, and OS hand-off. */
   function finish() {
     clearTouchTimer();
     cancelAnimationFrame(raf);
@@ -253,6 +258,11 @@ export function draggable(node: HTMLElement, options: DraggableOptions) {
     drag.reset();
   }
 
+  /**
+   * Arm a potential drag. Nothing is "dragging" yet — a press only becomes one
+   * once it clears a distance threshold (mouse/pen) or a long press (touch), so
+   * an ordinary click and a touch scroll both still work.
+   */
   function onPointerDown(e: PointerEvent) {
     // Left button only for a mouse; touch and pen report button 0 too.
     if (e.pointerType === "mouse" && e.button !== 0) return;
@@ -303,6 +313,8 @@ export function draggable(node: HTMLElement, options: DraggableOptions) {
     return true;
   }
 
+  /** Track the cursor, promoting the press to a drag once it clears the
+   *  threshold, and keep the hovered drop target current. */
   function onPointerMove(e: PointerEvent) {
     if (e.pointerId !== pointerId) return;
     if (tryHandoff(e)) return;
@@ -325,6 +337,7 @@ export function draggable(node: HTMLElement, options: DraggableOptions) {
     setTarget(e.clientX, e.clientY);
   }
 
+  /** Release: deliver the drop, if this press ever became a drag. */
   function onPointerUp(e: PointerEvent) {
     if (e.pointerId !== pointerId) return;
     // A vetoed target is passed as null: the source treats it as a miss.
@@ -343,6 +356,8 @@ export function draggable(node: HTMLElement, options: DraggableOptions) {
     if (wasDrag && payload) opts.onDrop?.(target, { move, payload, x, y });
   }
 
+  /** The OS took the pointer away (a system gesture, a lost capture). Abandon
+   *  the drag — no drop, since we never learned where it ended. */
   function onPointerCancel(e: PointerEvent) {
     if (e.pointerId !== pointerId) return;
     detach();
@@ -356,6 +371,8 @@ export function draggable(node: HTMLElement, options: DraggableOptions) {
     finish();
   }
 
+  /** Remove the window-level listeners this gesture added. Separate from
+   *  `finish` because the OS hand-off path detaches but resolves elsewhere. */
   function detach() {
     window.removeEventListener("pointermove", onPointerMove);
     window.removeEventListener("pointerup", onPointerUp);

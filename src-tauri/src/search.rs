@@ -91,6 +91,8 @@ pub async fn reindex_assets(pool: &SqlitePool, ids: &[String]) -> Result<()> {
     result
 }
 
+/// The actual work, wrapped by [`reindex_assets`] so failures can't escape
+/// without setting the degraded flag.
 async fn reindex_assets_inner(pool: &SqlitePool, ids: &[String]) -> Result<()> {
     if ids.is_empty() {
         return Ok(());
@@ -239,6 +241,8 @@ pub async fn asset_ids_with_tag(pool: &SqlitePool, tag_id: &str) -> Result<Vec<S
         .context("Failed to list tagged assets")
 }
 
+/// Push a comma-separated list of BOUND ids, for an `IN (...)`. Bound, never
+/// interpolated — the caller supplies the parentheses.
 fn push_id_list<'a>(qb: &mut QueryBuilder<'a, Sqlite>, ids: &'a [String]) {
     let mut sep = qb.separated(", ");
     for id in ids {

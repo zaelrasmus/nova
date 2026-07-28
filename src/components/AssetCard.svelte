@@ -1,3 +1,15 @@
+<!--
+  AssetCard — one tile in the grid. Rendered once per VISIBLE item, so it is the
+  hottest component in the app: keep it cheap and free of subscriptions.
+
+  Presentational by design. It takes its geometry as a `style` string the grid
+  computed and reports gestures upward; it holds no selection or layout state.
+
+  Images degrade gracefully: ThumbHash blur → thumbnail → original, so a card
+  always paints something even before its thumbnail has been generated (which
+  happens on view, not at import). Thumbnail URLs carry `thumbVersion` to bust
+  the webview cache after a rebuild writes new bytes to the same path.
+-->
 <script lang="ts">
     import { convertFileSrc } from "@tauri-apps/api/core";
     import { assetLibrary, thumbHashUrl } from "$lib/assets.svelte";

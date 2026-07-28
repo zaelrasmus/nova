@@ -1,3 +1,16 @@
+<!--
+  ColorFilterControl — the colour dimension of the FilterBar: pick a colour, set
+  how close a match has to be.
+
+  Matches against an asset's whole PALETTE, not one dominant colour, so a sunset
+  that is mostly blue sky is still findable by its orange. Comparison happens in
+  CIELAB, where distance approximates perceived difference.
+
+  "Accuracy" is the INVERSE of the stored `tolerance` — more accuracy means less
+  tolerance. Surfaces the un-analysed count too, because a colour filter cannot
+  match an asset with no palette rows, and quietly under-reporting would look
+  like the filter is broken.
+-->
 <script lang="ts">
     import {
         assetLibrary,

@@ -369,6 +369,11 @@ impl Condition {
         }
     }
 
+    /// Compile ONE leaf into SQL. Every arm emits a fully parenthesised,
+    /// self-contained predicate over `assets a` — cross-table tests are `EXISTS`
+    /// / `IN` subqueries rather than joins, so a condition can be dropped into
+    /// any WHERE (the manifest, a step's `when`, a count) without the caller
+    /// adding a FROM clause.
     fn push_predicate<'a>(&'a self, qb: &mut QueryBuilder<'a, Sqlite>) {
         match self {
             Condition::Text { field, op } => push_text(qb, *field, op),
@@ -462,6 +467,9 @@ fn like_escape(needle: &str) -> String {
         .replace('_', "\\_")
 }
 
+/// Compile a text condition. The one place operator choice has an order-of-
+/// magnitude cost — see the table in the module header for which operators reach
+/// the FTS index and which fall back to `LIKE`.
 fn push_text<'a>(qb: &mut QueryBuilder<'a, Sqlite>, field: TextField, op: &'a TextOp) {
     // Folder names have no column of their own — they live across a join — so
     // every operator on them is an EXISTS over the membership table.
@@ -592,6 +600,7 @@ fn push_folder_name<'a>(qb: &mut QueryBuilder<'a, Sqlite>, op: &'a TextOp) {
     qb.push("))");
 }
 
+/// Compile a numeric condition — a direct comparison against an indexed column.
 fn push_number<'a>(qb: &mut QueryBuilder<'a, Sqlite>, field: NumField, op: NumOp) {
     let col = field.column();
     qb.push("(").push(col);
@@ -623,6 +632,10 @@ fn push_number<'a>(qb: &mut QueryBuilder<'a, Sqlite>, field: NumField, op: NumOp
     qb.push(")");
 }
 
+/// Compile a date condition. Two rules govern every arm: bounds are compared as
+/// strings in the exact format `stamp()` writes (so the date indexes stay
+/// usable), and an unparseable bound compiles to `0` — matching nothing — rather
+/// than being dropped, which would silently WIDEN the result.
 fn push_date<'a>(qb: &mut QueryBuilder<'a, Sqlite>, field: DateField, op: &'a DateOp) {
     let col = field.column();
 
@@ -685,6 +698,11 @@ fn push_date<'a>(qb: &mut QueryBuilder<'a, Sqlite>, field: DateField, op: &'a Da
     }
 }
 
+/// Compile a folder-membership condition, optionally over the whole subtree.
+///
+/// `include_subfolders` expands the seed ids through a recursive CTE rather than
+/// materialising descendants in Rust, so the set is resolved at query time and a
+/// folder added later is picked up without touching the stored rule.
 fn push_folder<'a>(
     qb: &mut QueryBuilder<'a, Sqlite>,
     negate: bool,

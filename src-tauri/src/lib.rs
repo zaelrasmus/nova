@@ -1,3 +1,23 @@
+//! Nova — media asset manager built for 100k+ asset libraries.
+//!
+//! A library is a `<name>.library` folder holding `library.db` (SQLite/WAL),
+//! `assets/` (the actual bytes, named `{uuid}.{ext}`) and `thumbnails/`.
+//!
+//! Module map, roughly in dependency order:
+//!   * `error`     — `AppError`, the single error type crossing the IPC boundary.
+//!   * `db`        — connection lifecycle + the open-library handle.
+//!   * `library`   — creating a new `.library` folder on disk.
+//!   * `fs` / `extract` / `color` / `thumbnail` — file, metadata, palette and
+//!     thumbnail primitives. No knowledge of the app's concepts.
+//!   * `assets`    — the big one: import, and `build_manifest_query`, the single
+//!     place a scope+filters+sort becomes SQL. Also folders, pins, ordering.
+//!   * `tags`      — tags and tag groups.
+//!   * `search`    — the denormalised FTS5 `search_index` and its sync primitive.
+//!   * `rules`     — smart-folder rule trees compiled to SQL predicates.
+//!   * `actions`   — `run_steps`, the mutation runner every write routes through,
+//!     plus undo and the trash.
+//!   * `commands`  — the Tauri command surface; thin wrappers, no logic.
+
 mod actions;
 mod assets;
 mod color;
@@ -33,12 +53,11 @@ pub fn run() {
         .plugin(tauri_plugin_store::Builder::new().build())
         .manage(db::DbState::new())
         .plugin(tauri_plugin_dialog::init())
-        // Registered even though the capability grants no `fs:*` permission and
-        // nothing calls `fs_scope()` any more — do NOT remove it as unused.
-        // `tauri-plugin-dialog` depends on this crate and extends the fs scope
-        // after a file pick, which resolves managed state that only this `init()`
-        // installs. Dropping it makes the import folder-picker panic at the
-        // moment it opens, which no compiler and no test would catch.
+        // Looks unused — the capability grants no `fs:*` permission and nothing
+        // calls `fs_scope()` — but do NOT remove it. `tauri-plugin-dialog`
+        // extends the fs scope after a file pick, resolving managed state that
+        // only this `init()` installs; dropping it panics the import folder
+        // picker the moment it opens. No compiler or test would catch that.
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_drag::init())

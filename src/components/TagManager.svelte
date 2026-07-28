@@ -1,3 +1,14 @@
+<!--
+  TagManager — the full-library tag admin dialog: rename, recolour, star, group,
+  merge and delete.
+
+  Distinct from TagEditor, which assigns tags to the current selection. This one
+  edits the tags THEMSELVES, so its changes ripple to every asset carrying them.
+
+  Its own sidebar buckets (All · Uncategorized · Starred · each group) filter an
+  in-memory list — `assetLibrary.tags` already holds every tag with its usage
+  count, so none of this needs a round trip.
+-->
 <script lang="ts">
     import { toast } from "svelte-sonner";
     import { assetLibrary, type Tag, type TagGroup } from "$lib/assets.svelte";

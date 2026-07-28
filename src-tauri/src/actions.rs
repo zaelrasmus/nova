@@ -852,6 +852,9 @@ impl Op {
 }
 
 impl Inverse {
+    /// Replay this recorded inverse — the actual undo. Every arm calls the same
+    /// `_in` primitive the forward operation used, so undo has no second
+    /// implementation of any mutation that could drift from the first.
     async fn apply(&self, conn: &mut sqlx::SqliteConnection) -> Result<()> {
         match self {
             Inverse::AddTag { tag_id, asset_ids } => {
@@ -1164,6 +1167,11 @@ async fn write_text(
     Ok(Some(Inverse::RestoreText { field, values }))
 }
 
+/// Read the CURRENT value of a text column per asset — the raw material for a
+/// text step's inverse, captured before the write that destroys it.
+///
+/// This is the one family of steps whose inverse can't be a bare id list: to put
+/// a note back you need the note. Hence the `SetNote` undo budget.
 async fn capture_text(
     conn: &mut sqlx::SqliteConnection,
     field: TextTarget,
@@ -1379,6 +1387,9 @@ pub struct QuickActionDraft {
     pub steps: Vec<Step>,
 }
 
+/// Storage shape, with `steps_json` still a string and `version` still relevant.
+/// Decoded into a [`QuickAction`] by [`QuickActionRow::decode`]; nothing outside
+/// this module sees the stored representation.
 #[derive(FromRow)]
 struct QuickActionRow {
     id: String,
@@ -1432,6 +1443,9 @@ pub async fn fetch_quick_actions(pool: &SqlitePool) -> Result<Vec<QuickAction>> 
     Ok(rows.into_iter().filter_map(QuickActionRow::decode).collect())
 }
 
+/// One action by id. Unlike the list, an undecodable row is an ERROR here —
+/// skipping it silently would mean triggering an action and watching nothing
+/// happen.
 async fn fetch_one(pool: &SqlitePool, id: &str) -> Result<QuickAction> {
     let row = sqlx::query_as::<_, QuickActionRow>(&format!("{SELECT_COLS} WHERE id = ?"))
         .bind(id)
@@ -1487,6 +1501,8 @@ async fn validate(pool: &SqlitePool, draft: &QuickActionDraft, editing: Option<&
     Ok(name)
 }
 
+/// Serialize a pipeline for storage. Always writes the CURRENT version's shape;
+/// `validate` has already rejected anything the compiler couldn't honour.
 fn encode_steps(steps: &[Step]) -> Result<String> {
     serde_json::to_string(steps).context("Failed to encode action steps")
 }
@@ -1615,6 +1631,7 @@ pub struct RunPreview {
     pub warnings: Vec<String>,
 }
 
+/// What a completed run reports back, for the "Tagged 4,231 assets · Undo" toast.
 #[derive(Serialize, Debug)]
 pub struct RunSummary {
     /// `None` when the run left no history entry — a small direct manipulation
@@ -1705,6 +1722,13 @@ fn unique(ids: &[String]) -> Vec<String> {
         .collect()
 }
 
+/// Dry-run an action against a selection: what it would touch, what would block
+/// it, and whether it could be undone.
+///
+/// Read-only, and the answer to "why is the Run button disabled". Checking
+/// BEFORE the run matters because the two things that go wrong here — a step
+/// referencing a deleted tag/folder, and an inverse too big to record — are both
+/// silent at apply time: the first does nothing, the second costs undo.
 #[instrument(skip(pool, asset_ids), fields(count = asset_ids.len()))]
 pub async fn preview_run(
     pool: &SqlitePool,
@@ -1905,17 +1929,21 @@ pub enum RunSource<'a> {
 }
 
 impl RunSource<'_> {
+    /// Label for the history row and the toast.
     fn name(&self) -> &str {
         match self {
             RunSource::Action { name, .. } | RunSource::Direct { name } => name,
         }
     }
+    /// The defining action, if any. `None` for direct manipulation — which is why
+    /// `action_runs.action_id` is nullable.
     fn action_id(&self) -> Option<&str> {
         match self {
             RunSource::Action { id, .. } => Some(id),
             RunSource::Direct { .. } => None,
         }
     }
+    /// Whether this run earns an undo entry. See [`UNDO_MIN_ASSETS`].
     fn records_history(&self, asset_count: usize) -> bool {
         match self {
             RunSource::Action { .. } => true,
@@ -2097,6 +2125,12 @@ pub async fn latest_undoable_run(pool: &SqlitePool) -> Result<Option<String>> {
     .context("Failed to read the run history")
 }
 
+/// Reverse a recorded run, atomically, and consume its history entry.
+///
+/// Replays the stored inverses in reverse order at BOTH levels (steps, then the
+/// inverses within each step). Assets deleted since the run are dropped from the
+/// inverse rather than failing it — undo runs against a library that has moved
+/// on, and the summary reports the shortfall.
 #[instrument(skip(pool))]
 pub async fn undo_run(pool: &SqlitePool, run_id: &str) -> Result<UndoSummary> {
     let (name, is_undoable): (String, bool) =

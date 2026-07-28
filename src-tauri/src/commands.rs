@@ -1,3 +1,27 @@
+//! The Tauri command surface — every function the webview can call.
+//!
+//! Deliberately THIN. A command's job is to acquire the pool, hand off to the
+//! module that owns the logic, log, and convert the error; anything more
+//! interesting than that belongs in `assets`, `actions`, `tags` or `search`.
+//! Read this file as an index of what the frontend can do, not as where it
+//! happens.
+//!
+//! Three conventions run through all of it:
+//!
+//! * **The pool comes from state, never from an argument.** `state.acquire()`
+//!   yields pool + library root, or `AppError::NoLibrary` — so "no library open"
+//!   is one error in one place instead of a check per command.
+//! * **Errors are logged here, then serialized narrowly.** `.inspect_err(…)`
+//!   keeps the full context chain in the logs; `AppError`'s `Serialize` sends
+//!   only the user-facing sentence, so paths and SQL never reach the webview.
+//! * **Commands take IDS, never paths.** The webview names assets and folders;
+//!   Rust resolves those to filesystem paths. The one exception is import, whose
+//!   paths come from an OS file dialog or a native drop event.
+//!
+//! Every command listed here must also be registered in `lib.rs`'s
+//! `generate_handler!` — an unregistered command compiles fine and fails only at
+//! runtime, as "command not found" in the console.
+
 use crate::actions;
 use crate::assets::{
     self, AssetLightRow, AssetMetadata, ImportProgress, ImportResult, ProgressReporter,
@@ -10,6 +34,13 @@ use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 use tracing::{info, instrument, warn};
 
+/// Bridges import progress to the webview as an `import-progress` event.
+///
+/// Throttled, because the copy stage reports once per FILE: at a few thousand
+/// files that's a flood of IPC messages the UI can't paint anyway, and emitting
+/// them all is slower than the copying. Frames are dropped to ~60/s, except the
+/// one that completes a stage — losing that would leave a progress bar stuck
+/// just short of full.
 struct TauriProgressReporter {
     window: tauri::Window,
     last_emit: std::sync::Mutex<std::time::Instant>,
@@ -36,6 +67,12 @@ impl ProgressReporter for TauriProgressReporter {
     }
 }
 
+/// Open an existing library and make it the active one.
+///
+/// Also grants the ASSET PROTOCOL access to this library's directory, which is
+/// how the webview loads thumbnails and originals directly by URL. The static
+/// scope is empty and each library is granted here at connect time, so the
+/// webview can only ever reach libraries the user actually opened.
 #[instrument(skip_all, fields(library_path = %library_path))]
 #[tauri::command]
 pub async fn connect_library<R: Runtime>(
@@ -107,6 +144,11 @@ pub async fn create_library<R: Runtime>(
     })
 }
 
+/// Import from a directory chosen in the file dialog.
+///
+/// Contrast `import_dropped_paths`: the dialog recreates the picked folder's
+/// CONTENTS (you already chose that folder — recreating it adds a level nobody
+/// asked for), while a drop recreates the dropped folders themselves.
 #[instrument(skip_all, fields(source_path = %source_path))]
 #[tauri::command]
 pub async fn import_assets(
@@ -270,6 +312,17 @@ pub async fn generate_thumbnails_for_ids(
         .map_err(AppError::from)
 }
 
+/// THE read path: stream a scope's light rows to the frontend over a `Channel`.
+///
+/// A channel rather than a return value because the grid must paint before the
+/// whole scope has been read — at 100k assets, collecting first would mean
+/// staring at nothing while ~20 MB is materialised.
+///
+/// Superseded requests stop mid-cursor. Clicking through five folders otherwise
+/// leaves five full scans racing on a ten-connection pool, four of them for
+/// results nobody will see. Note the frontend ALSO discards late chunks by its
+/// own token — this is the backend half, and both are needed: this one stops the
+/// work, that one stops the render.
 #[instrument(skip_all)]
 #[tauri::command]
 pub async fn stream_manifest(

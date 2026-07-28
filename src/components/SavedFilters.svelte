@@ -1,3 +1,14 @@
+<!--
+  SavedFilters — named, reusable filter combinations in the sidebar.
+
+  A saved filter is a LENS: applying one narrows whatever scope you're currently
+  in, and clearing it leaves you where you were. Contrast SmartFolders.svelte,
+  whose entries are PLACES you navigate to. Both are rows in `rule_sets` and
+  share one editor and one compiler — only `kind` differs.
+
+  The live search text is deliberately NOT saved: it isn't part of the rule tree,
+  so it structurally cannot reach storage.
+-->
 <script lang="ts">
     import { assetLibrary, type SavedFilter } from "$lib/assets.svelte";
     import { describeRules } from "$lib/rules";

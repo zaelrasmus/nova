@@ -1,3 +1,15 @@
+<!--
+  TagEditor — assigns tags to the CURRENT SELECTION, inside the inspector.
+  (TagManager.svelte edits the tags themselves; this only changes assignments.)
+
+  Tri-state by necessity: across a multi-selection a tag is on all, some, or none
+  of them, so the control shows counts rather than a boolean and toggling "some"
+  applies to the whole selection.
+
+  Creates tags on the fly — `ensureTag` resolves case-insensitively, so typing
+  "red" when "Red" exists reuses it instead of spawning a near-duplicate. Toggles
+  route through `run_steps`, which is what gives them undo.
+-->
 <script lang="ts">
     import { untrack } from "svelte";
     import { toast } from "svelte-sonner";

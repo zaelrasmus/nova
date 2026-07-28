@@ -1,3 +1,17 @@
+<!--
+  FolderTree — the sidebar's hierarchy of real folders (the ones with explicit
+  membership; smart folders live in SmartFolders.svelte).
+
+  Assembles the tree in the browser from the FLAT `assetLibrary.folders` list —
+  one fetch for the whole library, never a query per level.
+
+  Recursive and reused: `rootId = null` renders the full tree, while a folder id
+  renders just that subtree, which is what a pinned folder's hover flyout shows.
+  Same drag, drop, rename and context-menu machinery either way.
+
+  Every row is a drop target for BOTH drag systems (in-app assets and OS files)
+  via the shared `data-drop-*` attributes — see droptarget.ts.
+-->
 <script lang="ts">
     import { assetLibrary, type Folder } from "$lib/assets.svelte";
     import { RangeSelection, selection } from "$lib/selection.svelte";

@@ -6,9 +6,16 @@
 //! case-insensitively, so "Red" and "red" are one tag and create-on-the-fly
 //! resolves to whatever already exists.
 //!
-//! T1 is the flat foundation: CRUD, assign/unassign, and the per-selection counts
-//! that drive the inspector's tri-state. Groups, starring, merge, and the filter
-//! predicate have their columns here already but are wired up in later phases.
+//! This module covers the whole tag surface: CRUD, assign/unassign, the
+//! per-selection counts behind the inspector's tri-state, groups, starring,
+//! merge, and [`TagFilter`] — the predicate a tag contributes to a manifest
+//! query.
+//!
+//! Two structural notes worth having up front. Groups are FLAT (a tag belongs to
+//! at most one, and groups don't nest) and deleting one only ungroups its tags —
+//! the FK is `ON DELETE SET NULL`, because cascading would turn one click into
+//! silent mass tag loss. And filters carry tag IDS, never names, so renaming a
+//! tag can't change what a saved filter matches.
 
 use anyhow::{Context, Result};
 use crate::reject;
@@ -240,6 +247,9 @@ pub async fn ensure_tag(pool: &SqlitePool, raw_name: &str) -> Result<String> {
         .context("Tag vanished immediately after creation")
 }
 
+/// Resolve a tag by name, case-insensitively — the uniqueness check behind
+/// create-on-the-fly and rename. `COLLATE NOCASE` matches `idx_tags_name`, so
+/// this is an index lookup rather than a scan.
 async fn lookup_tag_id(pool: &SqlitePool, name: &str) -> Result<Option<String>> {
     sqlx::query_scalar::<_, String>("SELECT id FROM tags WHERE name = ? COLLATE NOCASE")
         .bind(name)
@@ -525,6 +535,9 @@ pub async fn fetch_tag_groups(pool: &SqlitePool) -> Result<Vec<TagGroup>> {
     Ok(groups)
 }
 
+/// Create an empty tag group, appended last. Unlike tag names, group names are
+/// NOT unique — two groups may each hold a "Colour", as two folders may share a
+/// name.
 #[instrument(skip(pool))]
 pub async fn create_tag_group(pool: &SqlitePool, raw_name: &str) -> Result<String> {
     let name = clean_group_name(raw_name)?;
@@ -561,6 +574,8 @@ pub async fn rename_tag_group(pool: &SqlitePool, id: &str, raw_name: &str) -> Re
     Ok(())
 }
 
+/// Set (or clear, with `None`) a group's accent. A tag's own colour overrides
+/// this; the group's is the fallback its members inherit.
 #[instrument(skip(pool))]
 pub async fn set_tag_group_color(pool: &SqlitePool, id: &str, color: Option<String>) -> Result<()> {
     let color = color.filter(|c| !c.trim().is_empty());

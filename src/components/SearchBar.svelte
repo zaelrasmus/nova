@@ -1,3 +1,18 @@
+<!--
+  SearchBar — the grid's text search, with per-column scope toggles and a recent
+  history.
+
+  Drives the HYBRID, which is the thing to understand here. A short, name-only
+  query is answered in the frontend by filtering the already-loaded manifest
+  (`setNameFilter`) — instant, no round trip. Anything else goes to the backend
+  as `FilterSet.text` and is compiled into an FTS5 MATCH.
+
+  That split isn't just an optimisation: the trigram tokenizer needs >= 3
+  characters, so short terms have no index to use anyway.
+
+  Search is SUBSTRING matching, not typo tolerance — worth remembering before
+  writing UI copy that promises otherwise.
+-->
 <script lang="ts">
     import { untrack } from "svelte";
     import { toast } from "svelte-sonner";

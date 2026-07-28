@@ -1,3 +1,25 @@
+<!--
+  AssetGrid — the centre pane, and the component the 100k-asset target is really
+  about. Owns scrolling, layout, virtualization, selection gestures, drag & drop,
+  and on-view thumbnail requests.
+
+  TWO LAYOUTS, one grid:
+    * waterfall — TanStack Virtual over shortest-lane columns. Packing means
+      visual order != index order, which is why choosing a MANUAL sort forces
+      justified instead.
+    * justified — full-width rows of a shared height (see justified.ts).
+      Reading order equals index order, so drag-to-reorder lands where dropped.
+
+  Virtualizer rules that have each cost a debugging session:
+    * create it ONCE, then update via `get(virtualizer).setOptions()` + `.measure()`;
+    * read it with `get(virtualizer)`, NEVER `$virtualizer` — the store
+      subscription self-invalidates and loops;
+    * its item list lags the data array by a frame after a shrink, so anything
+      indexing into `assets` needs an `{#if}` guard or a shrinking filter throws.
+
+  Reads `assetLibrary.displayed` (not `manifest`) so it agrees with selection and
+  the viewer about what is on screen.
+-->
 <script lang="ts">
     import { untrack } from "svelte";
     import { createVirtualizer } from "@tanstack/svelte-virtual";
@@ -83,8 +105,6 @@
       });
     })
 
-    // Height too, for justified row virtualization (waterfall gets it from
-    // TanStack; the justified path measures the window itself).
     /**
      * Right-click menu state, carrying the selection AS IT WAS when the menu
      * opened. Right-clicking an unselected card selects it first (that's
@@ -139,6 +159,9 @@
         }
     }
 
+    // Measured viewport height + scroll offset, for justified row virtualization.
+    // (Waterfall gets both from TanStack; the justified path measures the window
+    // itself — see `visibleRows` in justified.ts.)
     let containerHeight = $state(0);
     let scrollTop = $state(0);
 

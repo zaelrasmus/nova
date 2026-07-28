@@ -1,3 +1,11 @@
+<!--
+  Settings › Import. Defaults applied to newly imported assets.
+
+  NOTE: `thumbnailQuality` is ALSO editable in DisplaySection, which additionally
+  exposes the lossy-quality slider and the "rebuild all" action. Two controls,
+  one preference — they can't disagree (both write `settings`), but a reviewer
+  should decide whether this one is worth keeping.
+-->
 <script lang="ts">
     import { settings } from "../../routes/settings.svelte";
     import { Label } from "$components/ui/label";

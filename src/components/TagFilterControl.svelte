@@ -1,3 +1,10 @@
+<!--
+  TagFilterControl — the tag dimension of the FilterBar: include, exclude, and
+  the "untagged" pseudo-selection, combined by any / all / equals.
+
+  Filters carry tag IDS, not names, so renaming a tag can't silently change what
+  a saved filter matches. "Untagged" is never a real tag row.
+-->
 <script lang="ts">
     import {
         assetLibrary,

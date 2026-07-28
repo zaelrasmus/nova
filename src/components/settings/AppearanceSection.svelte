@@ -1,3 +1,4 @@
+<!-- Settings › Appearance. Theme and visual preferences. -->
 <script lang="ts">
     import { settings } from "../../routes/settings.svelte";
     import * as Select from "$components/ui/select";
