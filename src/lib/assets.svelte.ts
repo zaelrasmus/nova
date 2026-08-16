@@ -2166,15 +2166,37 @@ class AssetLibrary {
     }
   }
 
-  applyThumbnails(ready: { id: string; thumb_hash: string; thumb_path: string }[]): void {
+  applyThumbnails(
+    ready: { id: string; thumb_hash: string; thumb_path: string; width?: number; height?: number }[],
+  ): void {
+    let resized = false;
     for (const r of ready) {
+      // Dimensions arrive non-zero only for a row that had none — an online
+      // image is recorded 0×0 because nothing local existed to measure it, and
+      // the decode behind its thumbnail is the first thing that knows its shape.
+      const sized = (r.width ?? 0) > 0 && (r.height ?? 0) > 0;
       const idx = this.#indexById.get(r.id);
-      if (idx !== undefined) this.manifest[idx].thumb_hash = r.thumb_hash; // deep-reactive
+      if (idx !== undefined) {
+        const row = this.manifest[idx];
+        row.thumb_hash = r.thumb_hash; // deep-reactive
+        if (sized && (row.width !== r.width || row.height !== r.height)) {
+          row.width = r.width as number;
+          row.height = r.height as number;
+          resized = true;
+        }
+      }
       const heavy = this.heavy.get(r.id);
       if (heavy) {
-        this.heavy.set(r.id, { ...heavy, thumb_hash: r.thumb_hash, thumb_path: r.thumb_path });
+        this.heavy.set(r.id, {
+          ...heavy,
+          thumb_hash: r.thumb_hash,
+          thumb_path: r.thumb_path,
+          ...(sized ? { width: r.width as number, height: r.height as number } : {}),
+        });
       }
     }
+    // Only when a tile's aspect actually changed — see `layoutVersion`.
+    if (resized) this.layoutVersion++;
   }
 
   /**

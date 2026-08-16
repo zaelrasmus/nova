@@ -630,6 +630,43 @@ pub async fn fetch_slice(url: &str, range: Option<&str>) -> Result<Slice> {
     })
 }
 
+/// Pull a whole remote file into memory, up to `max_bytes`.
+///
+/// Only for things that are small by nature and useless in part — an online
+/// IMAGE, whose thumbnail cannot be produced without the complete file. Video
+/// never comes through here: it gets its thumbnail from a keyframe the webview
+/// captures over ranged requests, which costs a few hundred KB instead of the
+/// whole download.
+#[instrument(skip_all, fields(url = %url))]
+pub async fn fetch_all(url: &str, max_bytes: usize) -> Result<Vec<u8>> {
+    let parsed = Url::parse(url.trim()).context("Stored link is not a valid URL")?;
+    guard_host(&parsed).await?;
+
+    let response = client()?
+        .get(parsed.clone())
+        .header(
+            header::REFERER,
+            format!("{}://{}/", parsed.scheme(), parsed.host_str().unwrap_or("")),
+        )
+        .send()
+        .await
+        .context("Could not reach the source")?;
+
+    let status = response.status();
+    if !status.is_success() {
+        bail!("The source answered {}", status.as_u16());
+    }
+    if response.content_length().is_some_and(|n| n > max_bytes as u64) {
+        bail!("That file is too large to fetch for a thumbnail");
+    }
+
+    let body = read_head(response, max_bytes).await?;
+    if body.is_empty() {
+        bail!("The source sent an empty response");
+    }
+    Ok(body)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

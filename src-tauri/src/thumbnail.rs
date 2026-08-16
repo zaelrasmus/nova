@@ -97,6 +97,11 @@ impl ThumbConfig {
 pub struct ThumbOutput {
     pub thumb_hash: String,
     pub thumb_config: String,
+    /// The SOURCE's dimensions, as decoded. The caller uses these to fill in a
+    /// row that never had any — an online image is recorded 0×0 because there
+    /// was nothing local to measure.
+    pub src_width: u32,
+    pub src_height: u32,
     /// False when the source was already small enough that a thumbnail would be
     /// no smaller — the grid shows the original instead.
     pub wrote_file: bool,
@@ -130,6 +135,20 @@ pub fn generate_from_capture(png: &[u8], dest: &Path, config: ThumbConfig) -> Re
     from_image(&img, dest, config, true)
 }
 
+/// Thumbnail from image bytes held in memory, format sniffed rather than assumed.
+///
+/// This is the ONLINE-IMAGE path: there is no file to open, because the asset is
+/// only a link, so `remote` fetches the bytes and they arrive here still encoded
+/// in whatever the origin served.
+///
+/// `always_write` for the same reason as a capture — the "source is small enough,
+/// let the grid use the original" shortcut has no original to fall back to when
+/// the original lives on someone else's server.
+pub fn generate_from_bytes(bytes: &[u8], dest: &Path, config: ThumbConfig) -> Result<ThumbOutput> {
+    let img = image::load_from_memory(bytes).context("Failed to decode the fetched image")?;
+    from_image(&img, dest, config, true)
+}
+
 /// The shared body: downscale once, encode WebP, hash, extract the palette.
 fn from_image(
     img: &DynamicImage,
@@ -148,6 +167,8 @@ fn from_image(
         return Ok(ThumbOutput {
             thumb_hash: thumb_hash_base64(img),
             thumb_config: config.config_tag(),
+            src_width: w,
+            src_height: h,
             wrote_file: false,
             palette: crate::color::extract_palette(img),
         });
@@ -210,6 +231,8 @@ fn from_image(
     Ok(ThumbOutput {
         thumb_hash,
         thumb_config: config.config_tag(),
+        src_width: w,
+        src_height: h,
         wrote_file: true,
         // Sampled from the downscaled thumb, not the original — ~100x fewer pixels
         // for a palette that's indistinguishable at this granularity.

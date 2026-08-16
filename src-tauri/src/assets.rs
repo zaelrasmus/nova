@@ -4233,6 +4233,12 @@ pub async fn set_duration(pool: &SqlitePool, id: &str, duration_ms: i64) -> Resu
 struct PendingThumb {
     id: String,
     extension: String,
+    /// Local rows read a file; remote ones have no file to read, and are routed
+    /// to the fetching path instead. Without this the pipeline would try to
+    /// `image::open` a path that was never written and leave every online image
+    /// permanently thumbnail-less.
+    origin: String,
+    remote_url: Option<String>,
 }
 
 /// One generated thumbnail's DB-facing result.
@@ -4241,6 +4247,10 @@ struct ThumbUpdate {
     thumb_hash: String,
     thumb_config: String,
     wrote_file: bool,
+    /// Decoded source dimensions — adopted only by rows that have none. See
+    /// `ThumbReady`.
+    src_width: u32,
+    src_height: u32,
     palette: Vec<crate::color::PaletteEntry>,
 }
 
@@ -4252,6 +4262,15 @@ pub struct ThumbReady {
     pub id: String,
     pub thumb_hash: String,
     pub thumb_path: String,
+    /// The decoded source's real dimensions, or 0 when unchanged.
+    ///
+    /// Only ever non-zero for a row that had none — an online image is recorded
+    /// with 0×0 because nothing local was there to measure, and the decode that
+    /// produces its thumbnail is the first thing that knows its true shape. A
+    /// locally-imported image already had these read from its header at import,
+    /// and this must not second-guess that.
+    pub width: i64,
+    pub height: i64,
 }
 
 /// Progress sink for thumbnail generation. `ready` is the batch that just
@@ -4303,7 +4322,7 @@ pub async fn generate_pending_thumbnails(
     progress: Arc<dyn ThumbProgress>,
 ) -> Result<usize> {
     let pending: Vec<PendingThumb> = sqlx::query_as::<_, PendingThumb>(
-        "SELECT id, extension FROM assets \
+        "SELECT id, extension, origin, remote_url FROM assets \
          WHERE thumb_hash IS NULL AND asset_type = 'image' AND deleted_at IS NULL \
          ORDER BY imported_date DESC, id DESC",
     )
@@ -4329,7 +4348,7 @@ pub async fn generate_thumbnails_for_ids(
     }
 
     let mut qb = QueryBuilder::new(
-        "SELECT id, extension FROM assets \
+        "SELECT id, extension, origin, remote_url FROM assets \
          WHERE thumb_hash IS NULL AND asset_type = 'image' AND deleted_at IS NULL AND id IN (",
     );
     let mut separated = qb.separated(", ");
@@ -4347,10 +4366,52 @@ pub async fn generate_thumbnails_for_ids(
     run_generation(pool, root, config, pending, progress).await
 }
 
+/// One finished thumbnail as the UI patches it in.
+fn ready_of(update: &ThumbUpdate, thumbs_dir: &Path) -> ThumbReady {
+    ThumbReady {
+        id: update.id.clone(),
+        thumb_hash: update.thumb_hash.clone(),
+        // Empty when no file was written (source small enough) — the UI falls
+        // back to the original.
+        thumb_path: if update.wrote_file {
+            thumbs_dir
+                .join(format!("{}.webp", update.id))
+                .to_string_lossy()
+                .into_owned()
+        } else {
+            String::new()
+        },
+        width: i64::from(update.src_width),
+        height: i64::from(update.src_height),
+    }
+}
+
 /// Shared chunked generator: decode/resize/encode on the blocking pool (Rayon
 /// fan-out), persist per chunk, and report each completed batch for in-place UI
 /// patching.
 async fn run_generation(
+    pool: &SqlitePool,
+    root: &Path,
+    config: thumbnail::ThumbConfig,
+    pending: Vec<PendingThumb>,
+    progress: Arc<dyn ThumbProgress>,
+) -> Result<usize> {
+    // Online images have no file to open, so they cannot go through the Rayon
+    // pass below — it would `image::open` a path that was never written. They
+    // take the fetching path instead, which is sequential on purpose: these are
+    // network requests to someone else's server, and a screenful of them at once
+    // is how a user's IP gets rate-limited.
+    let (remote, local): (Vec<PendingThumb>, Vec<PendingThumb>) = pending
+        .into_iter()
+        .partition(|p| p.origin == ORIGIN_REMOTE);
+
+    let mut generated = run_local_generation(pool, root, config, local, progress.clone()).await?;
+    generated += run_remote_generation(pool, root, config, remote, progress).await?;
+    Ok(generated)
+}
+
+/// The original pipeline: files on disk, decoded and encoded across Rayon.
+async fn run_local_generation(
     pool: &SqlitePool,
     root: &Path,
     config: thumbnail::ThumbConfig,
@@ -4391,6 +4452,8 @@ async fn run_generation(
                             thumb_hash: t.thumb_hash,
                             thumb_config: t.thumb_config,
                             wrote_file: t.wrote_file,
+                            src_width: t.src_width,
+                            src_height: t.src_height,
                             palette: t.palette,
                         }),
                         Err(e) => {
@@ -4406,23 +4469,7 @@ async fn run_generation(
 
         update_thumbnails(pool, &results).await?;
 
-        let ready: Vec<ThumbReady> = results
-            .iter()
-            .map(|u| ThumbReady {
-                id: u.id.clone(),
-                thumb_hash: u.thumb_hash.clone(),
-                // Empty when no file was written (source small enough)
-                // the UI fallsback to the original
-                thumb_path: if u.wrote_file {
-                    thumbs_dir
-                        .join(format!("{}.webp", u.id))
-                        .to_string_lossy()
-                        .into_owned()
-                } else {
-                    String::new()
-                },
-            })
-            .collect();
+        let ready: Vec<ThumbReady> = results.iter().map(|u| ready_of(u, &thumbs_dir)).collect();
         done += chunk_len;
         progress.report(done, total, &ready);
     }
@@ -4549,6 +4596,91 @@ pub async fn store_capture_thumbnail(
         width,
         height,
     })
+}
+
+/// Largest online image we'll pull down to make a thumbnail. Well above any
+/// real photo, and a guard against a link that turns out to be a disk image.
+const REMOTE_IMAGE_MAX_BYTES: usize = 64 * 1024 * 1024;
+
+/// Thumbnails for ONLINE images: fetch, decode, encode, forget the original.
+///
+/// An image is useless in part, so unlike video — which yields a keyframe from a
+/// few hundred KB of ranged reads — there is no cheaper option than the whole
+/// file. That is affordable precisely because images are small, and it is what
+/// keeps the grid working offline for a link-only asset: the thumbnail is local
+/// and permanent even though the original never touches the disk.
+///
+/// Sequential, one request at a time. These go to someone else's server, and a
+/// screenful fetched at once is the fastest way to get a user's IP throttled.
+async fn run_remote_generation(
+    pool: &SqlitePool,
+    root: &Path,
+    config: thumbnail::ThumbConfig,
+    pending: Vec<PendingThumb>,
+    progress: Arc<dyn ThumbProgress>,
+) -> Result<usize> {
+    let total = pending.len();
+    if total == 0 {
+        return Ok(0);
+    }
+
+    let thumbs_dir = root.join("thumbnails");
+    fs::ensure_dir(&thumbs_dir).await?;
+    info!(total, "Remote thumbnail generation started");
+
+    let mut done = 0usize;
+    for item in pending {
+        done += 1;
+        let Some(url) = item.remote_url.clone() else {
+            warn!(id = %item.id, "Remote asset has no URL; skipping thumbnail");
+            continue;
+        };
+
+        let bytes = match crate::remote::fetch_all(&url, REMOTE_IMAGE_MAX_BYTES).await {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                // The link is unreachable, so say so rather than silently
+                // retrying on every scroll. `thumb_hash` stays NULL, which means
+                // a later re-check that succeeds still gets a thumbnail.
+                warn!(id = %item.id, error = %e, "Could not fetch a remote image");
+                if let Err(e) = set_remote_state(pool, &item.id, REMOTE_UNAVAILABLE).await {
+                    warn!(error = %e, "Could not record remote state (non-fatal)");
+                }
+                continue;
+            }
+        };
+
+        let dest = thumbs_dir.join(format!("{}.webp", item.id));
+        let job_dest = dest.clone();
+        let decoded = tokio::task::spawn_blocking(move || {
+            thumbnail::generate_from_bytes(&bytes, &job_dest, config)
+        })
+        .await
+        .context("Remote thumbnail task panicked")?;
+
+        let output = match decoded {
+            Ok(output) => output,
+            Err(e) => {
+                warn!(id = %item.id, error = %e, "Could not decode a remote image");
+                continue;
+            }
+        };
+
+        let update = ThumbUpdate {
+            id: item.id.clone(),
+            thumb_hash: output.thumb_hash,
+            thumb_config: output.thumb_config,
+            wrote_file: output.wrote_file,
+            src_width: output.src_width,
+            src_height: output.src_height,
+            palette: output.palette,
+        };
+        update_thumbnails(pool, std::slice::from_ref(&update)).await?;
+        progress.report(done, total, &[ready_of(&update, &thumbs_dir)]);
+    }
+
+    info!(total, "Remote thumbnail generation complete");
+    Ok(total)
 }
 
 // ── Color analysis ────────────────────────────────────────────────────────────
@@ -4764,13 +4896,25 @@ async fn update_thumbnails(pool: &SqlitePool, updates: &[ThumbUpdate]) -> Result
         .context("Failed to begin thumbnail update transaction")?;
 
     for u in updates {
-        sqlx::query("UPDATE assets SET thumb_hash = ?, thumb_config = ? WHERE id = ?")
-            .bind(&u.thumb_hash)
-            .bind(&u.thumb_config)
-            .bind(&u.id)
-            .execute(&mut *tx)
-            .await
-            .context("Failed to update thumbnail row")?;
+        // Dimensions are adopted ONLY by a row that has none. An online image is
+        // recorded 0×0 because nothing local existed to measure, and this decode
+        // is the first thing that knows its real shape — but a locally imported
+        // image already had its dimensions read from the file header at import,
+        // and that reading is authoritative.
+        sqlx::query(
+            "UPDATE assets SET thumb_hash = ?, thumb_config = ?, \
+             width = CASE WHEN width = 0 THEN ? ELSE width END, \
+             height = CASE WHEN height = 0 THEN ? ELSE height END \
+             WHERE id = ?",
+        )
+        .bind(&u.thumb_hash)
+        .bind(&u.thumb_config)
+        .bind(i64::from(u.src_width))
+        .bind(i64::from(u.src_height))
+        .bind(&u.id)
+        .execute(&mut *tx)
+        .await
+        .context("Failed to update thumbnail row")?;
 
         // Replace rather than append: a rebuild re-extracts, and duplicated
         // palette rows would skew every coverage ratio.
@@ -5688,5 +5832,195 @@ mod remote_asset_tests {
                 .unwrap();
         assert_eq!(state.as_deref(), Some(REMOTE_UNAVAILABLE));
         assert_eq!(duration, Some(90_000));
+    }
+}
+
+/// The online-image thumbnail path.
+///
+/// The bug this pins: online images were routed into the local Rayon pass, which
+/// opens `assets/{id}.{ext}` — a file that a link-only asset never wrote. Every
+/// one of them failed to decode and stayed thumbnail-less forever, because
+/// `thumb_hash IS NULL` is also the "still pending" marker.
+#[cfg(test)]
+mod remote_thumbnail_tests {
+    use super::*;
+
+    async fn migrated_db() -> SqlitePool {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::migrate!().run(&pool).await.unwrap();
+        pool
+    }
+
+    async fn insert(pool: &SqlitePool, id: &str, origin: &str, url: Option<&str>) {
+        sqlx::query(
+            "INSERT INTO assets (id, asset_type, filename, extension, path, width, height, \
+             file_size, imported_date, creation_date, modified_date, origin, remote_url) \
+             VALUES (?, 'image', 'a.png', 'png', 'assets/a.png', 0, 0, 1, 'x', 'x', 'x', ?, ?)",
+        )
+        .bind(id)
+        .bind(origin)
+        .bind(url)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn pending_images_carry_the_origin_that_routes_them() {
+        let pool = migrated_db().await;
+        insert(&pool, "local1", ORIGIN_LOCAL, None).await;
+        insert(&pool, "remote1", ORIGIN_REMOTE, Some("https://example.com/a.png")).await;
+
+        let pending: Vec<PendingThumb> = sqlx::query_as::<_, PendingThumb>(
+            "SELECT id, extension, origin, remote_url FROM assets \
+             WHERE thumb_hash IS NULL AND asset_type = 'image' AND deleted_at IS NULL \
+             ORDER BY id",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+
+        assert_eq!(pending.len(), 2);
+        let (remote, local): (Vec<_>, Vec<_>) =
+            pending.into_iter().partition(|p| p.origin == ORIGIN_REMOTE);
+
+        assert_eq!(local.len(), 1, "a local image still takes the file path");
+        assert_eq!(remote.len(), 1, "an online image must NOT take the file path");
+        assert_eq!(
+            remote[0].remote_url.as_deref(),
+            Some("https://example.com/a.png"),
+            "the fetching path needs the URL alongside the id"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_decode_fills_in_dimensions_only_where_there_were_none() {
+        let pool = migrated_db().await;
+        insert(&pool, "sized", ORIGIN_LOCAL, None).await;
+        sqlx::query("UPDATE assets SET width = 800, height = 600 WHERE id = 'sized'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        insert(&pool, "unsized", ORIGIN_REMOTE, Some("https://example.com/a.png")).await;
+
+        let updates = vec![
+            ThumbUpdate {
+                id: "sized".into(),
+                thumb_hash: "h".into(),
+                thumb_config: "c".into(),
+                wrote_file: true,
+                src_width: 4000,
+                src_height: 3000,
+                palette: Vec::new(),
+            },
+            ThumbUpdate {
+                id: "unsized".into(),
+                thumb_hash: "h".into(),
+                thumb_config: "c".into(),
+                wrote_file: true,
+                src_width: 1920,
+                src_height: 1080,
+                palette: Vec::new(),
+            },
+        ];
+        update_thumbnails(&pool, &updates).await.unwrap();
+
+        let (w, h): (i64, i64) =
+            sqlx::query_as("SELECT width, height FROM assets WHERE id = 'sized'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            (w, h),
+            (800, 600),
+            "import read these from the file header; a thumbnail must not overwrite them"
+        );
+
+        let (w, h): (i64, i64) =
+            sqlx::query_as("SELECT width, height FROM assets WHERE id = 'unsized'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            (w, h),
+            (1920, 1080),
+            "an online image has no dimensions until something decodes it"
+        );
+    }
+}
+
+/// The UPGRADE path: a v1.0 library that already has rows, meeting migration 2.
+///
+/// `remote_asset_tests` runs both migrations against an EMPTY database, which is
+/// what a new library does. It is not what an existing user has. This runs the
+/// v1.0 schema, fills it with rows, and only then applies the online-asset
+/// migration — because `ALTER TABLE ADD COLUMN ... NOT NULL DEFAULT` against a
+/// populated table is the step that would fail, and a failed migration means the
+/// library never opens again.
+#[cfg(test)]
+mod migration_upgrade_tests {
+    use super::*;
+
+    const V1: &str = include_str!("../migrations/20240101000000_create_images_table.sql");
+    const V2: &str = include_str!("../migrations/20260815000000_online_assets.sql");
+
+    #[tokio::test]
+    async fn an_existing_library_survives_the_online_assets_migration() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+
+        sqlx::raw_sql(V1)
+            .execute(&pool)
+            .await
+            .expect("the v1.0 schema must apply");
+
+        // Rows that predate every new column, including one in the Trash — the
+        // partial indexes have to survive the ALTERs too.
+        for (id, deleted) in [("keep", None), ("trashed", Some("2026-01-01T00:00:00.000Z"))] {
+            sqlx::query(
+                "INSERT INTO assets (id, asset_type, filename, extension, path, width, height, \
+                 file_size, imported_date, creation_date, modified_date, content_hash, deleted_at) \
+                 VALUES (?, 'image', 'a.png', 'png', 'assets/a.png', 800, 600, 10, \
+                 'x', 'x', 'x', ?, ?)",
+            )
+            .bind(id)
+            .bind(format!("hash-{id}"))
+            .bind(deleted)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        sqlx::raw_sql(V2)
+            .execute(&pool)
+            .await
+            .expect("the online-asset migration must apply to a POPULATED table");
+
+        // Existing rows read as local with no backfill, and keep everything else.
+        let (origin, url, width, hash): (String, Option<String>, i64, Option<String>) =
+            sqlx::query_as(
+                "SELECT origin, remote_url, width, content_hash FROM assets WHERE id = 'keep'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(origin, ORIGIN_LOCAL);
+        assert!(url.is_none());
+        assert_eq!(width, 800, "existing data must be untouched");
+        assert_eq!(hash.as_deref(), Some("hash-keep"));
+
+        // The trashed row is still trashed, and still excluded from the live set.
+        let live: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM assets WHERE deleted_at IS NULL")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(live, 1);
+
+        // And the new partial index is usable, i.e. it was actually created.
+        let remote: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM assets WHERE origin <> 'local'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(remote, 0);
     }
 }

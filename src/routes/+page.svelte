@@ -378,7 +378,14 @@
         const unlisten = listen<{
             current: number;
             total: number;
-            ready: { id: string; thumb_hash: string; thumb_path: string }[];
+            ready: {
+                id: string;
+                thumb_hash: string;
+                thumb_path: string;
+                /** Non-zero only for a row that had no dimensions — see applyThumbnails. */
+                width: number;
+                height: number;
+            }[];
         }>("thumbnail-progress", (event) => {
             assetLibrary.applyThumbnails(event.payload.ready);
             assetLibrary.reportThumbProgress(event.payload.current, event.payload.total);
