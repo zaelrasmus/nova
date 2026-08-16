@@ -86,8 +86,10 @@
         }
 </script>
 
-<!-- Shared preview renderer: any type that has a thumbnail (images now;
-     videos/audio once 11d generates keyframes/waveforms). -->
+<!-- Shared preview renderer: any type that has a thumbnail. Images are generated
+     in Rust; video keyframes and audio waveforms are captured in the webview
+     (see mediathumbs.ts) but land in the same `thumb_path`, so this is unaware
+     of which produced it. -->
 {#snippet thumbnail()}
     {#if placeholder}
         <img
@@ -107,6 +109,26 @@
     />
 {/snippet}
 
+
+<!-- Corner badge marking a tile as playable. Only shown once a media asset HAS a
+     thumbnail: before that the generic card's big glyph already says what it is,
+     and afterwards a video frame is indistinguishable from a photo without it.
+     Inline SVG rather than a lucide component — this renders once per visible
+     tile, and a component instance per card is exactly what this file avoids. -->
+{#snippet mediaBadge(kind: "video" | "audio")}
+    <span
+        class="pointer-events-none absolute bottom-1 left-1 grid h-5 w-5 place-items-center
+               rounded-full bg-black/60 text-white ring-1 ring-white/15"
+    >
+        <svg viewBox="0 0 24 24" fill="currentColor" class="h-3 w-3" aria-hidden="true">
+            {#if kind === "video"}
+                <path d="M8 5v14l11-7z" />
+            {:else}
+                <path d="M12 3v10.55A4 4 0 1 0 14 17V7h4V3h-6z" />
+            {/if}
+        </svg>
+    </span>
+{/snippet}
 
 <!-- Image whose thumbnail is still being generated in the background. -->
 {#snippet pendingImage()}
@@ -153,6 +175,9 @@
 >
     {#if placeholder || previewSrc}
         {@render thumbnail()}
+        {#if assetType === "video" || assetType === "audio"}
+            {@render mediaBadge(assetType)}
+        {/if}
     {:else if assetType === "audio"}
         {@render generic("🎵")}
     {:else if assetType === "video"}

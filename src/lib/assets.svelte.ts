@@ -75,6 +75,22 @@ export interface AssetMetadata extends AssetLightRow {
 }
 
 /**
+ * Result of storing a webview-captured thumbnail (`store_media_thumbnail`).
+ *
+ * Unlike the image path this carries dimensions, because a captured frame is
+ * where a video's real width and height first become known — `VideoExtractor`
+ * records 0×0 at import.
+ */
+export interface MediaThumbReady {
+  id: string;
+  thumb_hash: string;
+  thumb_path: string;
+  /** 0 for audio, which has no pixel dimensions to report. */
+  width: number;
+  height: number;
+}
+
+/**
  * Partial update. An omitted key leaves that column alone; `""` clears it. The
  * inspector sends one field at a time as it's edited, so the difference matters.
  */
@@ -892,6 +908,19 @@ class AssetLibrary {
    * AssetCard) to force a refetch. No effect on freshly generated thumbnails.
    */
   thumbVersion = $state(0);
+
+  /**
+   * Bumped whenever an existing row's DIMENSIONS change — which only happens
+   * when a video's first captured frame reveals its real shape (import records
+   * 0×0 for video, see `VideoExtractor`).
+   *
+   * The justified layout recomputes on its own, because it maps over
+   * `width`/`height` and those reads are deep-reactive. The waterfall does NOT:
+   * TanStack caches `estimateSize`, and its options effect only watches count,
+   * lanes and column width. This counter is what gives that effect a reason to
+   * re-measure, so a video stops being laid out square the moment it isn't.
+   */
+  layoutVersion = $state(0);
 
   /**
    * Background thumbnail-generation progress for the UI indicator; null when
@@ -2129,6 +2158,37 @@ class AssetLibrary {
         this.heavy.set(r.id, { ...heavy, thumb_hash: r.thumb_hash, thumb_path: r.thumb_path });
       }
     }
+  }
+
+  /**
+   * Patch in a thumbnail the webview captured for one video/audio asset (see
+   * `mediathumbs.ts`).
+   *
+   * Separate from `applyThumbnails` because this path also carries DIMENSIONS:
+   * a video is 0×0 until its first frame is captured, so this is the moment the
+   * grid learns its aspect ratio and has to re-lay-out — hence `layoutVersion`.
+   */
+  applyMediaThumbnail(r: MediaThumbReady): void {
+    const sized = r.width > 0 && r.height > 0;
+    const idx = this.#indexById.get(r.id);
+    if (idx !== undefined) {
+      const row = this.manifest[idx];
+      row.thumb_hash = r.thumb_hash; // deep-reactive
+      if (sized) {
+        row.width = r.width;
+        row.height = r.height;
+      }
+    }
+    const heavy = this.heavy.get(r.id);
+    if (heavy) {
+      this.heavy.set(r.id, {
+        ...heavy,
+        thumb_hash: r.thumb_hash,
+        thumb_path: r.thumb_path,
+        ...(sized ? { width: r.width, height: r.height } : {}),
+      });
+    }
+    if (sized) this.layoutVersion++;
   }
 
   /** Hydrate heavy rows for the given ids (visible window + overscan). */

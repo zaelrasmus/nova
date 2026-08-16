@@ -29,6 +29,7 @@
     import {get} from "svelte/store";
     import { libraryManager, settings } from "../routes/settings.svelte";
     import { assetLibrary, type AssetLightRow } from "$lib/assets.svelte";
+    import { mediaThumbnailer } from "$lib/mediathumbs";
     import { selection } from "$lib/selection.svelte";
     import { dropzone } from "$lib/dropzone.svelte";
     import { DROP_LIBRARY_ATTR, type DropTarget } from "$lib/droptarget";
@@ -256,6 +257,10 @@
       const lanes = numColumns;
       void columnWidth;
       void scrollEl;
+      // A captured video frame rewrites that row's width/height, and TanStack
+      // caches estimateSize — without this the tile keeps the square estimate it
+      // was given while the video was still 0x0. See `layoutVersion`.
+      void assetLibrary.layoutVersion;
       const instance = get(virtualizer);
       instance.setOptions({ count, lanes});
       instance.measure();
@@ -309,6 +314,24 @@
         if (needIds.length) {
             assetLibrary.ensureThumbnails(
                 needIds,
+                settings.preferences.thumbnailQuality,
+                settings.preferences.thumbnailLossyQuality,
+            );
+        }
+        // Video and audio take a different route entirely: Rust has no decoder
+        // for them, so the webview captures the pixels itself (mediathumbs.ts).
+        // Same trigger, same "still NULL" test — a separate queue because each
+        // capture is serial and far slower than an image encode.
+        const mediaIds = rows
+            .filter(
+                (r) =>
+                    (r.asset_type === "video" || r.asset_type === "audio") &&
+                    r.thumb_hash === null,
+            )
+            .map((r) => r.id);
+        if (mediaIds.length) {
+            mediaThumbnailer.enqueue(
+                mediaIds,
                 settings.preferences.thumbnailQuality,
                 settings.preferences.thumbnailLossyQuality,
             );

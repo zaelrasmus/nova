@@ -113,6 +113,7 @@ pub fn run() {
             commands::delete_tag_group,
             commands::fetch_assets_by_ids,
             commands::generate_thumbnails_for_ids,
+            commands::store_media_thumbnail,
             commands::rebuild_thumbnails,
             commands::fetch_sort,
             commands::set_sort,

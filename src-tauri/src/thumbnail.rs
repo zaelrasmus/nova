@@ -1,9 +1,14 @@
-//! Thumbnail + placeholder generation for imported images.
+//! Thumbnail + placeholder generation.
 //!
-//! Decodes each source image once, writes a WebP thumbnail (alpha preserved),
-//! and returns a ThumbHash placeholder, the recipe tag used, and whether the
-//! source is animated. Never panics on a bad file — returns Err, and the caller
-//! keeps the asset with NULL thumb fields (never drop an asset).
+//! Decodes each source once, writes a WebP thumbnail (alpha preserved), and
+//! returns a ThumbHash placeholder, the recipe tag used, and whether the source
+//! is animated. Never panics on a bad file — returns Err, and the caller keeps
+//! the asset with NULL thumb fields (never drop an asset).
+//!
+//! Two entry points, one pipeline. `generate` decodes an image file itself;
+//! `generate_from_capture` takes pixels the webview decoded, which is how video
+//! and audio get thumbnails at all — `image` cannot open an MP4, and the webview
+//! is the only media decoder in the process.
 
 use anyhow::{Context, Result};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
@@ -105,26 +110,46 @@ pub struct ThumbOutput {
 /// placeholder hash and recipe tag. Runs on the background thumbnail pipeline,
 /// never on the import critical path.
 pub fn generate(src: &Path, dest: &Path, config: ThumbConfig) -> Result<ThumbOutput> {
-    let decode_start = std::time::Instant::now();
     let img = image::open(src).with_context(|| format!("Failed to decode image: {src:?}"))?;
-    let decode_ms = decode_start.elapsed().as_millis();
+    from_image(&img, dest, config, false)
+}
 
+/// Thumbnail from a PNG the WEBVIEW produced — a video keyframe or a rendered
+/// audio waveform (see `mediathumbs.svelte.ts`). The webview owns the only media
+/// decoder we have, so for video and audio the pixels arrive from the frontend
+/// instead of from `image::open`; from here on the pipeline is identical.
+///
+/// `always_write` is forced on, and that is load-bearing rather than a detail.
+/// The skip-the-file optimisation below tells the grid to fall back to the
+/// ORIGINAL, which for an image is another image — but for a video it is an MP4,
+/// which no `<img>` can render. A small video would otherwise be marked done and
+/// show nothing forever.
+pub fn generate_from_capture(png: &[u8], dest: &Path, config: ThumbConfig) -> Result<ThumbOutput> {
+    let img = image::load_from_memory_with_format(png, image::ImageFormat::Png)
+        .context("Failed to decode captured frame")?;
+    from_image(&img, dest, config, true)
+}
+
+/// The shared body: downscale once, encode WebP, hash, extract the palette.
+fn from_image(
+    img: &DynamicImage,
+    dest: &Path,
+    config: ThumbConfig,
+    always_write: bool,
+) -> Result<ThumbOutput> {
     let (w, h) = (img.width(), img.height());
     let short = w.min(h);
 
     // Already small enough (short edge <= target): a thumbnail would be as big as
     // the original, so skip the file entirely and let the grid use the original.
     // Still return a ThumbHash so the row is marked done and never re-requested.
-    if short == 0 || short <= THUMB_SHORT_EDGE {
-        debug!(
-            ?src,
-            w, h, decode_ms, "Source small enough; skipping thumbnail file"
-        );
+    if !always_write && (short == 0 || short <= THUMB_SHORT_EDGE) {
+        debug!(w, h, "Source small enough; skipping thumbnail file");
         return Ok(ThumbOutput {
-            thumb_hash: thumb_hash_base64(&img),
+            thumb_hash: thumb_hash_base64(img),
             thumb_config: config.config_tag(),
             wrote_file: false,
-            palette: crate::color::extract_palette(&img),
+            palette: crate::color::extract_palette(img),
         });
     }
 
@@ -139,9 +164,16 @@ pub fn generate(src: &Path, dest: &Path, config: ThumbConfig) -> Result<ThumbOut
     // Pin the SHORT edge, but never let the LONG edge exceed THUMB_LONG_MAX;
     // tighter constraint wins. Normally the short-edge rule dominates (matching
     // Eagle) and the long cap only clamps panoramas and tall comics.
+    if w == 0 || h == 0 {
+        anyhow::bail!("Refusing to thumbnail a zero-pixel image ({w}x{h})");
+    }
+
     let long = w.max(h);
-    let scale =
-        (THUMB_SHORT_EDGE as f32 / short as f32).min(THUMB_LONG_MAX as f32 / long as f32);
+    // Never above 1.0: with `always_write` a capture smaller than the target
+    // would otherwise be UPSCALED, spending bytes to add no detail.
+    let scale = (THUMB_SHORT_EDGE as f32 / short as f32)
+        .min(THUMB_LONG_MAX as f32 / long as f32)
+        .min(1.0);
     let tw = ((w as f32 * scale).round() as u32).max(1);
     let th = ((h as f32 * scale).round() as u32).max(1);
     let thumb = img.resize_exact(tw, th, FilterType::Triangle);
@@ -173,10 +205,7 @@ pub fn generate(src: &Path, dest: &Path, config: ThumbConfig) -> Result<ThumbOut
 
     let thumb_hash = thumb_hash_base64(&thumb);
     let encode_ms = encode_start.elapsed().as_millis();
-    debug!(
-        ?src,
-        decode_ms, encode_ms, tw, th, lossless, "Thumbnail generated"
-    );
+    debug!(encode_ms, tw, th, lossless, "Thumbnail generated");
 
     Ok(ThumbOutput {
         thumb_hash,

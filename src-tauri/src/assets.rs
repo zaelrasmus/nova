@@ -4020,12 +4020,15 @@ pub async fn reset_thumbnails(pool: &SqlitePool, root: &Path) -> Result<()> {
     }
     fs::ensure_dir(&thumbs_dir).await?;
 
-    sqlx::query(
-        "UPDATE assets SET thumb_hash = NULL, thumb_config = NULL WHERE asset_type = 'image'",
-    )
-    .execute(pool)
-    .await
-    .context("Failed to reset thumbnail columns")?;
+    // Every row, not just images. The directory wipe above takes video and audio
+    // thumbnails with it, so leaving their `thumb_hash` set would point the grid
+    // at files that no longer exist — and a non-NULL hash is precisely what marks
+    // a row as "done", so nothing would ever regenerate them. Images are rebuilt
+    // eagerly by the pass that follows; media rows are picked up on next view.
+    sqlx::query("UPDATE assets SET thumb_hash = NULL, thumb_config = NULL")
+        .execute(pool)
+        .await
+        .context("Failed to reset thumbnail columns")?;
 
     info!("Thumbnail cache cleared for rebuild");
     Ok(())
@@ -4179,6 +4182,115 @@ async fn run_generation(
         "Thumbnail generation complete"
     );
     Ok(total)
+}
+
+// ── Webview-captured thumbnails (video / audio) ───────────────────────────────
+//
+// `image` cannot open an MP4 or an MP3, so the pipeline above skips every
+// non-image row and their `thumb_hash` stays NULL forever. The webview, however,
+// already has a media decoder: the frontend loads the file into a detached
+// <video>, seeks, and draws a frame to a canvas (for audio it renders the decoded
+// waveform instead). Those pixels come back here as a PNG and rejoin the normal
+// pipeline, so a video thumbnail is encoded, hashed and palette-sampled exactly
+// like an image one.
+
+/// A captured thumbnail after storage. Carries `width`/`height` because this is
+/// also where a video FIRST learns its real dimensions — `VideoExtractor` returns
+/// zeroes at import, so until a frame is captured the grid lays videos out square.
+#[derive(Serialize, Clone, Debug)]
+pub struct MediaThumbReady {
+    pub id: String,
+    pub thumb_hash: String,
+    pub thumb_path: String,
+    pub width: i64,
+    pub height: i64,
+}
+
+/// Store a frame the webview captured as `id`'s thumbnail, and adopt the natural
+/// dimensions that came with it.
+///
+/// Restricted to video/audio on purpose: this command accepts arbitrary pixels
+/// from the frontend, and images have a trustworthy decoder of their own. Without
+/// the guard it would be a way to overwrite any thumbnail in the library.
+#[instrument(skip(pool, root, png, config), fields(bytes = png.len()))]
+pub async fn store_capture_thumbnail(
+    pool: &SqlitePool,
+    root: &Path,
+    id: &str,
+    png: &[u8],
+    natural_width: u32,
+    natural_height: u32,
+    config: thumbnail::ThumbConfig,
+) -> Result<MediaThumbReady> {
+    let existing: Option<(String, i64, i64)> =
+        sqlx::query_as("SELECT asset_type, width, height FROM assets WHERE id = ?")
+            .bind(id)
+            .fetch_optional(pool)
+            .await
+            .context("Failed to look up asset for captured thumbnail")?;
+
+    let Some((asset_type, current_w, current_h)) = existing else {
+        anyhow::bail!("Unknown asset: {id}");
+    };
+    if asset_type != "video" && asset_type != "audio" {
+        anyhow::bail!("Captured thumbnails are only accepted for video/audio, got {asset_type}");
+    }
+
+    let thumbs_dir = root.join("thumbnails");
+    fs::ensure_dir(&thumbs_dir).await?;
+    let dest = thumbs_dir.join(format!("{id}.webp"));
+
+    // Encode off the async runtime: this is the same resize + WebP work the image
+    // pipeline hands to Rayon, and it would otherwise block a Tokio worker.
+    let png = png.to_vec();
+    let job_dest = dest.clone();
+    let output =
+        tokio::task::spawn_blocking(move || thumbnail::generate_from_capture(&png, &job_dest, config))
+            .await
+            .context("Captured thumbnail task panicked")??;
+
+    // Audio has no pixel dimensions to report, and a waveform's colours are ours,
+    // not the asset's — so both stay off rather than feeding the colour filters a
+    // palette that describes Nova's own UI.
+    let is_video = asset_type == "video";
+    let (width, height) = if is_video && natural_width > 0 && natural_height > 0 {
+        (natural_width as i64, natural_height as i64)
+    } else {
+        (current_w, current_h)
+    };
+
+    let mut tx = pool
+        .begin()
+        .await
+        .context("Failed to begin captured thumbnail transaction")?;
+
+    sqlx::query("UPDATE assets SET thumb_hash = ?, thumb_config = ?, width = ?, height = ? WHERE id = ?")
+        .bind(&output.thumb_hash)
+        .bind(&output.thumb_config)
+        .bind(width)
+        .bind(height)
+        .bind(id)
+        .execute(&mut *tx)
+        .await
+        .context("Failed to store captured thumbnail")?;
+
+    if is_video {
+        replace_palette(&mut tx, id, &output.palette).await?;
+    }
+
+    tx.commit()
+        .await
+        .context("Failed to commit captured thumbnail")?;
+
+    debug!(id, width, height, "Stored captured thumbnail");
+
+    Ok(MediaThumbReady {
+        id: id.to_string(),
+        thumb_hash: output.thumb_hash,
+        thumb_path: dest.to_string_lossy().into_owned(),
+        width,
+        height,
+    })
 }
 
 // ── Color analysis ────────────────────────────────────────────────────────────
@@ -5008,5 +5120,162 @@ mod pin_wire_tests {
             assert!(json.get(key).is_some(), "PinnedItem lost `{key}`: {json}");
         }
         assert_eq!(json["kind"], "smart");
+    }
+}
+
+/// Storage of thumbnails the webview captured for video and audio.
+///
+/// The capture itself can only be tested in a browser, but everything after it
+/// is ordinary Rust — and two of the rules here are easy to regress silently:
+/// a small capture must still write a file, and images must never be accepted.
+#[cfg(test)]
+mod capture_thumb_tests {
+    use super::*;
+
+    fn temp_root() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("nova-capture-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn config() -> thumbnail::ThumbConfig {
+        thumbnail::ThumbConfig::from_setting("lossy", 80.0)
+    }
+
+    /// A real PNG, so the test drives the actual decode → resize → encode path
+    /// rather than a stub that could hide a format mismatch.
+    fn png(w: u32, h: u32) -> Vec<u8> {
+        let mut buf = std::io::Cursor::new(Vec::new());
+        image::RgbaImage::from_fn(w, h, |x, y| {
+            image::Rgba([(x % 251) as u8, (y % 239) as u8, 128, 255])
+        })
+        .write_to(&mut buf, image::ImageFormat::Png)
+        .unwrap();
+        buf.into_inner()
+    }
+
+    async fn db() -> SqlitePool {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        for stmt in [
+            "CREATE TABLE assets (id TEXT PRIMARY KEY, asset_type TEXT, filename TEXT, \
+             width INTEGER, height INTEGER, thumb_hash TEXT, thumb_config TEXT)",
+            "CREATE TABLE asset_colors (asset_id TEXT, l REAL, a REAL, b REAL, ratio REAL)",
+            "INSERT INTO assets (id, asset_type, filename, width, height, thumb_hash, thumb_config) \
+             VALUES ('v1','video','clip.mp4',0,0,NULL,NULL)",
+            "INSERT INTO assets (id, asset_type, filename, width, height, thumb_hash, thumb_config) \
+             VALUES ('a1','audio','song.mp3',0,0,NULL,NULL)",
+            "INSERT INTO assets (id, asset_type, filename, width, height, thumb_hash, thumb_config) \
+             VALUES ('i1','image','pic.png',10,10,NULL,NULL)",
+        ] {
+            sqlx::query(stmt).execute(&pool).await.unwrap();
+        }
+        pool
+    }
+
+    #[tokio::test]
+    async fn a_captured_frame_fills_in_the_video_dimensions() {
+        let pool = db().await;
+        let root = temp_root();
+
+        let ready = store_capture_thumbnail(&pool, &root, "v1", &png(640, 360), 1920, 1080, config())
+            .await
+            .expect("a video capture must be stored");
+
+        assert_eq!((ready.width, ready.height), (1920, 1080));
+        assert!(!ready.thumb_hash.is_empty(), "a ThumbHash placeholder is required");
+        assert!(Path::new(&ready.thumb_path).exists(), "the WebP must be on disk");
+
+        let (w, h, hash): (i64, i64, Option<String>) =
+            sqlx::query_as("SELECT width, height, thumb_hash FROM assets WHERE id = 'v1'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            (w, h),
+            (1920, 1080),
+            "import records 0x0 for video; this is where the real shape lands"
+        );
+        assert!(hash.is_some(), "the row must be marked generated");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn a_small_capture_still_writes_a_file() {
+        let pool = db().await;
+        let root = temp_root();
+
+        // Below THUMB_SHORT_EDGE. For an image this takes the "skip the file, show
+        // the original" branch — which for a video would mean showing an MP4 in an
+        // <img>, i.e. nothing, forever.
+        let ready = store_capture_thumbnail(&pool, &root, "v1", &png(64, 64), 64, 64, config())
+            .await
+            .expect("a small capture must still be stored");
+
+        assert!(
+            Path::new(&ready.thumb_path).exists(),
+            "media can never fall back to the original, so the file is mandatory"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn audio_keeps_its_dimensions_and_contributes_no_palette() {
+        let pool = db().await;
+        let root = temp_root();
+
+        let ready = store_capture_thumbnail(&pool, &root, "a1", &png(512, 512), 0, 0, config())
+            .await
+            .expect("an audio waveform must be stored");
+
+        assert_eq!(
+            (ready.width, ready.height),
+            (0, 0),
+            "audio has no pixel dimensions to report"
+        );
+
+        let swatches: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM asset_colors WHERE asset_id = 'a1'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            swatches, 0,
+            "a waveform is drawn in Nova's colours; feeding them to the colour filter would lie"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn images_are_refused() {
+        let pool = db().await;
+        let root = temp_root();
+
+        let err = store_capture_thumbnail(&pool, &root, "i1", &png(32, 32), 32, 32, config())
+            .await
+            .expect_err("images have a trusted decoder of their own");
+
+        assert!(
+            err.to_string().contains("video/audio"),
+            "the refusal must name the rule, got: {err}"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn unknown_ids_are_refused() {
+        let pool = db().await;
+        let root = temp_root();
+
+        let err = store_capture_thumbnail(&pool, &root, "nope", &png(32, 32), 32, 32, config())
+            .await
+            .expect_err("an unknown id must not create anything");
+
+        assert!(err.to_string().contains("Unknown asset"), "got: {err}");
+
+        std::fs::remove_dir_all(&root).ok();
     }
 }

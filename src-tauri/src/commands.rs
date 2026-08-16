@@ -312,6 +312,53 @@ pub async fn generate_thumbnails_for_ids(
         .map_err(AppError::from)
 }
 
+/// Store a thumbnail the WEBVIEW captured, for one video or audio asset.
+///
+/// This is the only command where pixels flow frontend → backend, and the reason
+/// is that `image` cannot decode an MP4: the webview holds the process's only
+/// media decoder, so it captures the frame and Rust does everything after that
+/// (see `assets::store_capture_thumbnail`).
+///
+/// `png_base64` rather than `Vec<u8>` because Tauri's JSON IPC serialises a byte
+/// vector as an array of decimal numbers — roughly four bytes of transport per
+/// byte of image, against base64's 1.33.
+///
+/// Returns `None` when a rebuild holds `thumb_gen` exclusively. A rebuild is
+/// about to delete `thumbnails/` wholesale, so writing into it would leave a row
+/// pointing at a file that is removed moments later; the frontend simply retries
+/// on the next view.
+#[instrument(skip_all, fields(asset = %id))]
+#[tauri::command]
+pub async fn store_media_thumbnail(
+    id: String,
+    png_base64: String,
+    width: u32,
+    height: u32,
+    settings: crate::thumbnail::ThumbSettings,
+    state: tauri::State<'_, DbState>,
+) -> Result<Option<assets::MediaThumbReady>, AppError> {
+    let handle = state.acquire().await?;
+
+    let Ok(_guard) = state.thumb_gen.try_read() else {
+        info!("Rebuild in progress; dropping this captured thumbnail");
+        return Ok(None);
+    };
+
+    let png = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &png_base64)
+        .map_err(|e| {
+            warn!(error = %e, "Captured thumbnail was not valid base64");
+            AppError::from(anyhow::anyhow!("Captured thumbnail was not valid base64"))
+        })?;
+
+    let config = crate::thumbnail::ThumbConfig::from_settings(&settings);
+
+    assets::store_capture_thumbnail(&handle.pool, &handle.root, &id, &png, width, height, config)
+        .await
+        .map(Some)
+        .inspect_err(|e| tracing::error!(error = %e, "store_media_thumbnail failed"))
+        .map_err(AppError::from)
+}
+
 /// THE read path: stream a scope's light rows to the frontend over a `Channel`.
 ///
 /// A channel rather than a return value because the grid must paint before the
