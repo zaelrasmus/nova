@@ -542,6 +542,11 @@ pub struct Slice {
     pub content_type: String,
     /// Set when answering with 206 — `bytes start-end/total`.
     pub content_range: Option<String>,
+    /// Whether the origin actually honoured the range. Drives `Accept-Ranges` on
+    /// the way out: claiming range support we don't have makes the media element
+    /// seek into a file it will never receive, and a `<video>` that believes it
+    /// can seek but can't reports a nonsense duration and an inert scrubber.
+    pub ranged: bool,
     pub body: Vec<u8>,
 }
 
@@ -611,21 +616,30 @@ pub async fn fetch_slice(url: &str, range: Option<&str>) -> Result<Slice> {
             status: 206,
             content_type,
             content_range,
+            ranged: true,
             body,
         });
     }
 
-    // The server ignored the range, so there is no way to serve this piecemeal:
-    // it is the whole file or nothing. Bounded, and the refusal names the fix.
+    // The server ignored the range, so this is the whole file or nothing.
     let total = response.content_length();
     if total.is_some_and(|t| t > NO_RANGE_MAX) {
         bail!("This source doesn't support seeking and the file is too large to stream — download it to the library instead");
     }
-    let body = read_head(response, NO_RANGE_MAX as usize).await?;
+
+    // Read ONE byte past the cap so a truncation is detectable. Serving a short
+    // body as if it were complete is the worst outcome available: the element
+    // accepts it, plays a fraction, and reports a duration that is simply wrong.
+    let body = read_head(response, NO_RANGE_MAX as usize + 1).await?;
+    if body.len() as u64 > NO_RANGE_MAX {
+        bail!("This source doesn't support seeking and the file is too large to stream — download it to the library instead");
+    }
+
     Ok(Slice {
         status: 200,
         content_type,
         content_range: None,
+        ranged: false,
         body,
     })
 }

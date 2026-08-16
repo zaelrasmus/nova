@@ -16,10 +16,12 @@ import { invoke } from "@tauri-apps/api/core";
 
 const store = new LazyStore("settings.json");
 
+// NOTE: `theme`, `fontFamily` and `fontSize` used to live here. They were
+// persisted faithfully and read by nothing — the controls that set them were
+// commented out, and every component hardcodes its own neutral-* colours. A real
+// light theme is a design pass, not a preference, so the fields went with the
+// section. Anything left in an existing settings.json is simply ignored.
 export interface AppPreferences {
-  theme: "light" | "dark" | "system";
-  fontFamily: string;
-  fontSize: "sm" | "md" | "lg";
   navItemVisibility: Record<string, boolean>;
   thumbnailQuality: "auto" | "lossy" | "lossless";
   /** WebP lossy quality (0-100). Applies to Lossy mode and Auto's lossy branch. */
@@ -66,9 +68,6 @@ interface LibraryState {
 }
 
 const DEFAULT_PREFERENCES: AppPreferences = {
-  theme: "system",
-  fontFamily: "Inter",
-  fontSize: "md",
   navItemVisibility: {
     Uncategorized: true,
     Untagged: true,

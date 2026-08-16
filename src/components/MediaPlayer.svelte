@@ -219,6 +219,16 @@
     /** What the clock shows: the scrub target while dragging, else the playhead. */
     const displayTime = $derived(scrubbing ? scrubFraction * duration : (ctrl?.currentTime ?? 0));
 
+    // Three states, not two — and the distinction matters most for online video.
+    // A streamed file's duration is unknown until enough of it has arrived (for a
+    // non-faststart MP4 that means a second round trip for the moov atom at the
+    // END of the file), so a bar that dims itself the moment `duration` is 0
+    // spends that window looking broken rather than looking busy. Dim ONLY when
+    // we actually know seeking is impossible; while merely waiting, stay at full
+    // strength and just don't accept a drag yet.
+    const scrubUsable = $derived(duration > 0 && seekable);
+    const knownUnseekable = $derived(!seekable);
+
     function fractionAt(e: PointerEvent): number {
         const node = e.currentTarget as HTMLElement;
         const r = node.getBoundingClientRect();
@@ -389,9 +399,8 @@
         aria-disabled={!seekable}
         title={seekable ? undefined : "This source doesn't support seeking"}
         class="group/scrub relative -my-1.5 py-1.5
-               {duration > 0 && seekable
-            ? 'cursor-pointer'
-            : 'pointer-events-none opacity-40'}"
+               {scrubUsable ? 'cursor-pointer' : 'pointer-events-none'}
+               {knownUnseekable ? 'opacity-40' : ''}"
         onpointerdown={onScrubDown}
         onpointermove={onScrubMove}
         onpointerup={onScrubUp}

@@ -605,13 +605,16 @@ async fn serve_remote_inner<R: Runtime>(
     if let Ok(value) = tauri::http::HeaderValue::from_str(&slice.content_type) {
         headers.insert(tauri::http::header::CONTENT_TYPE, value);
     }
-    // Advertised unconditionally: the webview only issues follow-up ranges if it
-    // believes the source will honour them, and `fetch_slice` always answers a
-    // range even when it had to buffer the whole thing to do it.
-    headers.insert(
-        tauri::http::header::ACCEPT_RANGES,
-        tauri::http::HeaderValue::from_static("bytes"),
-    );
+    // ONLY when the origin really honoured the range. Advertising it otherwise
+    // invites the element to seek into bytes that will never arrive, which it
+    // reports as a wrong duration and a scrubber that cannot move — the player
+    // looks broken while the video plays.
+    if slice.ranged {
+        headers.insert(
+            tauri::http::header::ACCEPT_RANGES,
+            tauri::http::HeaderValue::from_static("bytes"),
+        );
+    }
     if let Some(content_range) = slice.content_range {
         if let Ok(value) = tauri::http::HeaderValue::from_str(&content_range) {
             headers.insert(tauri::http::header::CONTENT_RANGE, value);

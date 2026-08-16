@@ -54,7 +54,13 @@ impl MetadataExtractor for ImageExtractor {
     }
 }
 
-// todo: keyframe thumbnail + dimensions via an ffmpeg sidecar.
+// Returns nothing on purpose. `image` cannot open an MP4, so dimensions and a
+// keyframe are produced LATER by the webview — it loads the file, seeks past the
+// leader and draws a frame to a canvas (`mediathumbs.ts` → `store_media_thumbnail`),
+// which is also where the row first learns its real width and height. An ffmpeg
+// sidecar would let this happen at import time instead, and would additionally
+// cover the containers the webview refuses (MKV, ProRes); it is not needed for
+// anything that already plays.
 struct VideoExtractor;
 impl MetadataExtractor for VideoExtractor {
     fn extract(&self, _src: &Path) -> Result<ExtractedVisual> {
@@ -62,7 +68,10 @@ impl MetadataExtractor for VideoExtractor {
     }
 }
 
-// todo: waveform rendering via symphonia.
+// Also nothing, and audio genuinely has no dimensions to report. Its thumbnail
+// is a WAVEFORM, rendered in the webview from peaks decoded via WebAudio — so
+// symphonia would buy only the ability to do it here instead, at import time,
+// for a picture that is generated on view anyway.
 struct AudioExtractor;
 impl MetadataExtractor for AudioExtractor {
     fn extract(&self, _src: &Path) -> Result<ExtractedVisual> {

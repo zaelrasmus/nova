@@ -17,6 +17,16 @@
     import { untrack } from "svelte";
     import { toast } from "svelte-sonner";
     import {
+        Search,
+        X,
+        Tag,
+        Folder,
+        Clock,
+        SlidersHorizontal,
+        ChevronDown,
+        TriangleAlert,
+    } from "@lucide/svelte";
+    import {
         assetLibrary,
         allScopes,
         type SearchScopes,
@@ -224,7 +234,7 @@
         class="mx-4 mb-1 mt-2 flex items-center gap-2 rounded-md border border-amber-500/40
                bg-amber-500/10 px-3 py-1.5 text-xs text-amber-200"
     >
-        <span aria-hidden="true">⚠</span>
+        <TriangleAlert class="h-3.5 w-3.5 shrink-0" />
         <span class="flex-1">
             Search results may be incomplete — the index didn't finish updating.
         </span>
@@ -240,12 +250,16 @@
     </div>
 {/if}
 
-<div bind:this={root} class="relative flex items-center gap-2 px-4 py-2">
+<!-- Lives in the grid pane header, a 44px strip shared with the scope label and
+     the view controls, so it is sized to sit IN that row rather than to fill it:
+     h-7 to match the icon buttons either side, and free to shrink when the panes
+     are wide (see the header's min-w-0 / shrink rules in +page.svelte). -->
+<div bind:this={root} class="relative flex min-w-0 items-center gap-1.5">
     <!-- Input -->
-    <div class="relative flex-1">
-        <span class="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-neutral-400"
-            >🔍</span
-        >
+    <div class="relative min-w-0 flex-1">
+        <Search
+            class="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-neutral-500"
+        />
         <input
             bind:this={input}
             bind:value={query}
@@ -254,35 +268,45 @@
             onfocus={() => (focused = true)}
             onblur={() => setTimeout(() => (focused = false), 120)}
             spellcheck="false"
-            placeholder="Search — name, tags, notes…  ( - excludes, &quot;quotes&quot; for exact )"
-            class="w-full rounded-md border border-neutral-300 bg-white py-1.5 pl-8 pr-8 text-sm
-                   text-neutral-800 placeholder:text-neutral-400 focus:border-blue-400 focus:outline-none"
+            placeholder="Search…"
+            title={'Search name, tags and notes.  " " for exact, - to exclude'}
+            class="h-7 w-full rounded-md border border-neutral-800 bg-neutral-900 pl-7 pr-7 text-xs
+                   text-neutral-200 placeholder:text-neutral-500 transition-colors
+                   hover:border-neutral-700 focus:border-neutral-600 focus:outline-none"
         />
         {#if query}
             <button
                 type="button"
                 onclick={clearAll}
                 title="Clear search"
-                class="absolute right-2 top-1/2 -translate-y-1/2 text-neutral-400 hover:text-neutral-700"
-                >✕</button
+                aria-label="Clear search"
+                class="absolute right-1.5 top-1/2 grid h-4 w-4 -translate-y-1/2 place-items-center
+                       rounded text-neutral-500 transition-colors hover:bg-neutral-800
+                       hover:text-neutral-200"
             >
+                <X class="h-3 w-3" />
+            </button>
         {/if}
 
         <!-- Recent / typeahead panel -->
         {#if showPanel}
             <div
-                class="absolute z-30 mt-1 w-full overflow-hidden rounded-md border border-neutral-200
-                       bg-white shadow-lg"
+                class="absolute z-30 mt-1 w-full overflow-hidden rounded-md border border-neutral-800
+                       bg-neutral-900 shadow-lg"
             >
                 {#if searching}
                     {#each suggestions as s (s.kind + s.label)}
                         <button
                             type="button"
                             onclick={() => apply(s.label)}
-                            class="flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm
-                                   text-neutral-700 hover:bg-neutral-100"
+                            class="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs
+                                   text-neutral-200 hover:bg-neutral-800"
                         >
-                            <span class="text-xs">{s.kind === "tag" ? "🏷" : "📁"}</span>
+                            {#if s.kind === "tag"}
+                                <Tag class="h-3 w-3 shrink-0 text-neutral-500" />
+                            {:else}
+                                <Folder class="h-3 w-3 shrink-0 text-neutral-500" />
+                            {/if}
                             <span class="truncate">{s.label}</span>
                         </button>
                     {/each}
@@ -294,10 +318,10 @@
                         <button
                             type="button"
                             onclick={() => apply(term)}
-                            class="flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm
-                                   text-neutral-700 hover:bg-neutral-100"
+                            class="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs
+                                   text-neutral-200 hover:bg-neutral-800"
                         >
-                            <span class="text-xs text-neutral-400">🕑</span>
+                            <Clock class="h-3 w-3 shrink-0 text-neutral-500" />
                             <span class="truncate">{term}</span>
                         </button>
                     {/each}
@@ -312,25 +336,30 @@
             type="button"
             onclick={() => (scopesOpen = !scopesOpen)}
             title="Choose where to search"
-            class="flex items-center gap-1 rounded-md border border-neutral-300 bg-white px-2 py-1.5
-                   text-xs text-neutral-600 hover:bg-neutral-50"
+            aria-expanded={scopesOpen}
+            class="flex h-7 shrink-0 items-center gap-1 rounded-md border px-2 text-xs
+                   transition-colors
+                   {allActive
+                ? 'border-neutral-800 bg-neutral-900 text-neutral-400 hover:border-neutral-700 hover:text-neutral-200'
+                : 'border-blue-500/40 bg-blue-500/10 text-blue-300 hover:bg-blue-500/20'}"
         >
-            Scope
-            <span class="rounded bg-neutral-200 px-1 text-[10px] text-neutral-600">
-                {allActive ? "All" : activeScopes.length}
-            </span>
-            <span class="text-[9px]">▼</span>
+            <!-- The count is the point: a narrowed scope is the other way a
+                 search can quietly return less than expected, so it reads as
+                 active-blue rather than sitting silently at "3". -->
+            <SlidersHorizontal class="h-3 w-3" />
+            <span class="tabular-nums">{allActive ? "All" : activeScopes.length}</span>
+            <ChevronDown class="h-3 w-3 opacity-60" />
         </button>
 
         {#if scopesOpen}
             <div
-                class="absolute right-0 z-30 mt-1 w-44 overflow-hidden rounded-md border border-neutral-200
-                       bg-white py-1 shadow-lg"
+                class="absolute right-0 z-30 mt-1 w-44 overflow-hidden rounded-md border border-neutral-800
+                       bg-neutral-900 py-1 shadow-lg"
             >
                 {#each SCOPE_LABELS as s (s.key)}
                     <label
-                        class="flex cursor-pointer items-center gap-2 px-3 py-1 text-sm text-neutral-700
-                               hover:bg-neutral-100"
+                        class="flex cursor-pointer items-center gap-2 px-3 py-1 text-sm text-neutral-200
+                               hover:bg-neutral-800"
                     >
                         <input
                             type="checkbox"

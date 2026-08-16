@@ -624,7 +624,18 @@
      means "import into the library at large". Marked on the outer element rather
      than the scroll container so the header and empty states accept drops too —
      an empty library is exactly when you most want to drop files in. -->
-<div class="relative flex h-full flex-col" {...{ [DROP_LIBRARY_ATTR]: "" }}>
+<!-- `min-h-0 flex-1`, NOT `h-full`.
+     This is a flex child of `.grid-pane`, which is a column that has already
+     given `--chrome-h` (44px) to the pane header. `h-full` means 100% of the
+     PANE, header included — so this element was 44px taller than the slot it
+     occupies, and `.pane`'s `overflow: hidden` quietly clipped the bottom 44px.
+     Everything absolutely positioned in here inherited that error: the QuickLook
+     viewer is `absolute inset-0` against this box, so its `bottom-4` control bar
+     sat 44px below the visible area and only its top row survived. (Fullscreen
+     was unaffected — it anchors to the viewport with `fixed`, which is why the
+     same player looked correct there and broken here.)
+     `flex-1` takes exactly the remaining space; `min-h-0` lets it shrink. -->
+<div class="relative flex min-h-0 flex-1 flex-col" {...{ [DROP_LIBRARY_ATTR]: "" }}>
     <!-- LAYOUT: this component has no header any more. The asset count, the
          search field and the view controls moved up into the grid pane's header
          (+page.svelte + GridToolbar.svelte) so all three panes share one 44px

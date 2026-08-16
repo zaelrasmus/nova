@@ -26,7 +26,7 @@
     import { open } from "@tauri-apps/plugin-dialog";
     import { cubicOut } from "svelte/easing";
     import { tweened } from "svelte/motion";
-    import { QueryClient, QueryClientProvider } from "@tanstack/svelte-query";
+    import type { Component } from "svelte";
     import { toast } from "svelte-sonner";
     import { PanelLeft, PanelRight, Settings, Download } from "@lucide/svelte";
 
@@ -63,9 +63,8 @@
     import * as Dialog from "$components/ui/dialog";
     import * as Tabs from "$components/ui/tabs";
     import { SETTINGS_SECTIONS, DEFAULT_SECTION_ID } from "./settings-sections";
-    import AppearanceSection from "../components/settings/AppearanceSection.svelte";
-    import ImportSection from "../components/settings/ImportSection.svelte";
     import DisplaySection from "../components/settings/DisplaySection.svelte";
+    import AboutSection from "../components/settings/AboutSection.svelte";
     import { libraryManager } from "./settings.svelte";
 
     interface LibraryInfo {
@@ -103,15 +102,12 @@
         toast.error(message);
     }
 
-    const queryClient = new QueryClient({
-        defaultOptions: { queries: { refetchOnWindowFocus: false } },
-    });
-
     // To add a new settings section: import its component and register it below.
-    const sectionComponents: Record<string, any> = {
-        appearance: AppearanceSection,
-        import: ImportSection,
+    // Every id in SETTINGS_SECTIONS must appear here — a missing entry renders an
+    // empty panel, which is exactly how the old Library and About tabs looked.
+    const sectionComponents: Record<string, Component> = {
         display: DisplaySection,
+        about: AboutSection,
     };
 
     // Import progress state
@@ -500,8 +496,7 @@
 
 <svelte:window onkeydown={onKeydown} onpaste={onPaste} />
 
-<QueryClientProvider client={queryClient}>
-    <!--
+<!--
         ═══════════════════════════════════════════════════════════════════════
         THE SHELL — three panes, no global header.
 
@@ -736,8 +731,12 @@
 
                 <!-- Labels carry the attribute too: they're not interactive, so
                      there's no reason a click on the title shouldn't drag. -->
+                <!-- `min-w-0`, not `shrink-0`: those two together are a
+                     contradiction that made `truncate` inert, so a long folder
+                     name pushed the view controls off the end of the header
+                     instead of eliding. -->
                 <span
-                    class="shrink-0 truncate px-1 text-sm font-medium text-neutral-200"
+                    class="min-w-0 truncate px-1 text-sm font-medium text-neutral-200"
                     data-tauri-drag-region
                 >
                     {scopeLabel}
@@ -755,8 +754,14 @@
                 <div class="h-full flex-1" data-tauri-drag-region></div>
 
                 <!-- Search sits with the grid, not in the sidebar: it's a lens on
-                     the current scope, not a way to jump somewhere else. -->
-                <div class="w-64 shrink-0"><SearchBar /></div>
+                     the current scope, not a way to jump somewhere else.
+                     It is also the ONLY thing in this row allowed to give up
+                     width. Everything else is an icon button that becomes
+                     unusable below its natural size, so when both side panes are
+                     expanded the search field narrows and the controls survive —
+                     previously every child was `shrink-0`, the row overflowed,
+                     and the toolbar was simply cut off. -->
+                <div class="w-64 min-w-16 shrink"><SearchBar /></div>
 
                 <button
                     type="button"
@@ -968,4 +973,3 @@
             {/if}
         </div>
     {/if}
-</QueryClientProvider>

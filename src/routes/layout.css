@@ -327,6 +327,12 @@ body {
     align-items: center;
     gap: 0.25rem;
     padding-inline: 0.5rem;
+    /* A flex item's default min-width is `auto`, i.e. "never smaller than my
+       content" — which is why a long scope label or a wide search field could
+       push the view controls out of the header entirely instead of shrinking.
+       This lets the row actually honour the shrink rules its children declare. */
+    min-width: 0;
+    overflow: hidden;
     /* Without this, dragging the window by its header selects the text in it. */
     user-select: none;
     position: relative; /* containing block for the drag underlay below */
