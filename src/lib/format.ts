@@ -34,6 +34,23 @@ export function formatTimestamp(iso: string): string {
   });
 }
 
+/**
+ * Seconds -> "3:07", or "1:02:30" once it passes an hour. Used by the media
+ * player's clock and its scrub tooltip, so both read the same at every length.
+ *
+ * Widths are stable within a bracket (always MM:SS, always H:MM:SS) — a clock
+ * that changes width as it counts makes the whole control bar twitch.
+ */
+export function formatDuration(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) return "0:00";
+  const total = Math.floor(seconds);
+  const s = total % 60;
+  const m = Math.floor(total / 60) % 60;
+  const h = Math.floor(total / 3600);
+  const ss = String(s).padStart(2, "0");
+  return h > 0 ? `${h}:${String(m).padStart(2, "0")}:${ss}` : `${m}:${ss}`;
+}
+
 /** Greatest common divisor, for reducing a pixel size to a readable ratio. */
 function gcd(a: number, b: number): number {
   while (b) [a, b] = [b, a % b];

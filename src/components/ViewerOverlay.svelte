@@ -6,6 +6,10 @@
   immediately: ThumbHash blur → cached thumbnail → full-resolution original,
   which fades in once decoded.
 
+  Video and audio hand off entirely to MediaPlayer; this file keeps only the
+  shared chrome (title, counter, close, prev/next) and the keyboard split
+  described above the key handler.
+
   PanZoom OWNS the image's inline `style` and writes the transform imperatively
   every frame. Never put a Svelte `style=` on that <img> — the two writers fight.
   Use classes instead, and note it also needs `max-width: none` to escape
@@ -18,6 +22,7 @@
     import { assetLibrary, thumbHashUrl } from "$lib/assets.svelte";
     import { viewer } from "$lib/viewer.svelte";
     import { PanZoom } from "$lib/panzoom.svelte";
+    import MediaPlayer from "./MediaPlayer.svelte";
 
     const current = $derived(viewer.current);
 
@@ -39,6 +44,8 @@
     const fullUrl = $derived(heavy?.dest_path ? convertFileSrc(heavy.dest_path) : null);
 
     const isImage = $derived(current?.asset_type === "image");
+    /** Video and audio share a player, and share its keyboard claim (see below). */
+    const isMedia = $derived(current?.asset_type === "video" || current?.asset_type === "audio");
     const fullscreen = $derived(viewer.mode === "fullscreen");
 
     // Fade the full-res image in once it decodes, so switching assets doesn't
@@ -168,6 +175,13 @@
     });
 
     // Keyboard: active only while open, torn down with the overlay.
+    //
+    // Media SHARES this keymap with MediaPlayer, which registers its own window
+    // listener. The split: Space and the bare arrows mean play/pause and seek
+    // when a clip is open — that expectation is too strong to override — so this
+    // handler stands down on them and asset navigation moves to Shift+arrows.
+    // Escape and F keep the same meaning for every asset type. Both listeners
+    // fire on every key, so each side has to opt out explicitly.
     $effect(() => {
         if (!viewer.isOpen) return;
         const onKey = (e: KeyboardEvent) => {
@@ -177,14 +191,17 @@
                     viewer.close();
                     break;
                 case "ArrowRight":
+                    if (isMedia && !e.shiftKey) return; // the player seeks instead
                     e.preventDefault();
                     viewer.next();
                     break;
                 case "ArrowLeft":
+                    if (isMedia && !e.shiftKey) return;
                     e.preventDefault();
                     viewer.prev();
                     break;
                 case " ":
+                    if (isMedia) return; // play/pause
                     e.preventDefault();
                     viewer.toggleQuickLook();
                     break;
@@ -193,26 +210,33 @@
                     e.preventDefault();
                     viewer.toggleFullscreen();
                     break;
+                // Everything below drives PanZoom, so it is image-only — and the
+                // digits in particular have to reach the player, where they seek.
                 case "1":
+                    if (!isImage) return;
                     e.preventDefault();
                     pz?.actualSize();
                     break;
                 case "2":
                 case "0":
+                    if (!isImage) return;
                     e.preventDefault();
                     pz?.fit();
                     break;
                 case "+":
                 case "=": // unshifted '+' on most layouts
+                    if (!isImage) return;
                     e.preventDefault();
                     pz?.zoomIn();
                     break;
                 case "-":
+                    if (!isImage) return;
                     e.preventDefault();
                     pz?.zoomOut();
                     break;
                 case "b":
                 case "B":
+                    if (!isImage) return;
                     e.preventDefault();
                     cycleBg();
                     break;
@@ -302,17 +326,38 @@
                     />
                 {/if}
             </div>
+        {:else if isMedia}
+            {#if fullUrl}
+                <!-- Keyed by asset id on purpose: moving to the next clip has to
+                     build a NEW element and controller rather than re-point a
+                     live one, which is what releases the previous file handle and
+                     resets the transport state cleanly. -->
+                {#key current.id}
+                    <MediaPlayer
+                        src={fullUrl}
+                        kind={current.asset_type === "video" ? "video" : "audio"}
+                        filename={current.filename}
+                        extension={heavy?.extension}
+                        fileSize={heavy?.file_size}
+                        poster={thumbUrl}
+                        destPath={heavy?.dest_path ?? null}
+                        {fullscreen}
+                        onToggleFullscreen={() => viewer.toggleFullscreen()}
+                        onBackdropClick={() => viewer.close()}
+                    />
+                {/key}
+            {:else}
+                <!-- Heavy row still hydrating; it usually arrives in the same
+                     frame, so anything louder than this would just flash. -->
+                <div class="flex h-full w-full items-center justify-center text-xs text-neutral-600">
+                    Loading…
+                </div>
+            {/if}
         {:else}
             <div class="flex h-full w-full flex-col items-center justify-center gap-3 text-neutral-400">
-                <span class="text-5xl"
-                    >{current.asset_type === "video"
-                        ? "🎬"
-                        : current.asset_type === "audio"
-                          ? "🎵"
-                          : "📄"}</span
-                >
+                <span class="text-5xl">📄</span>
                 <span class="text-sm">{current.filename}</span>
-                <span class="text-xs text-neutral-600">Preview for this type is coming later.</span>
+                <span class="text-xs text-neutral-600">No preview for this file type.</span>
             </div>
         {/if}
 
@@ -326,14 +371,18 @@
         </div>
 
         <div class="absolute right-3 top-3 flex items-center gap-1">
-            <button
-                type="button"
-                onclick={() => viewer.toggleFullscreen()}
-                title={fullscreen ? "Exit fullscreen (F)" : "Fullscreen (F)"}
-                class="rounded-md bg-white/10 px-2 py-1 text-xs text-white hover:bg-white/20"
-            >
-                {fullscreen ? "⤢ Exit" : "⤢ Fullscreen"}
-            </button>
+            <!-- Media carries its own fullscreen button in the player bar; two
+                 controls for one action in the same view reads as a bug. -->
+            {#if !isMedia}
+                <button
+                    type="button"
+                    onclick={() => viewer.toggleFullscreen()}
+                    title={fullscreen ? "Exit fullscreen (F)" : "Fullscreen (F)"}
+                    class="rounded-md bg-white/10 px-2 py-1 text-xs text-white hover:bg-white/20"
+                >
+                    {fullscreen ? "⤢ Exit" : "⤢ Fullscreen"}
+                </button>
+            {/if}
             <button
                 type="button"
                 onclick={() => viewer.close()}
@@ -347,7 +396,7 @@
                 type="button"
                 onclick={() => viewer.prev()}
                 disabled={viewer.index === 0}
-                title="Previous (←)"
+                title={isMedia ? "Previous (Shift+←)" : "Previous (←)"}
                 class="absolute left-3 top-1/2 -translate-y-1/2 rounded-full bg-white/10 px-3 py-3
                        text-lg text-white hover:bg-white/20 disabled:opacity-20"
                 aria-label="Previous">‹</button
@@ -356,7 +405,7 @@
                 type="button"
                 onclick={() => viewer.next()}
                 disabled={viewer.index === viewer.count - 1}
-                title="Next (→)"
+                title={isMedia ? "Next (Shift+→)" : "Next (→)"}
                 class="absolute right-3 top-1/2 -translate-y-1/2 rounded-full bg-white/10 px-3 py-3
                        text-lg text-white hover:bg-white/20 disabled:opacity-20"
                 aria-label="Next">›</button

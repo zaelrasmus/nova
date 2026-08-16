@@ -37,6 +37,14 @@ export interface AppPreferences {
   gridView: "waterfall" | "justified";
   animateGifsInGrid: boolean;
 
+  // ── Media playback ──────────────────────────────────────────────────────
+  // Set from the viewer's player rather than a settings screen: a volume the
+  // user has to re-set on every clip is the kind of thing that quietly makes an
+  // app feel cheap. Written on pointer-up, not per slider tick.
+  /** Viewer playback volume, 0-1. */
+  mediaVolume: number;
+  mediaMuted: boolean;
+
   // ── Layout shell ────────────────────────────────────────────────────────
   // Pane geometry is a preference, not session state: a user who narrows the
   // inspector wants it narrow tomorrow too. Widths are written on pointer-up
@@ -74,6 +82,8 @@ const DEFAULT_PREFERENCES: AppPreferences = {
   gridColumns: 4,
   gridView: "waterfall",
   animateGifsInGrid: false,
+  mediaVolume: 1,
+  mediaMuted: false,
   sidebarWidth: 240,
   inspectorWidth: 320,
   sidebarHidden: false,
