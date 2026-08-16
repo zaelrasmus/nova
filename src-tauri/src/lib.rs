@@ -13,6 +13,8 @@
 //!     place a scope+filters+sort becomes SQL. Also folders, pins, ordering.
 //!   * `tags`      — tags and tag groups.
 //!   * `search`    — the denormalised FTS5 `search_index` and its sync primitive.
+//!   * `remote`    — probing and downloading a URL: every HTTP request Nova
+//!     makes lives here, and nowhere else.
 //!   * `rules`     — smart-folder rule trees compiled to SQL predicates.
 //!   * `actions`   — `run_steps`, the mutation runner every write routes through,
 //!     plus undo and the trash.
@@ -27,6 +29,7 @@ mod error;
 mod extract;
 mod fs;
 mod library;
+mod remote;
 mod rules;
 mod search;
 mod tags;
@@ -61,6 +64,28 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_drag::init())
+        // `nova-remote://<asset id>` — how the webview reads an asset whose bytes
+        // are not on disk. Registered as a protocol rather than pointing an
+        // element straight at the origin URL, because only Rust can set the
+        // Referer and User-Agent that many CDNs demand, and because the page's
+        // CSP then never has to allow arbitrary remote origins.
+        //
+        // Asynchronous: the responder is handed to a task, so a slow origin
+        // blocks nothing. See `remote::fetch_slice` for why one response is one
+        // bounded chunk.
+        .register_asynchronous_uri_scheme_protocol("nova-remote", |ctx, request, responder| {
+            let app = ctx.app_handle().clone();
+            let id = request.uri().path().trim_start_matches('/').to_string();
+            let range = request
+                .headers()
+                .get("range")
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_owned);
+
+            tauri::async_runtime::spawn(async move {
+                responder.respond(commands::serve_remote_asset(&app, &id, range.as_deref()).await);
+            });
+        })
         .invoke_handler(tauri::generate_handler![
             commands::create_library,
             commands::import_assets,
@@ -112,6 +137,12 @@ pub fn run() {
             commands::set_tag_group_color,
             commands::delete_tag_group,
             commands::fetch_assets_by_ids,
+            commands::probe_url,
+            commands::import_from_url,
+            commands::add_remote_asset,
+            commands::keep_remote_offline,
+            commands::verify_remote_asset,
+            commands::set_media_duration,
             commands::generate_thumbnails_for_ids,
             commands::store_media_thumbnail,
             commands::rebuild_thumbnails,

@@ -72,6 +72,23 @@ export interface AssetMetadata extends AssetLightRow {
   source_url: string | null;
 
   thumb_path: string; // "" => no thumbnail; fallback to dest_path
+
+  // ── Online assets ───────────────────────────────────────────────────────
+  // `origin` is the entire state machine and has two values. There is no
+  // "remote but cached" — bytes only ever arrive via an explicit Keep offline,
+  // which flips the row to "local" for good. So "can I open this without a
+  // network?" is one field. See the 20260815 migration.
+  /** "local" — bytes at `dest_path` — or "remote" — bytes at `remote_url`. */
+  origin: "local" | "remote";
+  /** Where the bytes live. DELIVERY; `source_url` is provenance and differs. */
+  remote_url: string | null;
+  /** null for local assets. "unavailable" means the link has rotted. */
+  remote_state: "ok" | "unverified" | "unavailable" | null;
+  last_verified_at: string | null;
+  /** Whether the origin honours range requests — i.e. whether seeking works. */
+  supports_range: boolean | null;
+  /** Media length in ms; null until the webview measures it. */
+  duration_ms: number | null;
 }
 
 /**

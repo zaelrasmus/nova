@@ -30,6 +30,7 @@
         TriangleAlert,
         Music,
         FolderOpen,
+        CloudDownload,
     } from "@lucide/svelte";
     import { MediaController, computeWaveform, SEEK_STEP_S, SEEK_JUMP_S } from "$lib/media.svelte";
     import { formatDuration, formatBytes } from "$lib/format";
@@ -50,6 +51,19 @@
         onToggleFullscreen: () => void;
         /** Click on the empty area around the media. */
         onBackdropClick?: () => void;
+        /**
+         * False when the source can't serve byte ranges. The scrubber goes inert
+         * rather than letting the user drag something that will never move —
+         * an honest dead control beats a live one that silently does nothing.
+         */
+        seekable?: boolean;
+        /** Fires once, when metadata reveals the length. */
+        onduration?: (ms: number) => void;
+        /** True when the bytes are streaming from the network, not from disk. */
+        remote?: boolean;
+        /** Download an online asset into the library. */
+        onKeepOffline?: () => void;
+        keepingOffline?: boolean;
     }
 
     let {
@@ -63,6 +77,11 @@
         fullscreen,
         onToggleFullscreen,
         onBackdropClick,
+        seekable = true,
+        onduration,
+        remote = false,
+        onKeepOffline,
+        keepingOffline = false,
     }: Props = $props();
 
     // ── Controller lifecycle ──────────────────────────────────────────────────
@@ -115,6 +134,11 @@
 
     $effect(() => {
         if (kind !== "audio") return;
+        // Never for an online asset: computing peaks means decoding the WHOLE
+        // file, so a decoration would quietly pull the entire track over the
+        // network — the exact cost the user avoided by saving a link. Remote
+        // audio gets the plain scrubber instead.
+        if (remote) return;
         const url = src;
         let cancelled = false;
         void computeWaveform(url).then((result) => {
@@ -177,6 +201,17 @@
     let seekRaf = 0;
 
     const duration = $derived(ctrl?.duration ?? 0);
+
+    // Report the length upward the first time it's known. Rust decodes no media,
+    // so the webview is the only thing that can ever measure this.
+    let reportedDuration = false;
+    $effect(() => {
+        const seconds = ctrl?.duration ?? 0;
+        if (reportedDuration || seconds <= 0) return;
+        reportedDuration = true;
+        onduration?.(seconds * 1000);
+    });
+
     const progress = $derived(
         scrubbing ? scrubFraction : duration > 0 ? (ctrl?.currentTime ?? 0) / duration : 0,
     );
@@ -192,7 +227,7 @@
     }
 
     function onScrubDown(e: PointerEvent) {
-        if (duration <= 0) return;
+        if (duration <= 0 || !seekable) return;
         e.stopPropagation();
         (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
         scrubbing = true;
@@ -351,7 +386,12 @@
         aria-valuemax={Math.round(duration)}
         aria-valuenow={Math.round(displayTime)}
         aria-valuetext={formatDuration(displayTime)}
-        class="group/scrub relative -my-1.5 cursor-pointer py-1.5 {duration > 0 ? '' : 'pointer-events-none opacity-40'}"
+        aria-disabled={!seekable}
+        title={seekable ? undefined : "This source doesn't support seeking"}
+        class="group/scrub relative -my-1.5 py-1.5
+               {duration > 0 && seekable
+            ? 'cursor-pointer'
+            : 'pointer-events-none opacity-40'}"
         onpointerdown={onScrubDown}
         onpointermove={onScrubMove}
         onpointerup={onScrubUp}
@@ -459,6 +499,25 @@
             >
                 <Repeat class="h-4 w-4" />
             </button>
+
+            <!-- Online assets only, and it removes itself once the bytes are
+                 local — the row flips to origin=local and never comes back. -->
+            {#if remote && onKeepOffline}
+                <button
+                    type="button"
+                    onclick={onKeepOffline}
+                    disabled={keepingOffline}
+                    title="Download into the library so it works offline"
+                    aria-label="Keep offline"
+                    class="{BTN} disabled:opacity-50"
+                >
+                    {#if keepingOffline}
+                        <LoaderCircle class="h-4 w-4 animate-spin" />
+                    {:else}
+                        <CloudDownload class="h-4 w-4" />
+                    {/if}
+                </button>
+            {/if}
 
             <button
                 type="button"

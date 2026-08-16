@@ -224,6 +224,409 @@ pub async fn import_dropped_paths(
     .map_err(AppError::from)
 }
 
+/// Ask what is at a URL. Creates nothing — this is the call behind the receipt
+/// the user is shown before agreeing to anything.
+///
+/// Needs no library: it touches no database, only the network. Errors here are
+/// expected traffic (a dead link, a typo, a private address) rather than faults,
+/// so they log at warn and read as sentences the dialog can show verbatim.
+#[instrument(skip_all, fields(url = %url))]
+#[tauri::command]
+pub async fn probe_url(url: String) -> Result<crate::remote::UrlProbe, AppError> {
+    crate::remote::probe(&url)
+        .await
+        .inspect_err(|e| warn!(error = %e, "probe_url failed"))
+        .map_err(AppError::from)
+}
+
+/// Download a URL into the library.
+///
+/// Deliberately reuses the ordinary import pipeline rather than writing rows
+/// itself: staging the download as a real file and handing that to
+/// `assets::import_assets` means URL imports get hashing, dedup, trash-restore,
+/// metadata extraction and folder placement for free, and can never drift from
+/// what a dragged-in file does.
+///
+/// The cost is one extra copy (download → staging → `assets/`). Accepted for
+/// now: correctness through one pipeline is worth more than a second write on a
+/// path the user takes rarely and deliberately.
+///
+/// The URL is re-probed rather than trusted from the client. The receipt the
+/// user agreed to was advisory; this is the call that writes, and it must not
+/// take the filename or the type on the webview's word.
+#[instrument(skip_all, fields(url = %url, target = ?target_folder))]
+#[tauri::command]
+pub async fn import_from_url(
+    window: tauri::Window,
+    url: String,
+    filename: Option<String>,
+    target_folder: Option<String>,
+    state: tauri::State<'_, DbState>,
+) -> Result<ImportResult, AppError> {
+    let handle = state.acquire().await?;
+    let probe = crate::remote::probe(&url)
+        .await
+        .inspect_err(|e| warn!(error = %e, "import_from_url probe failed"))?;
+
+    // Only the STEM of a user-supplied name is honoured; the extension always
+    // comes from what the bytes actually are.
+    let stem = filename
+        .as_deref()
+        .map(str::trim)
+        .filter(|f| !f.is_empty())
+        .map(crate::remote::sanitize_stem);
+    let staged_name = match (stem, probe.extension.as_str()) {
+        (Some(s), "") => s,
+        (Some(s), ext) => format!("{s}.{ext}"),
+        (None, _) => probe.filename.clone(),
+    };
+
+    // Stage outside the library: a half-written download must never be visible
+    // in the user's `.library` folder, which is portable and user-facing.
+    let staging = std::env::temp_dir().join(format!("nova-url-{}", uuid::Uuid::new_v4()));
+    tokio::fs::create_dir_all(&staging)
+        .await
+        .map_err(|e| AppError::from(anyhow::Error::from(e).context("Could not stage the download")))?;
+    let staged = staging.join(&staged_name);
+
+    let progress_window = window.clone();
+    let downloaded = crate::remote::download(&url, &staged, move |received, total| {
+        if let Err(e) = progress_window.emit("url-download-progress", (received, total)) {
+            warn!(error = %e, "Failed to emit url-download-progress");
+        }
+    })
+    .await;
+
+    let result = match downloaded {
+        Ok(bytes) => {
+            info!(bytes, name = %staged_name, "Downloaded; handing to the import pipeline");
+            let reporter = Arc::new(TauriProgressReporter {
+                window,
+                last_emit: std::sync::Mutex::new(std::time::Instant::now()),
+            });
+            assets::import_assets(
+                reporter,
+                assets::ImportRequest {
+                    sources: vec![staged],
+                    target_folder,
+                    import_folders: false,
+                    include_roots: false,
+                },
+                handle.pool.clone(),
+                handle.root,
+            )
+            .await
+            .inspect_err(|e| tracing::error!(error = %e, "import_from_url import failed"))
+        }
+        Err(e) => Err(e),
+    };
+
+    // Best-effort: the staging dir is in the OS temp area, so a leak here is
+    // swept up by the system rather than by the user.
+    if let Err(e) = tokio::fs::remove_dir_all(&staging).await {
+        warn!(error = %e, ?staging, "Could not remove the download staging dir (non-fatal)");
+    }
+
+    let result = result?;
+
+    // Record where it came from. `source_url` is FTS-indexed, so this has to go
+    // through the reindex primitive or the new row would be searchable by name
+    // but not by origin.
+    let ids: Vec<String> = result.assets.iter().map(|a| a.id.clone()).collect();
+    if !ids.is_empty() {
+        for id in &ids {
+            if let Err(e) = sqlx::query("UPDATE assets SET source_url = ? WHERE id = ?")
+                .bind(&probe.original_url)
+                .bind(id)
+                .execute(&handle.pool)
+                .await
+            {
+                warn!(error = %e, %id, "Could not record source_url (non-fatal)");
+            }
+        }
+        crate::search::reindex_assets(&handle.pool, &ids).await.ok();
+    }
+
+    Ok(result)
+}
+
+/// Record a URL as an asset WITHOUT downloading it — the "Save link only" half
+/// of the receipt.
+///
+/// Re-probes for the same reason `import_from_url` does: the receipt was
+/// advisory, this is the call that writes. The probe result is also what fills
+/// in size and `supports_range`, so the player knows whether seeking will work
+/// before it ever opens the file.
+#[instrument(skip_all, fields(url = %url, target = ?target_folder))]
+#[tauri::command]
+pub async fn add_remote_asset(
+    url: String,
+    filename: Option<String>,
+    target_folder: Option<String>,
+    state: tauri::State<'_, DbState>,
+) -> Result<AssetMetadata, AppError> {
+    let handle = state.acquire().await?;
+    let probe = crate::remote::probe(&url)
+        .await
+        .inspect_err(|e| warn!(error = %e, "add_remote_asset probe failed"))?;
+
+    // Same rule as the download path: the user may rename, but never retype what
+    // the file IS.
+    let stem = filename
+        .as_deref()
+        .map(str::trim)
+        .filter(|f| !f.is_empty())
+        .map(crate::remote::sanitize_stem);
+    let name = match (stem, probe.extension.as_str()) {
+        (Some(s), "") => s,
+        (Some(s), ext) => format!("{s}.{ext}"),
+        (None, _) => probe.filename.clone(),
+    };
+
+    assets::create_remote_asset(
+        &handle.pool,
+        &handle.root,
+        assets::RemoteAssetSpec {
+            filename: name,
+            extension: probe.extension,
+            asset_type: probe.asset_type,
+            remote_url: probe.original_url,
+            size: probe.size,
+            supports_range: probe.supports_range,
+        },
+        target_folder.as_deref(),
+    )
+    .await
+    .inspect_err(|e| tracing::error!(error = %e, "add_remote_asset failed"))
+    .map_err(AppError::from)
+}
+
+/// Download a remote asset's bytes and make it an ordinary local one.
+///
+/// The one-way door in the online-asset model: after this the row is
+/// indistinguishable from a dragged-in file, which is what keeps `origin` a
+/// two-state column instead of a pair that can disagree.
+///
+/// Downloads to a temp name beside the target and renames on success, so a
+/// failure can never leave a truncated file at the path the row already points
+/// at — the asset would then look local and play as garbage.
+#[instrument(skip_all, fields(asset = %id))]
+#[tauri::command]
+pub async fn keep_remote_offline(
+    window: tauri::Window,
+    id: String,
+    state: tauri::State<'_, DbState>,
+) -> Result<AssetMetadata, AppError> {
+    let handle = state.acquire().await?;
+
+    let Some(url) = assets::remote_url_for(&handle.pool, &id).await? else {
+        return Err(AppError::from(anyhow::anyhow!(
+            "That asset isn't an online asset"
+        )));
+    };
+
+    let rows = assets::fetch_assets_by_ids(&handle.pool, &handle.root, std::slice::from_ref(&id))
+        .await?;
+    let row = rows
+        .first()
+        .ok_or_else(|| AppError::from(anyhow::anyhow!("That asset no longer exists")))?;
+
+    let final_path = std::path::PathBuf::from(&row.dest_path);
+    if let Some(parent) = final_path.parent() {
+        tokio::fs::create_dir_all(parent).await.map_err(|e| {
+            AppError::from(anyhow::Error::from(e).context("Could not prepare the assets folder"))
+        })?;
+    }
+    let temp_path = final_path.with_extension("partial");
+
+    let progress_window = window.clone();
+    let asset_id = id.clone();
+    crate::remote::download(&url, &temp_path, move |received, total| {
+        if let Err(e) =
+            progress_window.emit("remote-download-progress", (&asset_id, received, total))
+        {
+            warn!(error = %e, "Failed to emit remote-download-progress");
+        }
+    })
+    .await
+    .inspect_err(|e| warn!(error = %e, "keep_remote_offline download failed"))?;
+
+    tokio::fs::rename(&temp_path, &final_path)
+        .await
+        .map_err(|e| {
+            AppError::from(anyhow::Error::from(e).context("Could not finalize the download"))
+        })?;
+
+    let size = tokio::fs::metadata(&final_path)
+        .await
+        .map(|m| i64::try_from(m.len()).unwrap_or(i64::MAX))
+        .unwrap_or(0);
+
+    // Hash for dedup — but only adopt it if no other asset already claims it.
+    // `idx_assets_hash` is UNIQUE, so writing a duplicate would abort the
+    // promotion outright; a NULL hash simply opts this row out of dedup, which
+    // is where every remote asset already sits.
+    let hash = crate::fs::hash_file(&final_path);
+    let hash = match hash {
+        Some(h) => {
+            let taken: Option<String> = sqlx::query_scalar(
+                "SELECT id FROM assets WHERE content_hash = ? AND id <> ? LIMIT 1",
+            )
+            .bind(&h)
+            .bind(&id)
+            .fetch_optional(&handle.pool)
+            .await
+            .unwrap_or(None);
+            if taken.is_some() {
+                info!("Downloaded bytes duplicate an existing asset; leaving this row unhashed");
+                None
+            } else {
+                Some(h)
+            }
+        }
+        None => None,
+    };
+
+    assets::promote_remote_asset(&handle.pool, &id, size, hash.as_deref())
+        .await
+        .inspect_err(|e| tracing::error!(error = %e, "keep_remote_offline promote failed"))?;
+
+    let rows = assets::fetch_assets_by_ids(&handle.pool, &handle.root, std::slice::from_ref(&id))
+        .await?;
+    rows.into_iter()
+        .next()
+        .ok_or_else(|| AppError::from(anyhow::anyhow!("That asset no longer exists")))
+}
+
+/// Re-check whether a remote asset's link still resolves, and record the answer.
+///
+/// Lazy and one at a time on purpose. Verifying a whole library on launch would
+/// be a self-inflicted request storm against someone else's CDN, and the fastest
+/// route to having a user's IP rate-limited.
+#[instrument(skip_all, fields(asset = %id))]
+#[tauri::command]
+pub async fn verify_remote_asset(
+    id: String,
+    state: tauri::State<'_, DbState>,
+) -> Result<String, AppError> {
+    let handle = state.acquire().await?;
+
+    let Some(url) = assets::remote_url_for(&handle.pool, &id).await? else {
+        return Err(AppError::from(anyhow::anyhow!(
+            "That asset isn't an online asset"
+        )));
+    };
+
+    let next = match crate::remote::probe(&url).await {
+        Ok(_) => assets::REMOTE_OK,
+        Err(e) => {
+            info!(error = %e, "Remote asset did not verify");
+            assets::REMOTE_UNAVAILABLE
+        }
+    };
+    assets::set_remote_state(&handle.pool, &id, next).await?;
+    Ok(next.to_string())
+}
+
+/// Store a media asset's duration, measured by the webview when it loaded the
+/// file. The only place Nova can learn it — nothing in Rust decodes media.
+#[instrument(skip_all, fields(asset = %id))]
+#[tauri::command]
+pub async fn set_media_duration(
+    id: String,
+    duration_ms: i64,
+    state: tauri::State<'_, DbState>,
+) -> Result<(), AppError> {
+    let handle = state.acquire().await?;
+    assets::set_duration(&handle.pool, &id, duration_ms)
+        .await
+        .map_err(AppError::from)
+}
+
+/// Serve one slice of a remote asset to the webview. Backs `nova-remote://`.
+///
+/// Not a `#[tauri::command]` — it answers the custom protocol registered in
+/// `lib.rs`, so it deals in `http::Response` rather than `AppError`. Every
+/// failure is a 404 with a plain-text reason: an unknown id, a local asset and a
+/// dead link are all "no bytes here", and distinguishing them for the webview
+/// would only tell a page more than it needs.
+pub async fn serve_remote_asset<R: Runtime>(
+    app: &AppHandle<R>,
+    id: &str,
+    range: Option<&str>,
+) -> tauri::http::Response<Vec<u8>> {
+    match serve_remote_inner(app, id, range).await {
+        Ok(response) => response,
+        Err(e) => {
+            warn!(error = %e, %id, "nova-remote request failed");
+            plain_response(
+                tauri::http::StatusCode::NOT_FOUND,
+                e.to_string().into_bytes(),
+            )
+        }
+    }
+}
+
+/// Built by hand rather than through `Response::builder()`, which returns a
+/// Result this cannot meaningfully handle — there is no fallback response to
+/// send if building the fallback response fails.
+fn plain_response(status: tauri::http::StatusCode, body: Vec<u8>) -> tauri::http::Response<Vec<u8>> {
+    let mut response = tauri::http::Response::new(body);
+    *response.status_mut() = status;
+    response.headers_mut().insert(
+        tauri::http::header::CONTENT_TYPE,
+        tauri::http::HeaderValue::from_static("text/plain; charset=utf-8"),
+    );
+    response
+}
+
+async fn serve_remote_inner<R: Runtime>(
+    app: &AppHandle<R>,
+    id: &str,
+    range: Option<&str>,
+) -> anyhow::Result<tauri::http::Response<Vec<u8>>> {
+    let state = app.state::<DbState>();
+    let handle = state
+        .acquire()
+        .await
+        .map_err(|_| anyhow::anyhow!("No library is open"))?;
+
+    let url = assets::remote_url_for(&handle.pool, id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("Not an online asset"))?;
+
+    let slice = crate::remote::fetch_slice(&url, range).await?;
+
+    let mut response = tauri::http::Response::new(slice.body);
+    *response.status_mut() =
+        tauri::http::StatusCode::from_u16(slice.status).unwrap_or(tauri::http::StatusCode::OK);
+
+    let headers = response.headers_mut();
+    if let Ok(value) = tauri::http::HeaderValue::from_str(&slice.content_type) {
+        headers.insert(tauri::http::header::CONTENT_TYPE, value);
+    }
+    // Advertised unconditionally: the webview only issues follow-up ranges if it
+    // believes the source will honour them, and `fetch_slice` always answers a
+    // range even when it had to buffer the whole thing to do it.
+    headers.insert(
+        tauri::http::header::ACCEPT_RANGES,
+        tauri::http::HeaderValue::from_static("bytes"),
+    );
+    if let Some(content_range) = slice.content_range {
+        if let Ok(value) = tauri::http::HeaderValue::from_str(&content_range) {
+            headers.insert(tauri::http::header::CONTENT_RANGE, value);
+        }
+    }
+    // Needed for the canvas capture that produces remote video thumbnails: it
+    // loads through a crossorigin element, and without this the canvas taints.
+    headers.insert(
+        tauri::http::header::ACCESS_CONTROL_ALLOW_ORIGIN,
+        tauri::http::HeaderValue::from_static("*"),
+    );
+
+    Ok(response)
+}
+
 /// Progress emitter for background thumbnail generation. Emits once per chunk
 /// (already coarse — a chunk is 128 images), carrying the just-completed
 /// `(id, thumb_hash)` pairs so the UI patches those rows in place.

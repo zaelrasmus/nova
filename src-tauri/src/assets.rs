@@ -452,6 +452,31 @@ pub struct AssetMetadata {
     #[sqlx(default)]
     pub is_animated: bool,
 
+    /// `"local"` (bytes at `dest_path`) or `"remote"` (bytes at `remote_url`).
+    /// The whole online-asset state machine — see the migration's header.
+    #[sqlx(default)]
+    pub origin: String,
+
+    /// Where the bytes live, for a remote asset. DELIVERY, not provenance —
+    /// `source_url` is the other one and they are not interchangeable.
+    #[sqlx(default)]
+    pub remote_url: Option<String>,
+
+    /// `ok` / `unverified` / `unavailable`. NULL for local assets.
+    #[sqlx(default)]
+    pub remote_state: Option<String>,
+
+    #[sqlx(default)]
+    pub last_verified_at: Option<String>,
+
+    /// Whether the origin honours range requests — i.e. whether seeking works.
+    #[sqlx(default)]
+    pub supports_range: Option<bool>,
+
+    /// Media length in ms; NULL until something measures it.
+    #[sqlx(default)]
+    pub duration_ms: Option<i64>,
+
     // Runtime-only: derived from library root, not a DB column. No thumb.
     #[sqlx(skip)]
     pub thumb_path: String,
@@ -642,11 +667,14 @@ const AUD_EXTS: &[&str] = &["flac", "m4a", "mp3", "ogg", "wav"];
 /// undetectable, which import turns into "the file was silently dropped". A
 /// correctness footgun in exchange for negative performance.
 fn detect_asset_type(path: &Path) -> AssetType {
-    let ext = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|e| e.to_ascii_lowercase())
-        .unwrap_or_default();
+    asset_type_for_extension(path.extension().and_then(|e| e.to_str()).unwrap_or_default())
+}
+
+/// The classifier itself, reachable without a path — the URL probe knows only an
+/// extension (often sniffed from the bytes rather than read off the link), and
+/// classifying it anywhere else would be a second copy of these three lists.
+pub(crate) fn asset_type_for_extension(ext: &str) -> AssetType {
+    let ext = ext.to_ascii_lowercase();
     let ext = ext.as_str();
 
     if IMG_EXTS.contains(&ext) {
@@ -3280,7 +3308,8 @@ pub async fn fetch_assets_by_ids(
     // 32766 bind-parameter limit, so no chunking needed.
     let mut qb = QueryBuilder::new(
         "SELECT id, asset_type, filename, extension, path, width, height, file_size, \
-         imported_date, creation_date, modified_date, notes, source_url, thumb_hash, is_animated \
+         imported_date, creation_date, modified_date, notes, source_url, thumb_hash, is_animated, \
+         origin, remote_url, remote_state, last_verified_at, supports_range, duration_ms \
          FROM assets WHERE id IN (",
     );
     let mut separated = qb.separated(", ");
@@ -3518,13 +3547,22 @@ fn build_asset_metadata(src: PathBuf) -> Option<AssetMetadata> {
         creation_date: stamp(created),
         modified_date: stamp(modified),
         // User-authored fields; an imported file has neither until someone types
-        // one. `source_url` will be filled in by the download path when it lands.
+        // one. `source_url` is filled in afterwards by `import_from_url`.
         notes: None,
         source_url: None,
         content_hash,
         thumb_hash: None, // generated later by generate_pending_thumbnails
         thumb_config: None,
         is_animated: visual.is_animated,
+        // This function only ever sees a real file on disk, so anything it
+        // produces is local by definition. Remote rows are built by
+        // `create_remote_asset`, which never touches the filesystem.
+        origin: ORIGIN_LOCAL.to_string(),
+        remote_url: None,
+        remote_state: None,
+        last_verified_at: None,
+        supports_range: None,
+        duration_ms: None,
         thumb_path: String::new(),
     })
 }
@@ -3963,6 +4001,226 @@ pub async fn import_assets(
         duplicates: duplicates.len(),
         restored,
     })
+}
+
+// ── Online assets ─────────────────────────────────────────────────────────────
+//
+// An asset whose BYTES ARE ELSEWHERE. See the 20260815 migration's header for
+// the model; the short version is that `origin` has two values and no third
+// "cached" state, so "can I open this offline?" is one column.
+//
+// Nothing else in this file needs to know. A remote row is an ordinary row: it
+// streams in the manifest, filters, sorts, gets tagged, goes to the Trash. Only
+// the two places that need actual BYTES — the viewer and outbound drag — care,
+// and they route through the proxy or `promote_remote_asset` respectively.
+
+/// `assets.origin` when the bytes are on disk at `path`.
+pub const ORIGIN_LOCAL: &str = "local";
+/// `assets.origin` when the asset is only a link.
+pub const ORIGIN_REMOTE: &str = "remote";
+
+/// `assets.remote_state` — the last thing we learned about the link.
+pub const REMOTE_OK: &str = "ok";
+pub const REMOTE_UNAVAILABLE: &str = "unavailable";
+
+/// A link to record, exactly as the probe established it.
+pub struct RemoteAssetSpec {
+    pub filename: String,
+    pub extension: String,
+    pub asset_type: AssetType,
+    pub remote_url: String,
+    /// Content-Length where the server gave one. Shown as the asset's size and
+    /// as the cost of keeping it offline later.
+    pub size: Option<u64>,
+    pub supports_range: bool,
+}
+
+/// Record a URL as an asset WITHOUT fetching it.
+///
+/// The deliberate opposite of the import pipeline: no copy, no hash, no
+/// extraction. `content_hash` stays NULL — which the partial unique index
+/// already treats as "does not participate in dedup", exactly right for a row
+/// whose bytes we have never seen.
+///
+/// `path` is still written, holding the location the file WOULD occupy. That
+/// keeps the NOT NULL invariant honest and means promoting to local later
+/// already knows where to write.
+#[instrument(skip(pool, root, spec), fields(url = %spec.remote_url))]
+pub async fn create_remote_asset(
+    pool: &SqlitePool,
+    root: &Path,
+    spec: RemoteAssetSpec,
+    target_folder: Option<&str>,
+) -> Result<AssetMetadata> {
+    let id = uuid::Uuid::new_v4().to_string();
+    let dest_path = if spec.extension.is_empty() {
+        format!("assets/{id}")
+    } else {
+        format!("assets/{}.{}", id, spec.extension)
+    };
+    let now = stamp(Utc::now());
+    let size = i64::try_from(spec.size.unwrap_or(0)).unwrap_or(i64::MAX);
+
+    let mut tx = pool
+        .begin()
+        .await
+        .context("Failed to begin remote asset transaction")?;
+
+    let manual_position: f64 =
+        sqlx::query_scalar::<_, Option<f64>>("SELECT MAX(manual_position) FROM assets")
+            .fetch_one(&mut *tx)
+            .await
+            .context("Failed to read manual position")?
+            .map(|m| m + 1.0)
+            .unwrap_or(0.0);
+
+    sqlx::query(
+        "INSERT INTO assets (id, asset_type, filename, extension, path, width, height, \
+         file_size, manual_position, imported_date, creation_date, modified_date, \
+         origin, remote_url, remote_state, last_verified_at, supports_range) \
+         VALUES (?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(&id)
+    .bind(spec.asset_type)
+    .bind(&spec.filename)
+    .bind(&spec.extension)
+    .bind(&dest_path)
+    .bind(size)
+    .bind(manual_position)
+    .bind(&now)
+    .bind(&now)
+    .bind(&now)
+    .bind(ORIGIN_REMOTE)
+    .bind(&spec.remote_url)
+    .bind(REMOTE_OK)
+    .bind(&now)
+    .bind(spec.supports_range)
+    .execute(&mut *tx)
+    .await
+    .context("Failed to insert remote asset")?;
+
+    if let Some(folder) = target_folder {
+        let position: f64 = sqlx::query_scalar::<_, Option<f64>>(
+            "SELECT MAX(position) FROM assets_folders WHERE folder_id = ?",
+        )
+        .bind(folder)
+        .fetch_one(&mut *tx)
+        .await
+        .context("Failed to read folder position")?
+        .map(|p| p + 1.0)
+        .unwrap_or(0.0);
+
+        sqlx::query(
+            "INSERT OR IGNORE INTO assets_folders (folder_id, asset_id, position) VALUES (?, ?, ?)",
+        )
+        .bind(folder)
+        .bind(&id)
+        .bind(position)
+        .execute(&mut *tx)
+        .await
+        .context("Failed to link remote asset to folder")?;
+    }
+
+    tx.commit()
+        .await
+        .context("Failed to commit remote asset")?;
+
+    // Folder auto-tags seed wherever membership is CREATED. This is now a third
+    // such place, so it seeds here too — otherwise a saved link would arrive
+    // untagged in a folder where a dropped file would not have.
+    if let Some(folder) = target_folder {
+        let link = FolderLink {
+            folder_id: folder.to_string(),
+            asset_id: id.clone(),
+            position: 0.0, // unused by the auto-tag path
+        };
+        if let Err(e) = seed_import_auto_tags(pool, std::slice::from_ref(&link)).await {
+            warn!(error = %e, "Could not auto-tag a remote asset (non-fatal)");
+        }
+    }
+
+    crate::search::reindex_assets(pool, std::slice::from_ref(&id)).await?;
+
+    info!(%id, "Recorded a remote asset");
+
+    let mut rows = fetch_assets_by_ids(pool, root, std::slice::from_ref(&id)).await?;
+    rows.pop()
+        .context("Remote asset vanished immediately after insert")
+}
+
+/// Adopt already-downloaded bytes: the asset becomes an ordinary local one.
+///
+/// One-way and permanent — that is what keeps `origin` a two-state column. The
+/// caller has already written the file to `assets/{id}.{ext}`; this is the
+/// database half, and it also promotes `remote_url` into `source_url` when that
+/// is empty, so the link survives as provenance once it stops being delivery.
+#[instrument(skip(pool))]
+pub async fn promote_remote_asset(
+    pool: &SqlitePool,
+    id: &str,
+    file_size: i64,
+    content_hash: Option<&str>,
+) -> Result<()> {
+    sqlx::query(
+        "UPDATE assets SET origin = ?, remote_state = NULL, file_size = ?, content_hash = ?, \
+         source_url = COALESCE(source_url, remote_url) \
+         WHERE id = ?",
+    )
+    .bind(ORIGIN_LOCAL)
+    .bind(file_size)
+    .bind(content_hash)
+    .bind(id)
+    .execute(pool)
+    .await
+    .context("Failed to promote remote asset")?;
+
+    // `source_url` is FTS-indexed and may just have been filled in.
+    crate::search::reindex_assets(pool, std::slice::from_ref(&id.to_string())).await?;
+    Ok(())
+}
+
+/// Record what the last reachability check found.
+#[instrument(skip(pool))]
+pub async fn set_remote_state(pool: &SqlitePool, id: &str, state: &str) -> Result<()> {
+    sqlx::query("UPDATE assets SET remote_state = ?, last_verified_at = ? WHERE id = ?")
+        .bind(state)
+        .bind(stamp(Utc::now()))
+        .bind(id)
+        .execute(pool)
+        .await
+        .context("Failed to update remote state")?;
+    Ok(())
+}
+
+/// The URL behind a remote asset, for the streaming proxy. Returns `None` for a
+/// local asset or an unknown id — the proxy answers 404 either way rather than
+/// leaking which it was.
+pub async fn remote_url_for(pool: &SqlitePool, id: &str) -> Result<Option<String>> {
+    let row: Option<(String, Option<String>)> =
+        sqlx::query_as("SELECT origin, remote_url FROM assets WHERE id = ?")
+            .bind(id)
+            .fetch_optional(pool)
+            .await
+            .context("Failed to look up a remote asset")?;
+
+    Ok(match row {
+        Some((origin, url)) if origin == ORIGIN_REMOTE => url,
+        _ => None,
+    })
+}
+
+/// Record a media asset's duration, learned by the webview when it loaded the
+/// file. Separate from the thumbnail write because audio reports a duration but
+/// produces no frame.
+#[instrument(skip(pool))]
+pub async fn set_duration(pool: &SqlitePool, id: &str, duration_ms: i64) -> Result<()> {
+    sqlx::query("UPDATE assets SET duration_ms = ? WHERE id = ? AND duration_ms IS NULL")
+        .bind(duration_ms)
+        .bind(id)
+        .execute(pool)
+        .await
+        .context("Failed to store duration")?;
+    Ok(())
 }
 
 // ── Background thumbnail pipeline ─────────────────────────────────────────────
@@ -5277,5 +5535,158 @@ mod capture_thumb_tests {
         assert!(err.to_string().contains("Unknown asset"), "got: {err}");
 
         std::fs::remove_dir_all(&root).ok();
+    }
+}
+
+/// Online assets: the row that has no bytes.
+///
+/// The migration test is the important one — it runs BOTH real migration files
+/// against a fresh database, so a typo in the SQL fails here rather than in a
+/// user's library, where a failed migration means the library will not open.
+#[cfg(test)]
+mod remote_asset_tests {
+    use super::*;
+
+    async fn migrated_db() -> SqlitePool {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::migrate!()
+            .run(&pool)
+            .await
+            .expect("every migration must apply to a fresh database");
+        pool
+    }
+
+    fn spec(url: &str) -> RemoteAssetSpec {
+        RemoteAssetSpec {
+            filename: "clip.mp4".into(),
+            extension: "mp4".into(),
+            asset_type: AssetType::Video,
+            remote_url: url.into(),
+            size: Some(500 * 1024 * 1024),
+            supports_range: true,
+        }
+    }
+
+    #[tokio::test]
+    async fn the_migrations_apply_to_a_fresh_database() {
+        let pool = migrated_db().await;
+        // Every column the online-asset code reads must exist and default sanely.
+        sqlx::query("INSERT INTO assets (id, asset_type, filename, extension, path, file_size, \
+                     imported_date, creation_date, modified_date) \
+                     VALUES ('a','image','a.png','png','assets/a.png',1,'x','x','x')")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let origin: String = sqlx::query_scalar("SELECT origin FROM assets WHERE id = 'a'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            origin, ORIGIN_LOCAL,
+            "existing rows must read as local without a backfill"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_saved_link_becomes_an_ordinary_row_with_no_bytes() {
+        let pool = migrated_db().await;
+        let root = std::env::temp_dir().join(format!("nova-remote-{}", uuid::Uuid::new_v4()));
+
+        let asset = create_remote_asset(&pool, &root, spec("https://example.com/clip.mp4"), None)
+            .await
+            .expect("a link must be recordable");
+
+        assert_eq!(asset.origin, ORIGIN_REMOTE);
+        assert_eq!(asset.remote_url.as_deref(), Some("https://example.com/clip.mp4"));
+        assert_eq!(asset.remote_state.as_deref(), Some(REMOTE_OK));
+        assert_eq!(asset.supports_range, Some(true));
+        // `path` is still written: it is where the file WOULD go, which is what
+        // makes promoting to local later a plain download-and-rename.
+        assert!(
+            asset.dest_path.ends_with(".mp4"),
+            "a remote row still names its would-be location: {}",
+            asset.dest_path
+        );
+        // No bytes were ever seen, so it cannot participate in dedup.
+        let hash: Option<String> =
+            sqlx::query_scalar("SELECT content_hash FROM assets WHERE id = ?")
+                .bind(&asset.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(hash.is_none(), "a link has no bytes to hash");
+    }
+
+    #[tokio::test]
+    async fn promoting_makes_it_local_and_keeps_the_link_as_provenance() {
+        let pool = migrated_db().await;
+        let root = std::env::temp_dir().join(format!("nova-remote-{}", uuid::Uuid::new_v4()));
+        let asset = create_remote_asset(&pool, &root, spec("https://example.com/clip.mp4"), None)
+            .await
+            .unwrap();
+
+        promote_remote_asset(&pool, &asset.id, 1234, Some("deadbeef"))
+            .await
+            .unwrap();
+
+        let (origin, state, source_url, size): (String, Option<String>, Option<String>, i64) =
+            sqlx::query_as(
+                "SELECT origin, remote_state, source_url, file_size FROM assets WHERE id = ?",
+            )
+            .bind(&asset.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+        assert_eq!(origin, ORIGIN_LOCAL, "promotion is one-way");
+        assert!(state.is_none(), "a local asset has no remote state");
+        assert_eq!(
+            source_url.as_deref(),
+            Some("https://example.com/clip.mp4"),
+            "the link survives as PROVENANCE once it stops being delivery"
+        );
+        assert_eq!(size, 1234);
+
+        // And it stops being servable through the proxy, which is the test that
+        // matters for `nova-remote://` — a local asset must never resolve there.
+        assert!(remote_url_for(&pool, &asset.id).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn the_proxy_refuses_local_and_unknown_assets() {
+        let pool = migrated_db().await;
+        sqlx::query("INSERT INTO assets (id, asset_type, filename, extension, path, file_size, \
+                     imported_date, creation_date, modified_date) \
+                     VALUES ('local','image','a.png','png','assets/a.png',1,'x','x','x')")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        assert!(remote_url_for(&pool, "local").await.unwrap().is_none());
+        assert!(remote_url_for(&pool, "nope").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn state_and_duration_are_recorded() {
+        let pool = migrated_db().await;
+        let root = std::env::temp_dir().join(format!("nova-remote-{}", uuid::Uuid::new_v4()));
+        let asset = create_remote_asset(&pool, &root, spec("https://example.com/clip.mp4"), None)
+            .await
+            .unwrap();
+
+        set_remote_state(&pool, &asset.id, REMOTE_UNAVAILABLE).await.unwrap();
+        set_duration(&pool, &asset.id, 90_000).await.unwrap();
+        // Duration is write-once: a second measurement must not overwrite the first.
+        set_duration(&pool, &asset.id, 5).await.unwrap();
+
+        let (state, duration): (Option<String>, Option<i64>) =
+            sqlx::query_as("SELECT remote_state, duration_ms FROM assets WHERE id = ?")
+                .bind(&asset.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(state.as_deref(), Some(REMOTE_UNAVAILABLE));
+        assert_eq!(duration, Some(90_000));
     }
 }

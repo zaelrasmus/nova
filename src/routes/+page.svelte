@@ -48,6 +48,8 @@
     import SavedFilters from "$components/SavedFilters.svelte";
     import Inspector from "$components/Inspector.svelte";
     import TagManager from "$components/TagManager.svelte";
+    import UrlImportDialog from "$components/UrlImportDialog.svelte";
+    import { looksLikeUrl, type UrlImportResult } from "$lib/remote";
     import SearchBar from "$components/SearchBar.svelte";
     import GridToolbar from "$components/GridToolbar.svelte";
     import SystemViews from "$components/SystemViews.svelte";
@@ -300,6 +302,56 @@
         };
     });
 
+    // ── Add from URL ────────────────────────────────────────────────────────
+    // Paste is the primary way in, and that is a constraint rather than a
+    // preference: dragging an image out of a browser hands over `text/uri-list`,
+    // which is HTML5 drag data, and `dragDropEnabled: true` suppresses that in
+    // favour of real OS file paths. We need the file paths far more, so the URL
+    // arrives by clipboard instead.
+    let urlImportUrl = $state<string | null>(null);
+
+    function onPaste(e: ClipboardEvent) {
+        if (noLibraryConnected || isImporting || urlImportUrl) return;
+        // Never steal a paste from a field the user is typing in.
+        const target = e.target as HTMLElement | null;
+        if (target?.closest("input, textarea, [contenteditable='true']")) return;
+
+        const text = e.clipboardData?.getData("text/plain") ?? "";
+        if (!looksLikeUrl(text)) return; // ordinary text paste; leave it alone
+        e.preventDefault();
+        urlImportUrl = text.trim();
+    }
+
+    function onUrlImported(result: UrlImportResult) {
+        void (async () => {
+            // Same refresh the folder import does: reveal where it landed, and
+            // reload folders in case the target changed underneath.
+            await assetLibrary.setScope({ kind: "all" });
+            await assetLibrary.loadFolders();
+        })();
+
+        if (result.assets.length > 0) {
+            toast.success(`Added ${result.assets[0].filename}`);
+        } else if (result.restored > 0) {
+            toast.success("That file was in the Trash — restored it.");
+        } else if (result.duplicates > 0) {
+            toast.info("That file is already in your library.");
+        } else {
+            toast.success("Added from URL.");
+        }
+    }
+
+    /** A link was catalogued without downloading it. */
+    function onUrlLinked(asset: AssetMetadata) {
+        void (async () => {
+            await assetLibrary.setScope({ kind: "all" });
+            await assetLibrary.loadFolders();
+        })();
+        toast.success(`Saved link to ${asset.filename}`, {
+            description: "The file stays online. Open it to stream, or keep it offline later.",
+        });
+    }
+
     async function handleImport() {
         const selectedSource = await open({
             directory: true,
@@ -439,7 +491,7 @@
     }
 </script>
 
-<svelte:window onkeydown={onKeydown} />
+<svelte:window onkeydown={onKeydown} onpaste={onPaste} />
 
 <QueryClientProvider client={queryClient}>
     <!--
@@ -703,7 +755,7 @@
                     type="button"
                     onclick={handleImport}
                     disabled={isImporting || noLibraryConnected}
-                    title="Import a folder"
+                    title="Import a folder — or paste a link to add from the web"
                     aria-label="Import"
                     class="grid h-7 w-7 shrink-0 place-items-center rounded text-neutral-500
                            transition-colors hover:bg-neutral-800 hover:text-neutral-200
@@ -796,10 +848,26 @@
         <TagManager onClose={() => (tagManagerOpen = false)} />
     {/if}
 
+    {#if urlImportUrl}
+        <UrlImportDialog
+            url={urlImportUrl}
+            targetFolder={assetLibrary.scope.kind === "folder" ? assetLibrary.scope.id : null}
+            onclose={() => (urlImportUrl = null)}
+            onbusy={(busy) => (isImporting = busy)}
+            onimported={onUrlImported}
+            onlinked={onUrlLinked}
+        />
+    {/if}
+
     <!-- ── Floating status, bottom-right ────────────────────────────────────
          Outside the panes on purpose: progress belongs to the app, not to a
-         column that might be collapsed when it arrives. -->
-    {#if isImporting}
+         column that might be collapsed when it arrives.
+
+         Suppressed while the URL dialog is up: that sets `isImporting` to block
+         a second import, but it reports its own download and import progress,
+         and nothing here is listening for those events — the panel would show
+         whatever the last folder import left behind. -->
+    {#if isImporting && !urlImportUrl}
         <div
             class="fixed bottom-4 right-4 z-40 w-72 space-y-3 rounded-lg border border-neutral-700
                    bg-neutral-900/95 p-4 shadow-xl"

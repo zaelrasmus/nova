@@ -21,6 +21,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { assetLibrary, type MediaThumbReady } from "./assets.svelte";
 import { computeWaveform } from "./media.svelte";
+import { isRemote, remoteAssetUrl } from "./remote";
 
 /** Long-edge cap for a captured frame. Rust pins the short edge to 320, so this
  *  leaves it a real downscale to work with while keeping the PNG (and the base64
@@ -216,12 +217,23 @@ class MediaThumbnailer {
     // Generated meanwhile (a previous session, or this id arrived twice).
     if (heavy.thumb_hash) return;
 
-    const url = convertFileSrc(heavy.dest_path);
+    // An online asset streams through the proxy. Everything below is unaware of
+    // the difference, which is what lets a saved link get a real thumbnail.
+    const online = isRemote(heavy);
+    const url = online ? remoteAssetUrl(heavy.id) : convertFileSrc(heavy.dest_path);
     let capture: Capture | null = null;
 
     if (heavy.asset_type === "video") {
+      // Cheap even over the network: seeking to ~1s pulls a few hundred KB
+      // through the proxy's range requests, not the file. Unless the origin
+      // refuses ranges — then a frame would cost the whole download, which no
+      // thumbnail is worth.
+      if (online && heavy.supports_range === false) return;
       capture = await captureVideoFrame(url);
     } else if (heavy.asset_type === "audio") {
+      // Never for online audio. A waveform needs the WHOLE file decoded, so this
+      // would quietly pull down exactly what the user chose not to store.
+      if (online) return;
       if (heavy.file_size > AUDIO_MAX_BYTES) return;
       const peaks = await computeWaveform(url, 256);
       if (peaks) capture = { png: renderWaveform(peaks), width: 0, height: 0 };

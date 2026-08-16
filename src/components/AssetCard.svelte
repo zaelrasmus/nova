@@ -53,6 +53,13 @@
     }: Props = $props();
 
     const placeholder = $derived(thumbHashUrl(thumbHash));
+
+    // Read from the HEAVY row on purpose. Putting `origin` in the light row would
+    // add a field to all 100k manifest entries over IPC to serve a badge on the
+    // few dozen tiles actually on screen; the badge simply appears with the rest
+    // of the hydrated metadata, exactly as the thumbnail does.
+    const online = $derived(heavy?.origin === "remote");
+    const unavailable = $derived(online && heavy?.remote_state === "unavailable");
     // Animated original when the toggle is on and the asset is animated;
     // otherwise the static WebP thumbnail. No thumbnail => generic per-type card.
     const previewSrc = $derived(
@@ -130,6 +137,31 @@
     </span>
 {/snippet}
 
+<!-- Online asset: the bytes live at a URL, not on disk. Shown on the TILE rather
+     than only in the Inspector, because at 100k assets "which of these need the
+     network?" has to be answerable at a glance. A rotted link is struck through
+     in amber — knowing something is gone matters more than it looking tidy. -->
+{#snippet onlineBadge()}
+    <span
+        class="pointer-events-none absolute right-1 top-1 z-10 grid h-5 w-5 place-items-center
+               rounded-full bg-black/60 ring-1 ring-white/15
+               {unavailable ? 'text-amber-400' : 'text-white/80'}"
+        title={unavailable
+            ? "This link is no longer reachable"
+            : "Online asset — the file streams from the web"}
+    >
+        <svg viewBox="0 0 24 24" fill="currentColor" class="h-3 w-3" aria-hidden="true">
+            <path
+                d="M6.5 19A4.5 4.5 0 0 1 6 10.03 6 6 0 0 1 17.7 8.6 4.75 4.75 0 0 1 17.5 19h-11z"
+            />
+            {#if unavailable}
+                <!-- Struck through: reachable and gone must not look alike. -->
+                <path d="M3 3l18 18" stroke="currentColor" stroke-width="2.5" fill="none" />
+            {/if}
+        </svg>
+    </span>
+{/snippet}
+
 <!-- Image whose thumbnail is still being generated in the background. -->
 {#snippet pendingImage()}
     <div class="skeleton-shimmer h-full w-full"></div>
@@ -173,6 +205,10 @@
         }
     }}
 >
+    {#if online}
+        {@render onlineBadge()}
+    {/if}
+
     {#if placeholder || previewSrc}
         {@render thumbnail()}
         {#if assetType === "video" || assetType === "audio"}

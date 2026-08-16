@@ -22,6 +22,7 @@
     import { assetLibrary, thumbHashUrl } from "$lib/assets.svelte";
     import { viewer } from "$lib/viewer.svelte";
     import { PanZoom } from "$lib/panzoom.svelte";
+    import { isRemote, remoteAssetUrl, keepRemoteOffline, setMediaDuration } from "$lib/remote";
     import MediaPlayer from "./MediaPlayer.svelte";
 
     const current = $derived(viewer.current);
@@ -40,8 +41,50 @@
     // crossorigin="anonymous" so the V3 eyedropper can sample it without tainting
     // the canvas (proven in the V0 spike).
     const placeholder = $derived(thumbHashUrl(current?.thumb_hash ?? null));
+    // The thumbnail is ALWAYS local, even for an online asset — that is what
+    // keeps the grid and this overlay's first paint working with no network.
     const thumbUrl = $derived(heavy?.thumb_path ? convertFileSrc(heavy.thumb_path) : null);
-    const fullUrl = $derived(heavy?.dest_path ? convertFileSrc(heavy.dest_path) : null);
+    // Full resolution is the one thing that may not be on disk. For an online
+    // asset it streams through the proxy instead; every consumer below is
+    // unaware of which, which is the whole point of resolving it here.
+    const fullUrl = $derived(
+        !heavy
+            ? null
+            : isRemote(heavy)
+              ? remoteAssetUrl(heavy.id)
+              : heavy.dest_path
+                ? convertFileSrc(heavy.dest_path)
+                : null,
+    );
+
+    /** Bytes are not on disk — the viewer streams them through the proxy. */
+    const onlineAsset = $derived(isRemote(heavy));
+
+    let keepingOffline = $state(false);
+
+    /** Download an online asset into the library. One-way: it becomes local. */
+    async function keepOffline(id: string) {
+        if (keepingOffline) return;
+        keepingOffline = true;
+        try {
+            const updated = await keepRemoteOffline(id);
+            // Patch the heavy row so the player's src flips to the local file and
+            // the Keep-offline button removes itself, with no reload.
+            assetLibrary.heavy.set(id, updated);
+            toast.success("Saved to your library");
+        } catch (e) {
+            toast.error(typeof e === "string" ? e : "Couldn't download that file.");
+        } finally {
+            keepingOffline = false;
+        }
+    }
+
+    /** Rust decodes no media, so the player is the only source of a duration. */
+    function reportDuration(id: string, ms: number) {
+        if (!Number.isFinite(ms) || ms <= 0) return;
+        // Backend no-ops when it already has one, so a repeat costs one UPDATE.
+        void setMediaDuration(id, ms).catch(() => {});
+    }
 
     const isImage = $derived(current?.asset_type === "image");
     /** Video and audio share a player, and share its keyboard claim (see below). */
@@ -340,7 +383,12 @@
                         extension={heavy?.extension}
                         fileSize={heavy?.file_size}
                         poster={thumbUrl}
-                        destPath={heavy?.dest_path ?? null}
+                        destPath={onlineAsset ? null : (heavy?.dest_path ?? null)}
+                        remote={onlineAsset}
+                        seekable={!onlineAsset || heavy?.supports_range !== false}
+                        onduration={(ms) => reportDuration(current.id, ms)}
+                        onKeepOffline={onlineAsset ? () => keepOffline(current.id) : undefined}
+                        {keepingOffline}
                         {fullscreen}
                         onToggleFullscreen={() => viewer.toggleFullscreen()}
                         onBackdropClick={() => viewer.close()}

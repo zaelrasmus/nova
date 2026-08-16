@@ -24,8 +24,9 @@
         SelectionSummary,
     } from "$lib/assets.svelte";
     import { selection } from "$lib/selection.svelte";
-    import { formatAspectRatio, formatBytes, formatTimestamp } from "$lib/format";
-    import { Pin, PinOff } from "@lucide/svelte";
+    import { formatAspectRatio, formatBytes, formatTimestamp, formatDuration } from "$lib/format";
+    import { keepRemoteOffline, verifyRemoteAsset } from "$lib/remote";
+    import { Pin, PinOff, Cloud } from "@lucide/svelte";
     import PaletteSection from "./PaletteSection.svelte";
     import FolderMembership from "./FolderMembership.svelte";
     import FolderAutoTags from "./FolderAutoTags.svelte";
@@ -40,6 +41,40 @@
         current.kind === "assets" && current.ids.length === 1 ? current.ids[0] : null,
     );
     const asset = $derived(singleId ? assetLibrary.heavy.get(singleId) : undefined);
+
+    // ── Online-asset actions ────────────────────────────────────────────────
+    // Both patch the heavy row in place on success, so the panel and the grid
+    // badge update without a manifest reload.
+    let busyRemote = $state<"download" | "verify" | null>(null);
+
+    async function keepOffline(id: string) {
+        if (busyRemote) return;
+        busyRemote = "download";
+        try {
+            assetLibrary.heavy.set(id, await keepRemoteOffline(id));
+            toast.success("Saved to your library");
+        } catch (e) {
+            toast.error(typeof e === "string" ? e : "Couldn't download that file.");
+        } finally {
+            busyRemote = null;
+        }
+    }
+
+    async function recheck(id: string) {
+        if (busyRemote) return;
+        busyRemote = "verify";
+        try {
+            const state = await verifyRemoteAsset(id);
+            const heavy = assetLibrary.heavy.get(id);
+            if (heavy) assetLibrary.heavy.set(id, { ...heavy, remote_state: state });
+            if (state === "ok") toast.success("The link is still reachable.");
+            else toast.warning("That link could not be reached.");
+        } catch (e) {
+            toast.error(typeof e === "string" ? e : "Couldn't check that link.");
+        } finally {
+            busyRemote = null;
+        }
+    }
 
     // Looked up rather than stored: if the folder is deleted while selected, this
     // goes undefined and the panel falls back to the empty state on its own.
@@ -345,7 +380,64 @@
                 )}
                 {@render row("Size", formatBytes(asset.file_size))}
                 {@render row("Format", asset.extension.toUpperCase() || "—")}
+                {#if asset.duration_ms}
+                    {@render row("Duration", formatDuration(asset.duration_ms / 1000))}
+                {/if}
             </div>
+
+            <!-- ── Online asset ───────────────────────────────────────────────
+                 Shown only when the bytes are elsewhere. The state line is the
+                 honest part: "reachable", "not checked lately" and "gone" are
+                 three different facts and the user acts differently on each. -->
+            {#if asset.origin === "remote"}
+                <div class="h-px bg-neutral-800"></div>
+                <div class="flex flex-col gap-2">
+                    <div class="flex items-center gap-1.5">
+                        <Cloud
+                            class="h-3.5 w-3.5 {asset.remote_state === 'unavailable'
+                                ? 'text-amber-400'
+                                : 'text-neutral-500'}"
+                        />
+                        <span class="text-xs font-medium text-neutral-300">Online asset</span>
+                    </div>
+                    <p class="text-[11px] leading-relaxed text-neutral-500">
+                        {#if asset.remote_state === "unavailable"}
+                            <span class="text-amber-300/90">
+                                This link couldn't be reached when it was last checked.
+                            </span>
+                            The thumbnail and everything you've filed about it are still here.
+                        {:else}
+                            The file streams from the web and takes no space here beyond its
+                            thumbnail.{#if asset.supports_range === false}
+                                This source doesn't support seeking.{/if}
+                        {/if}
+                    </p>
+                    {#if asset.remote_url}
+                        <p class="break-all text-[11px] text-neutral-600">{asset.remote_url}</p>
+                    {/if}
+                    <div class="flex items-center gap-2">
+                        <button
+                            type="button"
+                            onclick={() => keepOffline(asset.id)}
+                            disabled={busyRemote !== null}
+                            class="rounded bg-blue-600 px-2.5 py-1 text-[11px] font-medium text-white
+                                   transition-colors hover:bg-blue-500 disabled:opacity-40"
+                        >
+                            {busyRemote === "download" ? "Downloading…" : "Keep offline"}
+                        </button>
+                        <button
+                            type="button"
+                            onclick={() => recheck(asset.id)}
+                            disabled={busyRemote !== null}
+                            class="rounded border border-neutral-800 px-2.5 py-1 text-[11px]
+                                   text-neutral-300 transition-colors hover:bg-neutral-800
+                                   disabled:opacity-40"
+                        >
+                            {busyRemote === "verify" ? "Checking…" : "Check again"}
+                        </button>
+                    </div>
+                </div>
+            {/if}
 
             <div class="h-px bg-neutral-800"></div>
 
