@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="plate" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#161b26"/>
+      <stop offset="100%" stop-color="#080a10"/>
+    </linearGradient>
+    <radialGradient id="halo" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#3b82f6" stop-opacity="0.7"/>
+      <stop offset="55%" stop-color="#2563eb" stop-opacity="0.22"/>
+      <stop offset="100%" stop-color="#2563eb" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="ray" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#ffffff"/>
+      <stop offset="22%" stop-color="#dbeafe"/>
+      <stop offset="55%" stop-color="#60a5fa"/>
+      <stop offset="100%" stop-color="#2563eb"/>
+    </radialGradient>
+    <radialGradient id="core" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#ffffff"/>
+      <stop offset="70%" stop-color="#ffffff"/>
+      <stop offset="100%" stop-color="#e0edff"/>
+    </radialGradient>
+    <radialGradient id="bloom" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.95"/>
+      <stop offset="45%" stop-color="#dbeafe" stop-opacity="0.5"/>
+      <stop offset="100%" stop-color="#93c5fd" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <rect width="1024" height="1024" rx="230" ry="230" fill="url(#plate)"/>
+  <!-- A single hairline along the top edge. Catches the light the way a
+       physical object would and stops the plate reading as flat black. -->
+  <rect x="1" y="1" width="1022" height="1022" rx="229" ry="229"
+        fill="none" stroke="#ffffff" stroke-opacity="0.07" stroke-width="2"/>
+
+  <circle cx="512" cy="512" r="430" fill="url(#halo)"/>
+  <path d="M512,60L569.4,373.42L685.95,338.05L650.58,454.6L964,512L650.58,569.4L685.95,685.95L569.4,650.58L512,964L454.6,650.58L338.05,685.95L373.42,569.4L60,512L373.42,454.6L338.05,338.05L454.6,373.42Z" fill="url(#ray)"/>
+  <circle cx="512" cy="512" r="205" fill="url(#bloom)"/>
+  <circle cx="512" cy="512" r="104" fill="url(#core)"/>
+</svg>
