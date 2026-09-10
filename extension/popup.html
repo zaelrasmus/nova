@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <link rel="stylesheet" href="popup.css" />
+    <title>Save to Nova</title>
+  </head>
+  <body>
+    <!--
+      Four states, not two. "Nova isn't running", "no library open", "not paired"
+      and "ready" have different fixes, so collapsing them into one error would
+      leave the user guessing which one they are in.
+    -->
+    <header>
+      <span class="dot" id="dot"></span>
+      <span id="headline">Checking…</span>
+    </header>
+
+    <p class="detail" id="detail"></p>
+
+    <div class="row" id="actions" hidden>
+      <button id="pair" class="primary" hidden>Pair with Nova</button>
+      <button id="retry" hidden>Retry queued</button>
+    </div>
+
+    <div class="field" id="folderField" hidden>
+      <label for="folder">Save into</label>
+      <select id="folder"></select>
+    </div>
+
+    <section id="recentBlock" hidden>
+      <h2>Recent</h2>
+      <ul id="recent"></ul>
+    </section>
+
+    <footer>
+      <span id="queue"></span>
+      <button id="unpair" class="link" hidden>Unpair</button>
+    </footer>
+
+    <script src="popup.js"></script>
+  </body>
+</html>

@@ -6,20 +6,10 @@
   "build": {
     "beforeDevCommand": "bun run dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "bun run build",
+    "beforeBuildCommand": "bun run build && node scripts/prepare-connector.mjs",
     "frontendDist": "../build"
   },
   "app": {
-    "windows": [
-      {
-        "title": "nova",
-        "width": 1280,
-        "height": 832,
-        "minWidth": 800,
-        "minHeight": 600,
-        "decorations": false
-      }
-    ],
     "security": {
       "csp": "default-src 'self'; img-src 'self' data: asset: http://asset.localhost nova-remote: http://nova-remote.localhost; media-src 'self' asset: http://asset.localhost nova-remote: http://nova-remote.localhost; connect-src 'self' ipc: http://ipc.localhost asset: http://asset.localhost nova-remote: http://nova-remote.localhost;",
       "assetProtocol": {
@@ -40,6 +30,9 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
+    ],
+    "externalBin": [
+      "binaries/nova-connector"
     ]
   }
 }

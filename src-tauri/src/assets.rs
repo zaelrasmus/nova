@@ -4003,6 +4003,61 @@ pub async fn import_assets(
     })
 }
 
+/// Import ONE already-downloaded file and record where it came from.
+///
+/// Shared by the Tauri command behind the receipt dialog and by the extension
+/// bridge, which must not drift from it: both need hashing, dedup, trash
+/// restore, extraction and folder placement, and there is exactly one
+/// implementation of those — `import_assets`.
+///
+/// `source_url` is FTS-indexed, so setting it goes through the reindex
+/// primitive. Skipping that would leave the new row searchable by name but not
+/// by origin, which is precisely the thing a web capture is for.
+#[instrument(skip(pool, root, reporter, file), fields(file = ?file))]
+pub async fn import_single_file(
+    pool: &SqlitePool,
+    root: &Path,
+    reporter: Arc<dyn ProgressReporter>,
+    file: PathBuf,
+    target_folder: Option<String>,
+    source_url: Option<&str>,
+) -> Result<ImportResult> {
+    let result = import_assets(
+        reporter,
+        ImportRequest {
+            sources: vec![file],
+            target_folder,
+            import_folders: false,
+            include_roots: false,
+        },
+        pool.clone(),
+        root.to_path_buf(),
+    )
+    .await?;
+
+    let Some(url) = source_url else {
+        return Ok(result);
+    };
+
+    let ids: Vec<String> = result.assets.iter().map(|a| a.id.clone()).collect();
+    if ids.is_empty() {
+        return Ok(result);
+    }
+    for id in &ids {
+        if let Err(e) = sqlx::query("UPDATE assets SET source_url = ? WHERE id = ?")
+            .bind(url)
+            .bind(id)
+            .execute(pool)
+            .await
+        {
+            warn!(error = %e, %id, "Could not record source_url (non-fatal)");
+        }
+    }
+    crate::search::reindex_assets(pool, &ids).await.ok();
+
+    Ok(result)
+}
+
 // ── Online assets ─────────────────────────────────────────────────────────────
 //
 // An asset whose BYTES ARE ELSEWHERE. See the 20260815 migration's header for

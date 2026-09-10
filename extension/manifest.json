@@ -1,0 +1,36 @@
+{
+  "manifest_version": 3,
+  "name": "Save to Nova",
+  "version": "0.1.0",
+  "description": "Save images, video and audio from the web straight into your local Nova library.",
+
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "nova@local",
+      "strict_min_version": "115.0"
+    }
+  },
+
+  "permissions": [
+    "contextMenus",
+    "storage",
+    "nativeMessaging",
+    "scripting",
+    "activeTab",
+    "notifications"
+  ],
+
+  "host_permissions": ["http://127.0.0.1/*"],
+
+  "background": {
+    "scripts": ["background.js"]
+  },
+
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Save to Nova",
+    "default_icon": { "32": "icons/32.png", "128": "icons/128.png" }
+  },
+
+  "icons": { "32": "icons/32.png", "128": "icons/128.png" }
+}

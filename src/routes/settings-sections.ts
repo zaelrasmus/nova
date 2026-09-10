@@ -37,6 +37,11 @@ export const SETTINGS_SECTIONS: SettingsSection[] = [
     icon: "LayoutGrid",
   },
   {
+    id: "extension",
+    label: "Browser extension",
+    icon: "Plug",
+  },
+  {
     id: "about",
     label: "About",
     icon: "Info",

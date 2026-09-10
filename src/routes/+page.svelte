@@ -64,6 +64,7 @@
     import * as Tabs from "$components/ui/tabs";
     import { SETTINGS_SECTIONS, DEFAULT_SECTION_ID } from "./settings-sections";
     import DisplaySection from "../components/settings/DisplaySection.svelte";
+    import ExtensionSection from "../components/settings/ExtensionSection.svelte";
     import AboutSection from "../components/settings/AboutSection.svelte";
     import { libraryManager } from "./settings.svelte";
 
@@ -107,6 +108,7 @@
     // empty panel, which is exactly how the old Library and About tabs looked.
     const sectionComponents: Record<string, Component> = {
         display: DisplaySection,
+        extension: ExtensionSection,
         about: AboutSection,
     };
 
@@ -125,6 +127,39 @@
 
     // The Tag Manager is a full-screen view, opened over the library.
     let tagManagerOpen = $state(false);
+
+    // Controlled rather than left to the component, so closing is observable.
+    let settingsOpen = $state(false);
+
+    /**
+     * Undo what a dismissed modal can leave behind.
+     *
+     * bits-ui (like Radix underneath it) does two things while a modal is open:
+     * sets `pointer-events: none` on <body>, and keeps the overlay mounted until
+     * its exit animation finishes. Closing by clicking OUTSIDE can leave either
+     * one in place — and both fail the same way, which is the worst way: the app
+     * looks completely normal and silently ignores every click, because an
+     * invisible `fixed inset-0 z-50` overlay is swallowing them.
+     *
+     * The overlay is neutralised rather than removed: bits-ui still owns that
+     * node and will throw if it later unmounts something already gone.
+     */
+    $effect(() => {
+        if (settingsOpen) return;
+        // Longer than the 100ms exit animation, so this only ever cleans up what
+        // the library genuinely failed to.
+        const timer = setTimeout(() => {
+            if (document.body.style.pointerEvents === "none") {
+                document.body.style.removeProperty("pointer-events");
+            }
+            for (const stale of document.querySelectorAll<HTMLElement>(
+                '[data-slot="dialog-overlay"][data-state="closed"]',
+            )) {
+                stale.style.pointerEvents = "none";
+            }
+        }, 250);
+        return () => clearTimeout(timer);
+    });
 
     let noLibraryConnected = $derived(!libraryManager.state.activeLibrary);
 
@@ -386,8 +421,34 @@
             assetLibrary.applyThumbnails(event.payload.ready);
             assetLibrary.reportThumbProgress(event.payload.current, event.payload.total);
         });
+
+        // The browser extension writes over HTTP, which the webview knows nothing
+        // about — the manifest is a snapshot taken at load time, so without this
+        // a capture sits in the database until something forces a reload. Which
+        // is precisely the "I saved it but Nova doesn't show it" symptom.
+        const unlistenCapture = listen<{ filename: string | null }>(
+            "bridge-captured",
+            (event) => {
+                void (async () => {
+                    // `reload()` re-streams the MANIFEST only. A capture can also
+                    // have created tags that never existed here, and the tag list
+                    // is its own cache — so without this they stayed invisible
+                    // until something else happened to refresh it, which is why
+                    // they only appeared after creating an unrelated tag.
+                    await assetLibrary.reload();
+                    await assetLibrary.loadTags();
+                })();
+                toast.success(
+                    event.payload.filename
+                        ? `Saved ${event.payload.filename}`
+                        : "Saved from your browser",
+                );
+            },
+        );
+
         return () => {
             unlisten.then((fn) => fn());
+            unlistenCapture.then((fn) => fn());
         };
     });
 
@@ -618,7 +679,7 @@
             <!-- Footer: settings live at the bottom of the sidebar, not in a
                  header — it's a destination you visit rarely, not a control. -->
             <div class="shrink-0 border-t border-neutral-800 p-2">
-                <Dialog.Root>
+                <Dialog.Root bind:open={settingsOpen}>
                     <Dialog.Trigger
                         type="button"
                         class="flex w-full items-center gap-2 rounded px-2 py-1.5 text-sm

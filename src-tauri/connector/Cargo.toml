@@ -1,0 +1,22 @@
+# `nova-connector` — the native messaging host that wakes Nova.
+#
+# A SEPARATE crate, and that is structural rather than tidiness. It ships inside
+# the installer as a Tauri sidecar, which means `tauri.conf.json` declares it in
+# `externalBin` — and tauri-build validates that the sidecar file EXISTS every
+# time Nova's build script runs. If the connector were a second binary in Nova's
+# own package, building it would run that build script, which would demand a
+# sidecar that building it is supposed to produce. A circle with no entry point.
+#
+# Its own package breaks that: `cargo build -p nova-connector` never touches
+# Nova's build script, so the sidecar can be staged before Nova compiles at all.
+#
+# Deliberately has NO dependencies. It speaks length-prefixed JSON over stdio and
+# makes one loopback HTTP request; both are a few lines of std, and a launcher
+# the browser spawns on every wake has no business pulling in a runtime.
+
+[package]
+name = "nova-connector"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]

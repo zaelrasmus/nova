@@ -1951,3 +1951,96 @@ pub async fn empty_trash(state: tauri::State<'_, DbState>) -> Result<usize, AppE
         .inspect_err(|e| tracing::error!(error = %e, "empty_trash failed"))
         .map_err(AppError::from)
 }
+
+// ── Extension bridge ─────────────────────────────────────────────────────────
+//
+// The bridge itself is an HTTP server (see `bridge`), so these commands are not
+// how the extension talks to Nova — they are how the WINDOW does. Pairing needs
+// a human to approve a request that arrived over the network, and that approval
+// has to happen somewhere the network cannot reach.
+
+// These four name `tauri::Wry` concretely rather than being generic over the
+// runtime, as `connect_library` is. A `State<SharedBridge<R>>` gives the macro
+// nothing to infer R FROM — the other generic commands pin it with an
+// `AppHandle<R>` parameter they mostly ignore. Nova is desktop-only, so naming
+// the runtime is more honest than carrying a parameter to satisfy inference.
+
+/// Everything the settings panel renders in one call.
+#[derive(serde::Serialize)]
+pub struct BridgeSnapshot {
+    /// `None` when the server could not bind — every candidate port was taken.
+    pub port: Option<u16>,
+    pub clients: Vec<crate::bridge::ClientSummary>,
+    /// Requests currently parked, waiting for this window to answer.
+    pub pending: Vec<crate::bridge::PendingSummary>,
+    /// How long Nova idles in the background before exiting, in seconds.
+    pub idle_exit_secs: u64,
+}
+
+#[tauri::command]
+pub async fn bridge_state(
+    bridge: tauri::State<'_, crate::bridge::SharedBridge<tauri::Wry>>,
+) -> Result<BridgeSnapshot, AppError> {
+    Ok(BridgeSnapshot {
+        port: bridge.port().await,
+        clients: bridge.clients().await,
+        pending: bridge.pending_pairings().await,
+        idle_exit_secs: bridge.idle_exit_secs().await,
+    })
+}
+
+/// Approve a pairing request: mints the token and unblocks the waiting HTTP
+/// handler. The token is returned to the EXTENSION over the socket, never here —
+/// putting it through the webview would be handing the secret to the one place
+/// that has no business holding it.
+#[instrument(skip_all, fields(request = %request_id))]
+#[tauri::command]
+pub async fn bridge_approve(
+    request_id: String,
+    bridge: tauri::State<'_, crate::bridge::SharedBridge<tauri::Wry>>,
+) -> Result<(), AppError> {
+    bridge
+        .approve(&request_id)
+        .await
+        .inspect_err(|e| warn!(error = %e, "bridge_approve failed"))
+        .map_err(AppError::from)
+}
+
+#[instrument(skip_all, fields(request = %request_id))]
+#[tauri::command]
+pub async fn bridge_deny(
+    request_id: String,
+    bridge: tauri::State<'_, crate::bridge::SharedBridge<tauri::Wry>>,
+) -> Result<(), AppError> {
+    bridge.deny(&request_id).await.map_err(AppError::from)
+}
+
+/// Revoke a paired browser. Its token stops authenticating immediately — the
+/// next request it makes gets a 401 and the extension falls back to unpaired.
+#[instrument(skip_all, fields(client = %client_id))]
+#[tauri::command]
+pub async fn bridge_revoke(
+    client_id: String,
+    bridge: tauri::State<'_, crate::bridge::SharedBridge<tauri::Wry>>,
+) -> Result<(), AppError> {
+    bridge.revoke(&client_id).await.map_err(AppError::from)
+}
+
+/// How long Nova stays in the background with nothing to do before exiting.
+///
+/// A user-facing setting rather than a constant because the right answer depends
+/// on the machine: someone short of memory wants it gone quickly, someone who
+/// saves in bursts wants it to stay. It doubles as the only practical way to
+/// WATCH the idle exit happen — fifteen minutes is a long time to sit and
+/// confirm that something disappeared.
+#[instrument(skip_all, fields(secs = seconds))]
+#[tauri::command]
+pub async fn bridge_set_idle_exit(
+    seconds: u64,
+    bridge: tauri::State<'_, crate::bridge::SharedBridge<tauri::Wry>>,
+) -> Result<(), AppError> {
+    bridge
+        .set_idle_exit_secs(seconds)
+        .await
+        .map_err(AppError::from)
+}

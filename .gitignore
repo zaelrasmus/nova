@@ -13,3 +13,6 @@ skills-lock.json
 .agents/
 docs
 .github
+
+# Staged sidecar, rebuilt by scripts/prepare-connector.mjs
+src-tauri/binaries/
