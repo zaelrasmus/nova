@@ -46,6 +46,8 @@ export interface AppPreferences {
   showOrdinals: boolean;
   /** Backdrop the viewer opens with. `B` cycles it for one viewing only. */
   viewerBackground: ViewerBackground;
+  /** At a folder's last item, offer the next sibling folder (button and →). */
+  viewerNextFolder: boolean;
 
   // ── Media playback ──────────────────────────────────────────────────────
   // Set from the viewer's player rather than a settings screen: a volume the
@@ -91,6 +93,7 @@ const DEFAULT_PREFERENCES: AppPreferences = {
   animateGifsInGrid: false,
   showOrdinals: true,
   viewerBackground: "gray",
+  viewerNextFolder: false,
   mediaVolume: 1,
   mediaMuted: false,
   sidebarWidth: 240,

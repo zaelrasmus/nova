@@ -19,7 +19,7 @@
     import { untrack } from "svelte";
     import { convertFileSrc } from "@tauri-apps/api/core";
     import { toast } from "svelte-sonner";
-    import { assetLibrary, thumbHashUrl } from "$lib/assets.svelte";
+    import { assetLibrary, thumbHashUrl, type SubtreeSection } from "$lib/assets.svelte";
     import { viewer } from "$lib/viewer.svelte";
     import { PanZoom } from "$lib/panzoom.svelte";
     import { isRemote, remoteAssetUrl, keepRemoteOffline, setMediaDuration } from "$lib/remote";
@@ -40,6 +40,167 @@
     });
 
     const heavy = $derived(current ? assetLibrary.heavy.get(current.id) : undefined);
+
+    // ── Reading position ───────────────────────────────────────────────────────────────────
+    // "Ch 01 · 12 / 24" — a page's place in an order a PERSON chose. Same rule as
+    // the grid's numbers: a folder, Manual sort, nothing narrowing the list.
+    // Anywhere else the plain "12 / 240" counter stays, since an index into a
+    // date sort or a filtered list isn't anyone's page number.
+    const scope = $derived(assetLibrary.scope);
+    const openFolderId = $derived(scope.kind === "folder" ? scope.id : null);
+    const reading = $derived(
+        openFolderId !== null &&
+            assetLibrary.sort.order_by === "manual" &&
+            !assetLibrary.hasFilters &&
+            !assetLibrary.nameFiltering,
+    );
+    const folderName = (id: string) =>
+        assetLibrary.folders.find((f) => f.id === id)?.name ?? "Folder";
+
+    // A merged view is its subfolders' runs back to back, so a page's chapter
+    // follows from its index. Refetched with the list it describes; a token
+    // drops answers for a list we've already left.
+    let sections = $state<SubtreeSection[] | null>(null);
+    let sectionsToken = 0;
+    $effect(() => {
+        const id = openFolderId;
+        const wanted = viewer.isOpen && reading && assetLibrary.includesSubfolders;
+        void assetLibrary.manifest;
+        void assetLibrary.membershipVersion;
+        const mine = ++sectionsToken;
+        if (!wanted || id === null) {
+            sections = null;
+            return;
+        }
+        assetLibrary
+            .fetchSubtreeSections(id)
+            .then((s) => {
+                if (mine === sectionsToken) sections = s;
+            })
+            .catch(() => {
+                if (mine === sectionsToken) sections = null;
+            });
+    });
+
+    const place = $derived.by(() => {
+        if (!reading || openFolderId === null || viewer.count === 0) return null;
+        const n = viewer.count;
+        // Place in MANUAL order: descending shows the list backwards, but page
+        // 1 is still the first page, exactly as the grid numbers it.
+        const m = assetLibrary.sort.is_ascending ? viewer.index : n - 1 - viewer.index;
+        const whole = { name: folderName(openFolderId), at: m + 1, of: n };
+        if (!assetLibrary.includesSubfolders || !sections) return whole;
+        // Sections that don't tile this exact list (mid-reload) would name the
+        // wrong chapter; the whole-list count is never wrong.
+        if (sections.reduce((sum, s) => sum + s.count, 0) !== n) return whole;
+        let start = 0;
+        for (const s of sections) {
+            if (m < start + s.count) return { name: folderName(s.folder_id), at: m - start + 1, of: s.count };
+            start += s.count;
+        }
+        return whole;
+    });
+
+    // ── Next folder ──────────────────────────────────────────────────────────────────────
+    // At the last item, the next sibling in sidebar order — the next chapter.
+    // `folders` already arrives in sidebar order (parent, position, name, id),
+    // so filtering to the siblings keeps it.
+    // Opt-in (Settings › Display): off, the last page is simply the end.
+    const nextFolder = $derived.by(() => {
+        if (!settings.preferences.viewerNextFolder) return null;
+        if (openFolderId === null || viewer.count === 0 || viewer.index !== viewer.count - 1) {
+            return null;
+        }
+        const me = assetLibrary.folders.find((f) => f.id === openFolderId);
+        if (!me) return null;
+        const siblings = assetLibrary.folders.filter((f) => f.parent_id === me.parent_id);
+        return siblings[siblings.findIndex((f) => f.id === me.id) + 1] ?? null;
+    });
+
+    // Open the next folder and keep reading. Timing can't tell us when the new
+    // list is in: the old rows linger until `setScope` reaches its load, and
+    // chunks can trail the call resolving. So the viewer closes, and reopens on
+    // the first row that arrives FOR THAT FOLDER. A folder with nothing of its
+    // own (a volume of chapters) simply leaves it closed — never "open" on
+    // nothing while still owning the keyboard.
+    //
+    // A jump is one-shot: it is dropped as soon as the target finishes loading
+    // empty, or the user ends up anywhere but the folder they left or the one
+    // they're heading to — otherwise rows arriving later (an import, turning
+    // on Subfolders) would pop the viewer open unasked.
+    let jump = $state<{
+        from: string;
+        folderId: string;
+        mode: Exclude<typeof viewer.mode, "closed">;
+        reached: boolean;
+    } | null>(null);
+    async function openNextFolder() {
+        const target = nextFolder;
+        if (!target || viewer.mode === "closed" || openFolderId === null) return;
+        jump = { from: openFolderId, folderId: target.id, mode: viewer.mode, reached: false };
+        viewer.close();
+        await assetLibrary.setScope({ kind: "folder", id: target.id });
+        // Superseded by another navigation while the scope was resolving.
+        if (jump?.folderId === target.id && openFolderId !== target.id) jump = null;
+    }
+    $effect(() => {
+        const j = jump;
+        if (j === null) return;
+        if (openFolderId === j.folderId) {
+            j.reached = true;
+            if (viewer.count > 0) {
+                jump = null;
+                viewer.open(0, j.mode);
+            } else if (!assetLibrary.isLoading) {
+                jump = null; // loaded, and nothing of its own: stay closed
+            }
+        } else if (j.reached || openFolderId !== j.from) {
+            jump = null; // the user went elsewhere
+        }
+    });
+
+    // ── Preload ──────────────────────────────────────────────────────────────────────────
+    // Decode the next two images at full resolution so turning the page is
+    // instant. Local files only: an online asset would cost a download per
+    // page you might never reach. `crossOrigin` matches the visible <img> — the
+    // cache keys CORS and plain requests apart, so a mismatch fetches twice.
+    // Holding the elements keeps their decoded bitmaps alive; replacing them
+    // lets the previous pair go.
+    const PRELOAD_AHEAD = 2;
+    let preloaded: HTMLImageElement[] = [];
+    let preloadKey = "";
+    $effect(() => {
+        if (!viewer.isOpen) {
+            preloaded = [];
+            preloadKey = "";
+            return;
+        }
+        const ahead = viewer.list
+            .slice(viewer.index + 1, viewer.index + 1 + PRELOAD_AHEAD)
+            .filter((r) => r.asset_type === "image");
+        if (ahead.length === 0) {
+            preloaded = [];
+            preloadKey = "";
+            return;
+        }
+        untrack(() => assetLibrary.ensure(ahead.map((r) => r.id)));
+        const urls: string[] = [];
+        for (const r of ahead) {
+            const h = assetLibrary.heavy.get(r.id); // re-runs once hydrated
+            if (h && !isRemote(h) && h.dest_path) urls.push(convertFileSrc(h.dest_path));
+        }
+        const key = urls.join("\n");
+        if (key === preloadKey) return;
+        preloadKey = key;
+        preloaded = urls.map((url) => {
+            const img = new Image();
+            img.crossOrigin = "anonymous";
+            img.decoding = "async";
+            img.src = url;
+            img.decode().catch(() => {}); // a failed preload just means a normal load later
+            return img;
+        });
+    });
 
     // Layered sources, cheapest-first: a ThumbHash blur (instant), the cached
     // thumbnail, then the full-resolution original. The full-res image carries
@@ -244,7 +405,11 @@
                 case "ArrowRight":
                     if (isMedia && !e.shiftKey) return; // the player seeks instead
                     e.preventDefault();
-                    viewer.next();
+                    // Past the last page, into the next chapter — but never on
+                    // key repeat, or holding → to flip fast would carry you
+                    // out of the folder.
+                    if (nextFolder && !e.repeat) void openNextFolder();
+                    else viewer.next();
                     break;
                 case "ArrowLeft":
                     if (isMedia && !e.shiftKey) return;
@@ -423,8 +588,26 @@
             class="pointer-events-none absolute left-4 top-3 flex items-center gap-2 text-xs text-white/70"
         >
             <span class="max-w-[40vw] truncate">{current.filename}</span>
-            <span class="text-white/40">{viewer.index + 1} / {viewer.count}</span>
+            {#if place}
+                <span class="max-w-[25vw] truncate text-white/60">{place.name}</span>
+                <span class="tabular-nums text-white/40">· {place.at} / {place.of}</span>
+            {:else}
+                <span class="tabular-nums text-white/40">{viewer.index + 1} / {viewer.count}</span>
+            {/if}
         </div>
+
+        {#if nextFolder}
+            <!-- Last page: carry on into the next chapter (also →). -->
+            <button
+                type="button"
+                onclick={openNextFolder}
+                title="Open the next folder (→)"
+                class="absolute bottom-16 right-4 z-10 max-w-[40vw] truncate rounded-full bg-white/15 px-3 py-1.5
+                       text-xs font-medium text-white shadow-lg ring-1 ring-white/20 hover:bg-white/25"
+            >
+                Next: {nextFolder.name} →
+            </button>
+        {/if}
 
         <div class="absolute right-3 top-3 flex items-center gap-1">
             <!-- Media carries its own fullscreen button in the player bar; two

@@ -16,6 +16,8 @@
         settings.set("animateGifsInGrid", !settings.preferences.animateGifsInGrid);
     const toggleOrdinals = () =>
         settings.set("showOrdinals", !settings.preferences.showOrdinals);
+    const toggleNextFolder = () =>
+        settings.set("viewerNextFolder", !settings.preferences.viewerNextFolder);
 
     // Values match ThumbMode::from_setting on the Rust side.
     const QUALITIES = [
@@ -119,6 +121,31 @@
                 </button>
             {/each}
         </div>
+    </div>
+
+    <!-- Next folder in the viewer -->
+    <div class="flex items-center justify-between gap-8">
+        <div class="flex flex-col gap-0.5">
+            <Label class="text-sm text-neutral-200">Continue into the next folder</Label>
+            <p class="text-xs text-neutral-500">
+                At a folder's last item, the viewer offers the next folder beside it — the next
+                chapter. Also with →.
+            </p>
+        </div>
+        <button
+            type="button"
+            role="switch"
+            aria-label="Continue into the next folder"
+            aria-checked={settings.preferences.viewerNextFolder}
+            onclick={toggleNextFolder}
+            class="relative inline-flex h-6 w-11 items-center rounded-full transition-colors
+                   {settings.preferences.viewerNextFolder ? 'bg-blue-600' : 'bg-neutral-700'}"
+        >
+            <span
+                class="inline-block h-4 w-4 transform rounded-full bg-white transition-transform
+                       {settings.preferences.viewerNextFolder ? 'translate-x-6' : 'translate-x-1'}"
+            ></span>
+        </button>
     </div>
 
     <!-- Thumbnail quality -->

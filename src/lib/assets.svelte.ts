@@ -683,6 +683,15 @@ export interface PinnedItem {
   position: number;
 }
 
+/**
+ * One run of a merged folder view's reading order: `count` assets whose place
+ * is `folder_id`. The merged list is these runs back to back.
+ */
+export interface SubtreeSection {
+  folder_id: string;
+  count: number;
+}
+
 /** One direct child of a folder, shown as a tile in that folder's view. */
 export interface FolderChild {
   folder_id: string;
@@ -1657,6 +1666,11 @@ class AssetLibrary {
    */
   fetchFolderStats(folderId: string): Promise<FolderStats> {
     return invoke<FolderStats>("folder_stats", { folderId });
+  }
+
+  /** A merged folder view's reading order as `(folder, count)` runs. */
+  fetchSubtreeSections(folderId: string): Promise<SubtreeSection[]> {
+    return invoke<SubtreeSection[]>("subtree_sections", { folderId });
   }
 
   /** A folder's direct children as tiles — counts and a cover id each. */
