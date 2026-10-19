@@ -1184,7 +1184,8 @@ async fn materialize_smart_order(
 /// manifest (`move_folder` already rejects cycles — this is the second line).
 const MAX_SUBTREE_DEPTH: i64 = 64;
 
-/// One row per asset in `root`'s subtree — `(asset_id, added_at, position)` —
+/// One row per asset in `root`'s subtree — `(asset_id, added_at, folder_id,
+/// position)`, `folder_id` being the folder where it takes its place —
 /// where `position` is the asset's place in READING order: the root's own
 /// items, then each subfolder in sidebar order (`position, name, id`), depth-first,
 /// each in its own persisted sort. An asset filed in several folders keeps
@@ -1216,7 +1217,7 @@ fn push_subtree_members<'a>(qb: &mut QueryBuilder<'a, Sqlite>, root: &'a str) {
     .push(
         " ), \
          members AS ( \
-             SELECT af.asset_id, af.added_at, t.path, \
+             SELECT af.asset_id, af.added_at, af.folder_id, t.path, \
                     ROW_NUMBER() OVER (PARTITION BY af.folder_id ORDER BY ",
     );
     for (i, order_by) in OrderBy::ALL.iter().enumerate() {
@@ -1252,14 +1253,49 @@ fn push_subtree_members<'a>(qb: &mut QueryBuilder<'a, Sqlite>, root: &'a str) {
              JOIN assets a ON a.id = af.asset_id \
          ), \
          firsts AS ( \
-             SELECT asset_id, added_at, path, inner_rank, \
+             SELECT asset_id, added_at, folder_id, path, inner_rank, \
                     ROW_NUMBER() OVER (PARTITION BY asset_id ORDER BY path, inner_rank) AS nth \
              FROM members \
          ) \
-         SELECT asset_id, added_at, \
+         SELECT asset_id, added_at, folder_id, \
                 ROW_NUMBER() OVER (ORDER BY path, inner_rank) AS position \
          FROM firsts WHERE nth = 1",
     );
+}
+
+/// One run of a merged view's reading order: `count` live assets whose first
+/// place is `folder_id`. A merged list is these runs back to back, so a page's
+/// chapter and its place in it follow from its index alone — no per-row folder
+/// in the manifest (which would cost a field on every row of every view).
+#[derive(Serialize, Debug, Clone, PartialEq)]
+pub struct SubtreeSection {
+    pub folder_id: String,
+    pub count: i64,
+}
+
+/// The sections of `root`'s merged view in reading order. Folders whose every
+/// asset already appeared earlier (or is trashed) have no run and are absent.
+#[instrument(skip(pool))]
+pub async fn subtree_sections(pool: &SqlitePool, root: &str) -> Result<Vec<SubtreeSection>> {
+    // The same merged rows the manifest joins, so the runs can't drift from
+    // the list on screen; trashed assets drop out here exactly as they do there.
+    let mut qb = QueryBuilder::new("SELECT af.folder_id, COUNT(*) FROM (");
+    push_subtree_members(&mut qb, root);
+    qb.push(
+        ") af JOIN assets a ON a.id = af.asset_id \
+         WHERE a.deleted_at IS NULL \
+         GROUP BY af.folder_id \
+         ORDER BY MIN(af.position)",
+    );
+    let rows: Vec<(String, i64)> = qb
+        .build_query_as()
+        .fetch_all(pool)
+        .await
+        .context("Failed to read subtree sections")?;
+    Ok(rows
+        .into_iter()
+        .map(|(folder_id, count)| SubtreeSection { folder_id, count })
+        .collect())
 }
 
 /// Whether `scope` is a folder showing its whole subtree. Only a folder can be;
@@ -6801,6 +6837,43 @@ mod include_subfolders_tests {
         let scope = Scope::Folder { id: "ch1".into() };
         reorder_assets(&pool, &scope, &["p1".into()], None).await.unwrap();
         assert_eq!(manifest(&pool, "ch1", "manual", true).await, ["p1", "p2"]);
+    }
+
+    /// Sections tile the merged manual list exactly: in order, one run per
+    /// folder that contributes a live asset, summing to the list's length.
+    #[tokio::test]
+    async fn sections_follow_reading_order_and_sum_to_the_list() {
+        let pool = db().await;
+        let sections = subtree_sections(&pool, "saga").await.unwrap();
+        let section = |id: &str, count: i64| SubtreeSection { folder_id: id.into(), count };
+        assert_eq!(
+            sections,
+            vec![section("saga", 1), section("ch1", 2), section("ch1a", 1), section("ch2", 2)]
+        );
+        let total: i64 = sections.iter().map(|s| s.count).sum();
+        assert_eq!(total as usize, manifest(&pool, "saga", "manual", true).await.len());
+    }
+
+    /// A folder contributing nothing new (its one asset was trashed, and the
+    /// rest already appeared) gets no section.
+    #[tokio::test]
+    async fn a_folder_with_no_new_assets_has_no_section() {
+        let pool = db().await;
+        sqlx::query("INSERT INTO folders (id, name, parent_id, position) VALUES ('ch3','Ch 03','saga',2)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO assets_folders (folder_id, asset_id, position) VALUES ('ch3','p1',0), ('ch3','t',1)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let ids: Vec<String> = subtree_sections(&pool, "saga")
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|s| s.folder_id)
+            .collect();
+        assert_eq!(ids, ["saga", "ch1", "ch1a", "ch2"]);
     }
 
     /// `ALL` and `db_name` must match the stored TEXT, which is the same

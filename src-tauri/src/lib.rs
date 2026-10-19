@@ -164,6 +164,7 @@ pub fn run() {
             commands::update_folder,
             commands::folder_stats,
             commands::folder_children,
+            commands::subtree_sections,
             commands::selection_summary,
             commands::folder_membership,
             commands::update_asset,

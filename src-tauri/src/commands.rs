@@ -1186,6 +1186,21 @@ pub async fn folder_children(
         .map_err(AppError::from)
 }
 
+/// A merged folder view's reading order as `(folder, count)` runs, so the
+/// viewer can name a page's chapter and its place in it.
+#[instrument(skip_all)]
+#[tauri::command]
+pub async fn subtree_sections(
+    folder_id: String,
+    state: tauri::State<'_, DbState>,
+) -> Result<Vec<assets::SubtreeSection>, AppError> {
+    let pool = state.acquire_pool().await?;
+    assets::subtree_sections(&pool, &folder_id)
+        .await
+        .inspect_err(|e| tracing::error!(error = %e, "subtree_sections failed"))
+        .map_err(AppError::from)
+}
+
 /// Drop-between-rows: place a folder under `newParentId`, after `afterId`.
 /// `afterId: null` means first among its new siblings.
 #[instrument(skip_all)]
