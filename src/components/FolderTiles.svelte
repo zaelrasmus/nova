@@ -10,6 +10,11 @@
 
   Single click selects the folder (the inspector shows it, as in the tree);
   double click or Enter opens it, and the tree's highlight follows the scope.
+
+  Each tile is a folder drop target, exactly like its sidebar row: assets
+  dragged from the grid file into it (Shift moves), and files dragged in from
+  the OS import into it. Both drag systems find it by its `data-drop-folder`
+  attribute (see droptarget.ts), so no drop logic lives here.
 -->
 <script lang="ts">
     import { convertFileSrc, invoke } from "@tauri-apps/api/core";
@@ -20,6 +25,9 @@
         type FolderChild,
     } from "$lib/assets.svelte";
     import { selection } from "$lib/selection.svelte";
+    import { drag } from "$lib/dragdrop.svelte";
+    import { dropzone } from "$lib/dropzone.svelte";
+    import { DROP_FOLDER_ATTR, DROP_FOLDER_NAME_ATTR } from "$lib/droptarget";
 
     interface Props {
         /** How many tiles are showing, so the grid can label its sections. */
@@ -43,14 +51,16 @@
     let covers = $state(new Map<string, AssetMetadata>());
 
     // Refetch when the place changes, when the tree changes (create, rename,
-    // move, delete) and when the manifest reloads (assets moved or trashed from
-    // here change the children's counts and covers). A token drops responses
-    // that arrive after the user has already moved on.
+    // move, delete), when the manifest reloads (assets moved or trashed from
+    // here) and when assets are filed into a child (a drop on a tile reloads
+    // nothing else). A token drops responses that arrive after the user has
+    // already moved on.
     let token = 0;
     $effect(() => {
         const id = parentId;
         void assetLibrary.folders;
         void assetLibrary.manifest;
+        void assetLibrary.membershipVersion;
         const mine = ++token;
         if (id === null) {
             children = [];
@@ -125,11 +135,26 @@
             {#each children as child (child.folder_id)}
                 {@const src = coverSrc(child.cover_id ? covers.get(child.cover_id) : undefined)}
                 {@const selected = selectedFolder === child.folder_id}
+                {@const name = nameOf.get(child.folder_id) ?? "Folder"}
+                <!-- Same highlight as the tree row, for both drag systems. -->
+                {@const dropping =
+                    dropzone.isOverFolder(child.folder_id) || drag.isOverFolder(child.folder_id)}
+                {@const blocked =
+                    drag.forbidden &&
+                    drag.target?.kind === "folder" &&
+                    drag.target.id === child.folder_id}
                 <button
                     type="button"
-                    class="group flex min-w-0 flex-col gap-1.5 rounded-md p-1 text-left
+                    {...{ [DROP_FOLDER_ATTR]: child.folder_id, [DROP_FOLDER_NAME_ATTR]: name }}
+                    class="group flex min-w-0 flex-col gap-1.5 rounded-md p-1 text-left transition-colors
                            focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-400
-                           {selected ? 'bg-neutral-800' : 'hover:bg-neutral-900'}"
+                           {dropping
+                        ? 'bg-emerald-600/25 ring-1 ring-emerald-500'
+                        : blocked
+                          ? 'bg-red-600/15 ring-1 ring-red-600/50'
+                          : selected
+                            ? 'bg-neutral-800'
+                            : 'hover:bg-neutral-900'}"
                     onclick={() => selection.selectFolder(child.folder_id)}
                     ondblclick={() => open(child.folder_id)}
                     onkeydown={(e) => {
@@ -150,7 +175,7 @@
                         {/if}
                     </div>
                     <span class="truncate text-xs font-medium text-neutral-200">
-                        {nameOf.get(child.folder_id) ?? "Folder"}
+                        {name}
                     </span>
                     <span class="-mt-1 truncate text-[11px] text-neutral-500">{describe(child)}</span>
                 </button>

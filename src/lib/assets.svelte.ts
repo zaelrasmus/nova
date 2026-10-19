@@ -935,6 +935,12 @@ class AssetLibrary {
    * AssetCard) to force a refetch. No effect on freshly generated thumbnails.
    */
   thumbVersion = $state(0);
+  /**
+   * Bumped after assets are added to or moved between folders. Views that
+   * summarise OTHER folders (subfolder tiles) read it, since filing into a
+   * folder that isn't on screen reloads nothing they'd otherwise notice.
+   */
+  membershipVersion = $state(0);
 
   /**
    * Bumped whenever an existing row's DIMENSIONS change — which only happens
@@ -2034,6 +2040,7 @@ class AssetLibrary {
       [{ op: { type: "add_to_folder", folder_id: folderId } }],
       assetIds,
     );
+    this.membershipVersion++;
     // The target folder may seed auto-tags, which changes usage counts and what
     // the inspector shows. Cheap enough to do unconditionally: the summary
     // doesn't say whether any fired, and a drag is not a hot path.
@@ -2074,6 +2081,7 @@ class AssetLibrary {
       ],
       assetIds,
     );
+    this.membershipVersion++;
     await this.loadTags(); // the target may seed auto-tags
     const active = this.scope;
     if (
