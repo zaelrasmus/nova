@@ -3495,6 +3495,63 @@ pub async fn fetch_assets_by_ids(
     Ok(rows)
 }
 
+/// Write import memberships.
+///
+/// OR IGNORE because dedup can route a link to an EXISTING asset that is
+/// already a member of that folder — re-importing a folder you've imported
+/// before. The (folder_id, asset_id) PK would otherwise abort the whole
+/// transaction over a row that is already correct.
+///
+/// `links` count from 0 per folder. A folder that already has items gets them
+/// shifted past its last position, so an import APPENDS to the existing manual
+/// order instead of interleaving with it. Read inside the caller's transaction,
+/// so the base can't move between the read and the write.
+async fn insert_folder_links(conn: &mut sqlx::SqliteConnection, links: &[FolderLink]) -> Result<()> {
+    // 3 binds per row; well under SQLite's 32766-parameter cap.
+    const ROWS_PER_INSERT: usize = 1500;
+
+    let folder_ids: Vec<&str> = links
+        .iter()
+        .map(|l| l.folder_id.as_str())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    let mut bases: HashMap<String, f64> = HashMap::new();
+    for chunk in folder_ids.chunks(IDS_PER_QUERY) {
+        let mut qb = QueryBuilder::new(
+            "SELECT folder_id, MAX(position) + 1 FROM assets_folders WHERE folder_id IN (",
+        );
+        let mut separated = qb.separated(", ");
+        for id in chunk {
+            separated.push_bind(*id);
+        }
+        qb.push(") GROUP BY folder_id");
+        let rows: Vec<(String, f64)> = qb
+            .build_query_as()
+            .fetch_all(&mut *conn)
+            .await
+            .context("Failed to read folder positions")?;
+        bases.extend(rows);
+    }
+
+    for chunk in links.chunks(ROWS_PER_INSERT) {
+        let mut qb = QueryBuilder::new(
+            "INSERT OR IGNORE INTO assets_folders (folder_id, asset_id, position) ",
+        );
+        qb.push_values(chunk, |mut b, l| {
+            let base = bases.get(&l.folder_id).copied().unwrap_or(0.0);
+            b.push_bind(&l.folder_id)
+                .push_bind(&l.asset_id)
+                .push_bind(base + l.position);
+        });
+        qb.build()
+            .execute(&mut *conn)
+            .await
+            .context("Failed to insert membership chunk")?;
+    }
+    Ok(())
+}
+
 /// Write a staged import to the database in ONE transaction: folders, then
 /// assets, then memberships. Ordering is load-bearing — foreign keys are checked
 /// immediately, so each stage must already exist when the next references it.
@@ -3592,24 +3649,7 @@ async fn persist_import(
     // 3. Membership links last — each references a folder and an asset inserted
     //    above.
     //
-    // OR IGNORE because dedup can route a link to an EXISTING asset that is
-    // already a member of that folder — re-importing a folder you've imported
-    // before. The (folder_id, asset_id) PK would otherwise abort the whole
-    // transaction over a row that is already correct.
-    for chunk in links.chunks(ROWS_PER_INSERT) {
-        let mut qb = QueryBuilder::new(
-            "INSERT OR IGNORE INTO assets_folders (folder_id, asset_id, position) ",
-        );
-        qb.push_values(chunk, |mut b, l| {
-            b.push_bind(&l.folder_id)
-                .push_bind(&l.asset_id)
-                .push_bind(l.position);
-        });
-        qb.build()
-            .execute(&mut *tx)
-            .await
-            .context("Failed to insert membership chunk")?;
-    }
+    insert_folder_links(&mut tx, links).await?;
 
     tx.commit()
         .await
@@ -6393,5 +6433,77 @@ mod folder_children_tests {
     async fn a_leaf_folder_has_no_children() {
         let pool = db().await;
         assert!(folder_children(&pool, "deep").await.unwrap().is_empty());
+    }
+}
+
+/// Import into a folder that already has items must APPEND: the scan's
+/// positions count from 0, so writing them raw interleaves new pages with the
+/// ones already there (a missing page dropped into a chapter landed at the top).
+#[cfg(test)]
+mod import_append_tests {
+    use super::*;
+
+    async fn db() -> SqlitePool {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        for stmt in [
+            "CREATE TABLE assets_folders (folder_id TEXT NOT NULL, asset_id TEXT NOT NULL, \
+             position REAL NOT NULL, PRIMARY KEY (folder_id, asset_id))",
+            // ch1 already holds three pages; `fresh` is a folder this import made.
+            "INSERT INTO assets_folders VALUES ('ch1','p1',0.0), ('ch1','p2',1.0), ('ch1','p3',2.0)",
+        ] {
+            sqlx::query(stmt).execute(&pool).await.unwrap();
+        }
+        pool
+    }
+
+    fn link(folder: &str, asset: &str, position: f64) -> FolderLink {
+        FolderLink {
+            folder_id: folder.into(),
+            asset_id: asset.into(),
+            position,
+        }
+    }
+
+    async fn insert(pool: &SqlitePool, links: &[FolderLink]) {
+        let mut conn = pool.acquire().await.unwrap();
+        insert_folder_links(&mut conn, links).await.unwrap();
+    }
+
+    async fn order(pool: &SqlitePool, folder: &str) -> Vec<String> {
+        sqlx::query_scalar(
+            "SELECT asset_id FROM assets_folders WHERE folder_id = ? ORDER BY position, asset_id",
+        )
+        .bind(folder)
+        .fetch_all(pool)
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn new_items_go_after_existing_ones_in_their_own_order() {
+        let pool = db().await;
+        insert(&pool, &[link("ch1", "p4", 0.0), link("ch1", "p5", 1.0)]).await;
+        assert_eq!(order(&pool, "ch1").await, ["p1", "p2", "p3", "p4", "p5"]);
+    }
+
+    #[tokio::test]
+    async fn a_folder_with_no_items_starts_at_zero() {
+        let pool = db().await;
+        insert(&pool, &[link("fresh", "a", 0.0), link("fresh", "b", 1.0)]).await;
+        let positions: Vec<f64> = sqlx::query_scalar(
+            "SELECT position FROM assets_folders WHERE folder_id = 'fresh' ORDER BY position",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(positions, [0.0, 1.0]);
+    }
+
+    /// Re-importing a page that's already in the folder keeps its place.
+    #[tokio::test]
+    async fn an_existing_member_keeps_its_position() {
+        let pool = db().await;
+        insert(&pool, &[link("ch1", "p2", 0.0), link("ch1", "p4", 1.0)]).await;
+        assert_eq!(order(&pool, "ch1").await, ["p1", "p2", "p3", "p4"]);
     }
 }
