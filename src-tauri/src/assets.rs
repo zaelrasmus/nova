@@ -6939,3 +6939,45 @@ mod include_subfolders_tests {
         assert_eq!(row, ("Comics".into(), 3.0, "filename".into(), false, false));
     }
 }
+
+/// Migrations are FROZEN: sqlx records a SHA-384 of every byte a library ran,
+/// and refuses to open the library if the build's copy differs. Line endings
+/// count — a checkout that turned LF into CRLF once made a library that ran
+/// the dev build refuse the installer. These are the bytes libraries already
+/// hold; `.gitattributes` (`-text`) keeps git from rewriting them, and this
+/// fails before any build that would strand a library.
+#[cfg(test)]
+mod migration_checksum_tests {
+    const FROZEN: [(i64, &str); 3] = [
+        (
+            20240101000000,
+            "d06e5a2e033cc7af5b2262528c282df7018ef5fd22373ba6e6a994abad94c354db162522c8c4d98c0a877b08bb27eccf",
+        ),
+        (
+            20260815000000,
+            "5a4e0f2bd4380f59858e8b87c884cf90d25c9020ce9aeb649b28f99fbd92ab0b60f0681e594b46e0036884cda165119a",
+        ),
+        // CRLF: the bytes the first installer shipped and applied.
+        (
+            20261019000000,
+            "3d50c24d141755ab98265bc6a37fca94bacb1b7fcc2e2889c998202c4e6b23c101e469fd3ccc298c4d991cb189eea157",
+        ),
+    ];
+
+    #[test]
+    fn shipped_migrations_keep_their_exact_bytes() {
+        let migrator = sqlx::migrate!();
+        let built: Vec<(i64, String)> = migrator
+            .iter()
+            .map(|m| {
+                let hex: String = m.checksum.iter().map(|b| format!("{b:02x}")).collect();
+                (m.version, hex)
+            })
+            .collect();
+        let frozen: Vec<(i64, String)> =
+            FROZEN.iter().map(|(v, h)| (*v, (*h).to_string())).collect();
+        // A NEW migration fails here too, on purpose: pin its checksum once
+        // it ships, alongside the file.
+        assert_eq!(built, frozen, "a shipped migration's bytes changed (line endings count)");
+    }
+}

@@ -1,0 +1,4 @@
+# Migrations are frozen byte-for-byte: sqlx stores a SHA-384 of each file a
+# library has run and refuses to open it if a build carries different bytes.
+# Never let git convert their line endings.
+src-tauri/migrations/*.sql -text
