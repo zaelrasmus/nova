@@ -149,6 +149,24 @@
         GIF
     </button>
 
+    <!-- Ordinal badges only mean something in a human-chosen order, so the
+         toggle is inert outside Manual sort; the title says why. -->
+    <button
+        type="button"
+        onclick={() => settings.set("showOrdinals", !settings.preferences.showOrdinals)}
+        disabled={!manualSort}
+        title={manualSort
+            ? "Number items by their manual order"
+            : "Numbers show only in Manual sort"}
+        aria-pressed={settings.preferences.showOrdinals}
+        class="rounded px-2 py-0.5 text-xs font-medium tabular-nums transition-colors disabled:opacity-40
+               {settings.preferences.showOrdinals
+            ? 'bg-blue-600 text-white'
+            : 'bg-neutral-800 text-neutral-400 hover:bg-neutral-700'}"
+    >
+        #
+    </button>
+
     <div class="flex items-center gap-2">
         <!-- In justified view the slider sets thumbnail SIZE (via target row
              height), not a fixed column count — the label follows. -->

@@ -38,6 +38,8 @@ export interface AppPreferences {
    */
   gridView: "waterfall" | "justified";
   animateGifsInGrid: boolean;
+  /** Number each card by its place in a Manual sort ("page 12"). */
+  showOrdinals: boolean;
 
   // ── Media playback ──────────────────────────────────────────────────────
   // Set from the viewer's player rather than a settings screen: a volume the
@@ -81,6 +83,7 @@ const DEFAULT_PREFERENCES: AppPreferences = {
   gridColumns: 4,
   gridView: "waterfall",
   animateGifsInGrid: false,
+  showOrdinals: true,
   mediaVolume: 1,
   mediaMuted: false,
   sidebarWidth: 240,

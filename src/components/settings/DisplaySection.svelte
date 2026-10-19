@@ -14,6 +14,8 @@
 
     const toggleGifs = () =>
         settings.set("animateGifsInGrid", !settings.preferences.animateGifsInGrid);
+    const toggleOrdinals = () =>
+        settings.set("showOrdinals", !settings.preferences.showOrdinals);
 
     // Values match ThumbMode::from_setting on the Rust side.
     const QUALITIES = [
@@ -65,6 +67,30 @@
             <span
                 class="inline-block h-4 w-4 transform rounded-full bg-white transition-transform
                        {settings.preferences.animateGifsInGrid ? 'translate-x-6' : 'translate-x-1'}"
+            ></span>
+        </button>
+    </div>
+
+    <!-- Ordinal badges -->
+    <div class="flex items-center justify-between gap-8">
+        <div class="flex flex-col gap-0.5">
+            <Label class="text-sm text-neutral-200">Number items in manual order</Label>
+            <p class="text-xs text-neutral-500">
+                Show each item's place (1, 2, 3…) when a view is sorted manually.
+            </p>
+        </div>
+        <button
+            type="button"
+            role="switch"
+            aria-label="Number items in manual order"
+            aria-checked={settings.preferences.showOrdinals}
+            onclick={toggleOrdinals}
+            class="relative inline-flex h-6 w-11 items-center rounded-full transition-colors
+                   {settings.preferences.showOrdinals ? 'bg-blue-600' : 'bg-neutral-700'}"
+        >
+            <span
+                class="inline-block h-4 w-4 transform rounded-full bg-white transition-transform
+                       {settings.preferences.showOrdinals ? 'translate-x-6' : 'translate-x-1'}"
             ></span>
         </button>
     </div>
