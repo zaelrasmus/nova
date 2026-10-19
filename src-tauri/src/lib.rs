@@ -163,6 +163,7 @@ pub fn run() {
             commands::create_folder,
             commands::update_folder,
             commands::folder_stats,
+            commands::folder_children,
             commands::selection_summary,
             commands::folder_membership,
             commands::update_asset,

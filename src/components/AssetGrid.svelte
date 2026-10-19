@@ -24,6 +24,7 @@
     import { untrack } from "svelte";
     import { createVirtualizer } from "@tanstack/svelte-virtual";
     import AssetCard from "./AssetCard.svelte";
+    import FolderTiles from "./FolderTiles.svelte";
     import FilterBar from "./FilterBar.svelte";
     import { layout } from "$lib/layout.svelte";
     import {get} from "svelte/store";
@@ -224,6 +225,9 @@
     );
 
     const manualSort = $derived(assetLibrary.sort.order_by === "manual");
+
+    // Direct subfolders of the current folder, reported by <FolderTiles>.
+    let childFolderCount = $state(0);
 
     // Ordinal badges ("page 12") show only when a PERSON chose the order, and
     // only over the whole scope: under a filter or search the index of what's
@@ -664,6 +668,15 @@
         </div>
     {/if}
 
+    <!-- A folder's subfolders, above its own assets. Takes the whole pane when
+         the folder holds nothing but folders (a series of chapters). -->
+    <FolderTiles bind:count={childFolderCount} fill={assets.length === 0} />
+    {#if childFolderCount > 0 && assets.length > 0}
+        <h2 class="shrink-0 px-3 pb-1 pt-2 text-xs font-medium text-neutral-500">
+            Assets · {assets.length}
+        </h2>
+    {/if}
+
     {#if assetLibrary.isLoading && assets.length === 0}
             <div class="flex items-center justify-center h-32 text-sm text-neutral-500">Loading assets...</div>
         {:else if assetLibrary.error}
@@ -686,6 +699,8 @@
                     ✕ Clear
                 </button>
             </div>
+        {:else if assets.length === 0 && childFolderCount > 0}
+            <!-- Only folders here: the tiles above are the content. -->
         {:else if assets.length === 0}
             <div class="flex items-center justify-center h-32 text-sm text-neutral-500">No assets in this library yet.</div>
         {:else}

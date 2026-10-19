@@ -474,6 +474,33 @@
         return assetLibrary.folders.find((f) => f.id === scope.id)?.name ?? "Folder";
     });
 
+    /**
+     * The open folder's ancestors, root first, for the header breadcrumb. Once a
+     * folder can be opened from a tile, the way back up has to be on screen too.
+     * The `seen` guard stops on a cycle rather than looping forever.
+     */
+    const folderTrail = $derived.by(() => {
+        const scope = assetLibrary.scope;
+        if (scope.kind !== "folder") return [];
+        const byId = new Map(assetLibrary.folders.map((f) => [f.id, f]));
+        const trail: { id: string; name: string }[] = [];
+        const seen = new Set<string>();
+        let id: string | null = scope.id;
+        while (id !== null && !seen.has(id)) {
+            seen.add(id);
+            const f = byId.get(id);
+            if (!f) break;
+            trail.unshift({ id: f.id, name: f.name });
+            id = f.parent_id;
+        }
+        return trail;
+    });
+
+    function openFolder(id: string) {
+        selection.selectFolder(id);
+        assetLibrary.setScope({ kind: "folder", id });
+    }
+
     const inspectorLabel = $derived(
         selection.assetCount > 1 ? `${selection.assetCount} selected` : "Inspector",
     );
@@ -796,12 +823,35 @@
                      contradiction that made `truncate` inert, so a long folder
                      name pushed the view controls off the end of the header
                      instead of eliding. -->
-                <span
-                    class="min-w-0 truncate px-1 text-sm font-medium text-neutral-200"
-                    data-tauri-drag-region
-                >
-                    {scopeLabel}
-                </span>
+                {#if folderTrail.length > 1}
+                    <!-- Breadcrumb: ancestors elide first, the open folder last. -->
+                    <nav
+                        aria-label="Folder path"
+                        class="flex min-w-0 items-center px-1 text-sm font-medium"
+                    >
+                        {#each folderTrail.slice(0, -1) as crumb (crumb.id)}
+                            <button
+                                type="button"
+                                class="min-w-0 truncate rounded px-0.5 text-neutral-500
+                                       hover:bg-neutral-800 hover:text-neutral-200"
+                                onclick={() => openFolder(crumb.id)}
+                            >
+                                {crumb.name}
+                            </button>
+                            <span class="shrink-0 px-0.5 text-neutral-600" aria-hidden="true">›</span>
+                        {/each}
+                        <span class="shrink-0 truncate text-neutral-200" data-tauri-drag-region>
+                            {folderTrail[folderTrail.length - 1].name}
+                        </span>
+                    </nav>
+                {:else}
+                    <span
+                        class="min-w-0 truncate px-1 text-sm font-medium text-neutral-200"
+                        data-tauri-drag-region
+                    >
+                        {scopeLabel}
+                    </span>
+                {/if}
                 <!-- Say "(filtered)" when narrowed, so a small view never reads as
                      a small library. -->
                 <span class="shrink-0 text-xs text-neutral-500" data-tauri-drag-region>

@@ -2413,6 +2413,74 @@ pub async fn folder_stats(pool: &SqlitePool, folder_id: &str) -> Result<FolderSt
     })
 }
 
+/// One direct child of a folder, as a tile in that folder's view.
+#[derive(Serialize, Debug, Clone, PartialEq)]
+pub struct FolderChild {
+    pub folder_id: String,
+    /// Direct, non-trashed members — what opening the folder shows.
+    pub item_count: i64,
+    /// Direct child folders.
+    pub subfolder_count: i64,
+    /// First asset in the child's OWN sort, so the cover is the item you'll
+    /// see first on opening it. `None` when it holds no live assets.
+    pub cover_id: Option<String>,
+}
+
+/// The direct children of `parent_id`, in sibling order, with what each tile
+/// needs to render.
+#[instrument(skip(pool))]
+pub async fn folder_children(pool: &SqlitePool, parent_id: &str) -> Result<Vec<FolderChild>> {
+    // Trashed assets keep their membership so restore is exact; like
+    // `folder_stats`, they must not count or a tile would claim more than it shows.
+    let rows: Vec<(String, OrderBy, bool, i64, i64)> = sqlx::query_as(
+        "SELECT f.id, f.order_by, f.is_ascending,
+                (SELECT COUNT(*) FROM assets_folders af
+                   JOIN assets a ON a.id = af.asset_id AND a.deleted_at IS NULL
+                  WHERE af.folder_id = f.id),
+                (SELECT COUNT(*) FROM folders c WHERE c.parent_id = f.id)
+         FROM folders f
+         WHERE f.parent_id = ?
+         ORDER BY f.position, f.name",
+    )
+    .bind(parent_id)
+    .fetch_all(pool)
+    .await
+    .context("Failed to list child folders")?;
+
+    // One small indexed query per child: each child sorts its own way, so the
+    // covers can't share one ORDER BY. A folder view lists tens to hundreds of
+    // children, so this stays cheap; the ORDER BY pieces are compile-time
+    // constants from `OrderBy::sql_expr`, never user input.
+    let mut children = Vec::with_capacity(rows.len());
+    for (folder_id, order_by, is_ascending, item_count, subfolder_count) in rows {
+        let cover_id = if item_count == 0 {
+            None
+        } else {
+            let dir = if is_ascending { "ASC" } else { "DESC" };
+            let sql = format!(
+                "SELECT a.id FROM assets_folders af
+                   JOIN assets a ON a.id = af.asset_id AND a.deleted_at IS NULL
+                  WHERE af.folder_id = ?
+                  ORDER BY {} {dir}, a.id
+                  LIMIT 1",
+                order_by.sql_expr(true),
+            );
+            sqlx::query_scalar::<_, String>(&sql)
+                .bind(&folder_id)
+                .fetch_optional(pool)
+                .await
+                .context("Failed to pick folder cover")?
+        };
+        children.push(FolderChild {
+            folder_id,
+            item_count,
+            subfolder_count,
+            cover_id,
+        });
+    }
+    Ok(children)
+}
+
 /// Apply a partial edit to a folder. Every field of [`FolderPatch`] is optional
 /// and `None` means "leave alone", so the inspector can save one field without
 /// read-modify-writing the whole row (and without racing another editor).
@@ -6243,5 +6311,87 @@ mod import_order_tests {
         );
         assert_eq!(got.len(), 1);
         assert_eq!((got[0].asset_id.as_str(), got[0].position), ("p1", 0.0));
+    }
+}
+
+/// Subfolder tiles: a folder's view lists its direct children with counts and a
+/// cover. The cover must be what OPENING the child shows first, so it follows
+/// the child's own sort, not the parent's and not import order.
+#[cfg(test)]
+mod folder_children_tests {
+    use super::*;
+
+    async fn db() -> SqlitePool {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        for stmt in [
+            "CREATE TABLE folders (id TEXT PRIMARY KEY, name TEXT NOT NULL, parent_id TEXT, \
+             position REAL NOT NULL, order_by TEXT NOT NULL DEFAULT 'manual', \
+             is_ascending INTEGER NOT NULL DEFAULT 1)",
+            "CREATE TABLE assets (id TEXT PRIMARY KEY, filename TEXT NOT NULL, \
+             imported_date TEXT, creation_date TEXT, modified_date TEXT, \
+             file_size INTEGER, pixel_count INTEGER, manual_position REAL NOT NULL DEFAULT 0, \
+             deleted_at TEXT)",
+            "CREATE TABLE assets_folders (folder_id TEXT NOT NULL, asset_id TEXT NOT NULL, \
+             position REAL NOT NULL, added_at TEXT, PRIMARY KEY (folder_id, asset_id))",
+            // saga > [ch2 (pos 1), ch1 (pos 0), empty (pos 2)]; ch1 > deep.
+            "INSERT INTO folders (id, name, parent_id, position) VALUES \
+             ('saga','Saga',NULL,0), ('ch2','Ch 02','saga',1), ('ch1','Ch 01','saga',0), \
+             ('empty','Empty','saga',2), ('deep','Deep','ch1',0)",
+            // ch2 sorts by filename DESCENDING, so its cover is z.png, not its
+            // manual first (a.png).
+            "UPDATE folders SET order_by = 'filename', is_ascending = 0 WHERE id = 'ch2'",
+            "INSERT INTO assets (id, filename, deleted_at) VALUES \
+             ('p1','p1.png',NULL), ('p2','p2.png',NULL), ('p0','p0.png','2026-01-01'), \
+             ('a','a.png',NULL), ('z','z.png',NULL), ('d','d.png',NULL)",
+            // ch1 manual order: p0 (trashed) < p2 < p1 \u2014 the live first is p2.
+            "INSERT INTO assets_folders (folder_id, asset_id, position) VALUES \
+             ('ch1','p0',0), ('ch1','p2',1), ('ch1','p1',2), \
+             ('ch2','a',0), ('ch2','z',1), ('deep','d',0)",
+        ] {
+            sqlx::query(stmt).execute(&pool).await.unwrap();
+        }
+        pool
+    }
+
+    fn child(id: &str, items: i64, subfolders: i64, cover: Option<&str>) -> FolderChild {
+        FolderChild {
+            folder_id: id.into(),
+            item_count: items,
+            subfolder_count: subfolders,
+            cover_id: cover.map(Into::into),
+        }
+    }
+
+    #[tokio::test]
+    async fn lists_direct_children_in_sibling_order() {
+        let pool = db().await;
+        let ids: Vec<_> = folder_children(&pool, "saga")
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|c| c.folder_id)
+            .collect();
+        assert_eq!(ids, ["ch1", "ch2", "empty"]);
+    }
+
+    /// Counts exclude the trash; the cover is the first LIVE asset in the
+    /// child's own order \u2014 manual for ch1, filename-descending for ch2.
+    #[tokio::test]
+    async fn counts_and_covers_follow_each_childs_view() {
+        let pool = db().await;
+        assert_eq!(
+            folder_children(&pool, "saga").await.unwrap(),
+            vec![
+                child("ch1", 2, 1, Some("p2")),
+                child("ch2", 2, 0, Some("z")),
+                child("empty", 0, 0, None),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_leaf_folder_has_no_children() {
+        let pool = db().await;
+        assert!(folder_children(&pool, "deep").await.unwrap().is_empty());
     }
 }

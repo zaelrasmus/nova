@@ -1172,6 +1172,20 @@ pub async fn folder_stats(
         .map_err(AppError::from)
 }
 
+/// A folder's direct children as tiles: counts plus a cover asset id.
+#[instrument(skip_all)]
+#[tauri::command]
+pub async fn folder_children(
+    parent_id: String,
+    state: tauri::State<'_, DbState>,
+) -> Result<Vec<assets::FolderChild>, AppError> {
+    let pool = state.acquire_pool().await?;
+    assets::folder_children(&pool, &parent_id)
+        .await
+        .inspect_err(|e| tracing::error!(error = %e, "folder_children failed"))
+        .map_err(AppError::from)
+}
+
 /// Drop-between-rows: place a folder under `newParentId`, after `afterId`.
 /// `afterId: null` means first among its new siblings.
 #[instrument(skip_all)]

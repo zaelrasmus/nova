@@ -681,6 +681,16 @@ export interface PinnedItem {
   position: number;
 }
 
+/** One direct child of a folder, shown as a tile in that folder's view. */
+export interface FolderChild {
+  folder_id: string;
+  /** Direct, non-trashed members — what opening the folder shows. */
+  item_count: number;
+  subfolder_count: number;
+  /** First asset in the child's own sort; null when it holds none. */
+  cover_id: string | null;
+}
+
 export interface Folder {
   id: string;
   name: string;
@@ -1637,6 +1647,11 @@ class AssetLibrary {
    */
   fetchFolderStats(folderId: string): Promise<FolderStats> {
     return invoke<FolderStats>("folder_stats", { folderId });
+  }
+
+  /** A folder's direct children as tiles — counts and a cover id each. */
+  fetchFolderChildren(parentId: string): Promise<FolderChild[]> {
+    return invoke<FolderChild[]>("folder_children", { parentId });
   }
 
   /**
