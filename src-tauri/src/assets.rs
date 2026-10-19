@@ -512,6 +512,34 @@ pub enum OrderBy {
 }
 
 impl OrderBy {
+    /// Every variant. A merged subtree emits one ORDER BY term per variant, so a
+    /// variant missing here would leave folders using it unordered inside the
+    /// merge — `all_lists_every_variant` pins it against `db_name`.
+    pub(crate) const ALL: [OrderBy; 8] = [
+        OrderBy::ImportedDate,
+        OrderBy::CreationDate,
+        OrderBy::ModifiedDate,
+        OrderBy::Filename,
+        OrderBy::FileSize,
+        OrderBy::Resolution,
+        OrderBy::Manual,
+        OrderBy::AddedDate,
+    ];
+
+    /// The stored TEXT value, as written by `#[sqlx(rename_all = "snake_case")]`.
+    pub(crate) fn db_name(self) -> &'static str {
+        match self {
+            OrderBy::ImportedDate => "imported_date",
+            OrderBy::CreationDate => "creation_date",
+            OrderBy::ModifiedDate => "modified_date",
+            OrderBy::Filename => "filename",
+            OrderBy::FileSize => "file_size",
+            OrderBy::Resolution => "resolution",
+            OrderBy::Manual => "manual",
+            OrderBy::AddedDate => "added_date",
+        }
+    }
+
     /// The SQL expression to ORDER BY. Every arm is a compile-time constant, so
     /// nothing user-supplied is ever interpolated into the statement — the only
     /// bound value in a manifest query is the folder id.
@@ -655,6 +683,9 @@ pub struct Folder {
     /// Rank among pinned folders. `None` = not pinned.
     #[sqlx(default)]
     pub pin_position: Option<f64>,
+    /// Show the whole subtree as one list in this folder's view.
+    #[sqlx(default)]
+    pub include_subfolders: bool,
 }
 
 /// The pin accent palette — token names, resolved to colours by the frontend.
@@ -797,13 +828,26 @@ fn build_manifest_query<'a>(
     scope_rules: Option<&'a crate::rules::RuleNode>,
     filters: &'a FilterSet,
     sort: Sort,
+    subtree: bool,
 ) -> QueryBuilder<'a, Sqlite> {
     let in_folder = matches!(scope, Scope::Folder { .. });
 
     let mut qb = QueryBuilder::new(
         "SELECT a.id, a.width, a.height, a.asset_type, a.thumb_hash, a.is_animated, a.filename FROM assets a",
     );
-    if in_folder {
+    // A merged subtree replaces the membership table with one row per asset
+    // that carries the same columns (`position`, `added_at`), so every sort
+    // below reads it exactly as it reads a plain folder. Its folder predicate
+    // is bound inside the join, so the scope arm writes none.
+    let merged = match scope {
+        Scope::Folder { id } if subtree => Some(id.as_str()),
+        _ => None,
+    };
+    if let Some(root) = merged {
+        qb.push(" JOIN (");
+        push_subtree_members(&mut qb, root);
+        qb.push(") af ON af.asset_id = a.id");
+    } else if in_folder {
         qb.push(" JOIN assets_folders af ON af.asset_id = a.id");
     }
 
@@ -834,6 +878,7 @@ fn build_manifest_query<'a>(
     // 1. Scope — which rows exist at all.
     match scope {
         Scope::All | Scope::Trash => {}
+        Scope::Folder { .. } if merged.is_some() => {}
         Scope::Folder { id } => {
             conjunct(&mut qb, &mut written);
             qb.push("af.folder_id = ").push_bind(id.as_str());
@@ -1134,6 +1179,104 @@ async fn materialize_smart_order(
     Ok(())
 }
 
+/// Deepest folder nesting a merged view descends. Far beyond any real tree; it
+/// exists so a corrupted parent cycle ends the recursion instead of hanging the
+/// manifest (`move_folder` already rejects cycles — this is the second line).
+const MAX_SUBTREE_DEPTH: i64 = 64;
+
+/// One row per asset in `root`'s subtree — `(asset_id, added_at, position)` —
+/// where `position` is the asset's place in READING order: the root's own
+/// items, then each subfolder in sidebar order (`position, name, id`), depth-first,
+/// each in its own persisted sort. An asset filed in several folders keeps
+/// only its first place.
+///
+/// Depth-first order comes from a path of zero-padded sibling ranks: a parent's
+/// path is a prefix of its children's, so plain text order is pre-order.
+///
+/// Each folder sorts its own way, so the per-folder rank needs every sort in
+/// one window: a pair of CASE terms per (sort, direction), of which exactly
+/// one is non-NULL for any row. The expressions come from `OrderBy::sql_expr`,
+/// so this can't drift from how the folder sorts when opened on its own.
+fn push_subtree_members<'a>(qb: &mut QueryBuilder<'a, Sqlite>, root: &'a str) {
+    qb.push(
+        "WITH RECURSIVE tree(id, path, depth) AS ( \
+             SELECT id, '', 0 FROM folders WHERE id = ",
+    )
+    .push_bind(root)
+    .push(
+        " UNION ALL \
+             SELECT s.id, t.path || '/' || printf('%010d', s.rk), t.depth + 1 \
+             FROM (SELECT id, parent_id, \
+                          ROW_NUMBER() OVER (PARTITION BY parent_id ORDER BY position, name, id) AS rk \
+                   FROM folders) s \
+             JOIN tree t ON s.parent_id = t.id \
+             WHERE t.depth < ",
+    )
+    .push(MAX_SUBTREE_DEPTH)
+    .push(
+        " ), \
+         members AS ( \
+             SELECT af.asset_id, af.added_at, t.path, \
+                    ROW_NUMBER() OVER (PARTITION BY af.folder_id ORDER BY ",
+    );
+    for (i, order_by) in OrderBy::ALL.iter().enumerate() {
+        // `sql_expr` may end in a COLLATE; it must apply to the whole CASE
+        // term, not sit inside a THEN branch where it would be ignored.
+        let (expr, collate) = match order_by.sql_expr(true).split_once(" COLLATE ") {
+            Some((e, c)) => (e, Some(c)),
+            None => (order_by.sql_expr(true), None),
+        };
+        for (asc, dir) in [(1, "ASC"), (0, "DESC")] {
+            if i > 0 || asc == 0 {
+                qb.push(", ");
+            }
+            qb.push(format!(
+                "CASE WHEN f.order_by = '{}' AND f.is_ascending = {asc} THEN {expr} END",
+                order_by.db_name(),
+            ));
+            if let Some(c) = collate {
+                qb.push(format!(" COLLATE {c}"));
+            }
+            // Same tie-break as a plain folder: id, in the folder's direction.
+            qb.push(format!(
+                " {dir}, CASE WHEN f.order_by = '{}' AND f.is_ascending = {asc} THEN a.id END {dir}",
+                order_by.db_name(),
+            ));
+        }
+    }
+    qb.push(
+        ") AS inner_rank \
+             FROM assets_folders af \
+             JOIN tree t ON t.id = af.folder_id \
+             JOIN folders f ON f.id = af.folder_id \
+             JOIN assets a ON a.id = af.asset_id \
+         ), \
+         firsts AS ( \
+             SELECT asset_id, added_at, path, inner_rank, \
+                    ROW_NUMBER() OVER (PARTITION BY asset_id ORDER BY path, inner_rank) AS nth \
+             FROM members \
+         ) \
+         SELECT asset_id, added_at, \
+                ROW_NUMBER() OVER (ORDER BY path, inner_rank) AS position \
+         FROM firsts WHERE nth = 1",
+    );
+}
+
+/// Whether `scope` is a folder showing its whole subtree. Only a folder can be;
+/// a missing folder reads as off, the same as an unseeded sort.
+pub(crate) async fn resolve_include_subfolders(pool: &SqlitePool, scope: &Scope) -> Result<bool> {
+    let Scope::Folder { id } = scope else {
+        return Ok(false);
+    };
+    let on: Option<bool> =
+        sqlx::query_scalar("SELECT include_subfolders FROM folders WHERE id = ?")
+            .bind(id.as_str())
+            .fetch_optional(pool)
+            .await
+            .context("Failed to read include_subfolders")?;
+    Ok(on.unwrap_or(false))
+}
+
 /// Load the rule tree that DEFINES a smart folder scope, if the scope is one.
 ///
 /// A scope that names a smart folder which no longer exists resolves to `None`
@@ -1232,6 +1375,7 @@ where
         None => resolve_sort(pool, &query.scope).await?,
     };
     let scope_rules = resolve_scope_rules(pool, &query.scope).await?;
+    let subtree = resolve_include_subfolders(pool, &query.scope).await?;
 
     // Prune stale ranks where they'd be seen: opening a smart folder in manual
     // order is the only moment a rank for a no-longer-matching asset can affect
@@ -1246,7 +1390,8 @@ where
     // `qb` borrows `scope_rules`, and the cursor borrows `qb` — so both have to
     // outlive the loop. Declaring them in this order does that: locals drop in
     // reverse, so the cursor goes first and the tree it depends on goes last.
-    let mut qb = build_manifest_query(&query.scope, scope_rules.as_ref(), &query.filters, sort);
+    let mut qb =
+        build_manifest_query(&query.scope, scope_rules.as_ref(), &query.filters, sort, subtree);
     let mut cursor = qb.build_query_as::<AssetLightRow>().fetch(pool);
 
     let mut buf: Vec<AssetLightRow> = Vec::with_capacity(chunk_size);
@@ -1395,6 +1540,11 @@ pub async fn reorder_assets(
 ) -> Result<()> {
     if moved_ids.is_empty() {
         return Ok(());
+    }
+    // A merged subtree interleaves several folders' own orders; there is no one
+    // list a drag could rewrite. Reorder inside each subfolder instead.
+    if resolve_include_subfolders(pool, scope).await? {
+        reject!("Turn off \"Include subfolders\" to reorder this folder");
     }
 
     let mut tx = pool
@@ -1649,9 +1799,9 @@ async fn write_manual_positions(
 pub async fn fetch_folders(pool: &SqlitePool) -> Result<Vec<Folder>> {
     let folders = sqlx::query_as::<_, Folder>(
         "SELECT id, name, parent_id, position, order_by, is_ascending, notes, created_at,
-                color, pin_position
+                color, pin_position, include_subfolders
          FROM folders
-         ORDER BY parent_id, position, name",
+         ORDER BY parent_id, position, name, id",
     )
     .fetch_all(pool)
     .await
@@ -2123,6 +2273,8 @@ pub struct FolderPatch {
     pub notes: Option<String>,
     /// Pin accent. `Some("")` clears it, like every other free-text field here.
     pub color: Option<String>,
+    /// Show the whole subtree as one list in this folder's view.
+    pub include_subfolders: Option<bool>,
 }
 
 /// Trim, and treat an empty result as NULL. Used for every free-text field, so a
@@ -2262,6 +2414,7 @@ pub async fn create_folder(
         // explicit act by the user, never a side effect of creating something.
         color: None,
         pin_position: None,
+        include_subfolders: false,
     })
 }
 
@@ -2508,7 +2661,9 @@ pub async fn update_folder(pool: &SqlitePool, id: &str, patch: FolderPatch) -> R
         None => None,
     };
 
-    if name.is_none() && notes.is_none() && color.is_none() {
+    let include_subfolders = patch.include_subfolders;
+
+    if name.is_none() && notes.is_none() && color.is_none() && include_subfolders.is_none() {
         return Ok(());
     }
 
@@ -2525,6 +2680,10 @@ pub async fn update_folder(pool: &SqlitePool, id: &str, patch: FolderPatch) -> R
         }
         if let Some(v) = &color {
             sep.push("color = ");
+            sep.push_bind_unseparated(v);
+        }
+        if let Some(v) = include_subfolders {
+            sep.push("include_subfolders = ");
             sep.push_bind_unseparated(v);
         }
     }
@@ -5202,6 +5361,7 @@ mod manifest_tests {
             None,
             &query.filters,
             query.sort.unwrap_or(DEFAULT_SORT),
+            false,
         );
         qb.build_query_as::<AssetLightRow>()
             .fetch_all(pool)
@@ -5370,7 +5530,7 @@ mod smart_order_tests {
         let rules = rules();
         let sort = Sort { order_by: OrderBy::Manual, is_ascending: true };
         let filters = FilterSet::default();
-        build_manifest_query(&scope, Some(&rules), &filters, sort)
+        build_manifest_query(&scope, Some(&rules), &filters, sort, false)
             .build_query_as::<AssetLightRow>()
             .fetch_all(pool)
             .await
@@ -5483,6 +5643,11 @@ mod manual_order_tests {
              deleted_at TEXT)",
             "CREATE TABLE assets_folders (folder_id TEXT NOT NULL, asset_id TEXT NOT NULL, \
              position REAL NOT NULL, PRIMARY KEY (folder_id, asset_id))",
+            // Reorder reads the folder's include-subfolders flag first; both
+            // folders here are plain, so it must let the reorder through.
+            "CREATE TABLE folders (id TEXT PRIMARY KEY, \
+             include_subfolders INTEGER NOT NULL DEFAULT 0)",
+            "INSERT INTO folders (id) VALUES ('f1'), ('f2')",
             "INSERT INTO assets VALUES ('a1', 0.0, NULL), ('a2', 1.0, NULL), ('a3', 2.0, NULL)",
             // a2 and a3 are in BOTH folders — the overlap is the point.
             "INSERT INTO assets_folders VALUES ('f1','a1',0.0), ('f1','a2',1.0), ('f1','a3',2.0)",
@@ -5621,7 +5786,7 @@ mod group_tests {
     async fn ids_in_group(pool: &SqlitePool, group: &str) -> Vec<String> {
         let scope = Scope::SmartGroup { id: group.into() };
         let rules = resolve_scope_rules(pool, &scope).await.unwrap();
-        build_manifest_query(&scope, rules.as_ref(), &FilterSet::default(), DEFAULT_SORT)
+        build_manifest_query(&scope, rules.as_ref(), &FilterSet::default(), DEFAULT_SORT, false)
             .build_query_as::<AssetLightRow>()
             .fetch_all(pool)
             .await
@@ -6505,5 +6670,199 @@ mod import_append_tests {
         let pool = db().await;
         insert(&pool, &[link("ch1", "p2", 0.0), link("ch1", "p4", 1.0)]).await;
         assert_eq!(order(&pool, "ch1").await, ["p1", "p2", "p3", "p4"]);
+    }
+}
+
+/// Include subfolders: a folder flagged on shows its whole subtree as one list.
+/// Under Manual sort that list is READING order — the folder's own items, then
+/// each subfolder in sidebar order, depth-first, each in its own sort — and an
+/// asset filed in two places appears once, at the first.
+#[cfg(test)]
+mod include_subfolders_tests {
+    use super::*;
+
+    async fn db() -> SqlitePool {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::migrate!().run(&pool).await.unwrap();
+        // saga (own: s1)
+        //  ├─ ch1  pos 0, manual        p2, p1
+        //  │   └─ ch1a pos 0, manual    q1
+        //  └─ ch2  pos 1, name DESC     a, p1 (also in ch1), z, t (trashed)
+        // `ch2` is inserted BEFORE `ch1` so sibling order must come from
+        // `position`, not insertion order.
+        for stmt in [
+            "INSERT INTO folders (id, name, parent_id, position) VALUES \
+             ('saga','Saga',NULL,0), ('ch2','Ch 02','saga',1), ('ch1','Ch 01','saga',0), \
+             ('ch1a','Ch 01a','ch1',0)",
+            "UPDATE folders SET order_by = 'filename', is_ascending = 0 WHERE id = 'ch2'",
+            "UPDATE folders SET include_subfolders = 1 WHERE id = 'saga'",
+        ] {
+            sqlx::query(stmt).execute(&pool).await.unwrap();
+        }
+        for (id, name, deleted) in [
+            ("s1", "s1.png", None),
+            ("p1", "p1.png", None),
+            ("p2", "p2.png", None),
+            ("q1", "q1.png", None),
+            ("a", "a.png", None),
+            ("z", "z.png", None),
+            ("t", "t.png", Some("2026-01-01T00:00:00.000Z")),
+        ] {
+            sqlx::query(
+                "INSERT INTO assets (id, asset_type, filename, extension, path, width, height, \
+                 file_size, imported_date, creation_date, modified_date, deleted_at) \
+                 VALUES (?, 'image', ?, 'png', 'assets/x.png', 1, 1, 1, 'x', 'x', 'x', ?)",
+            )
+            .bind(id)
+            .bind(name)
+            .bind(deleted)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        sqlx::query(
+            "INSERT INTO assets_folders (folder_id, asset_id, position) VALUES \
+             ('saga','s1',0), ('ch1','p2',0), ('ch1','p1',1), ('ch1a','q1',0), \
+             ('ch2','a',0), ('ch2','p1',1), ('ch2','z',2), ('ch2','t',3)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        pool
+    }
+
+    /// The manifest exactly as the frontend asks for it.
+    async fn manifest(pool: &SqlitePool, folder: &str, sort: &str, asc: bool) -> Vec<String> {
+        let query: ManifestQuery = serde_json::from_value(serde_json::json!({
+            "scope": { "kind": "folder", "id": folder },
+            "sort": { "order_by": sort, "is_ascending": asc },
+        }))
+        .unwrap();
+        let mut ids = Vec::new();
+        stream_manifest(pool, &query, 100, |rows| {
+            ids.extend(rows.into_iter().map(|r| r.id));
+            Ok(true)
+        })
+        .await
+        .unwrap();
+        ids
+    }
+
+    #[tokio::test]
+    async fn manual_order_reads_the_tree_depth_first() {
+        let pool = db().await;
+        assert_eq!(
+            manifest(&pool, "saga", "manual", true).await,
+            ["s1", "p2", "p1", "q1", "z", "a"]
+        );
+    }
+
+    #[tokio::test]
+    async fn another_sort_applies_to_the_whole_list() {
+        let pool = db().await;
+        assert_eq!(
+            manifest(&pool, "saga", "filename", true).await,
+            ["a", "p1", "p2", "q1", "s1", "z"]
+        );
+    }
+
+    /// The flag is per folder: ch1 is off, so it shows only its own items even
+    /// though it has a subfolder.
+    #[tokio::test]
+    async fn a_folder_with_the_flag_off_shows_only_its_own_items() {
+        let pool = db().await;
+        assert_eq!(manifest(&pool, "ch1", "manual", true).await, ["p2", "p1"]);
+    }
+
+    /// A merged list has no single order to drag within; refusing leaves every
+    /// stored position exactly as it was.
+    #[tokio::test]
+    async fn reordering_a_merged_view_is_refused() {
+        let pool = db().await;
+        let before: Vec<(String, String, f64)> =
+            sqlx::query_as("SELECT folder_id, asset_id, position FROM assets_folders ORDER BY 1, 2")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        let scope = Scope::Folder { id: "saga".into() };
+        assert!(reorder_assets(&pool, &scope, &["z".into()], None).await.is_err());
+        let after: Vec<(String, String, f64)> =
+            sqlx::query_as("SELECT folder_id, asset_id, position FROM assets_folders ORDER BY 1, 2")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(before, after);
+    }
+
+    /// Reordering a folder with the flag off still works as before.
+    #[tokio::test]
+    async fn reordering_a_plain_folder_still_works() {
+        let pool = db().await;
+        let scope = Scope::Folder { id: "ch1".into() };
+        reorder_assets(&pool, &scope, &["p1".into()], None).await.unwrap();
+        assert_eq!(manifest(&pool, "ch1", "manual", true).await, ["p1", "p2"]);
+    }
+
+    /// `ALL` and `db_name` must match the stored TEXT, which is the same
+    /// snake_case serde writes; a new variant fails here until both list it.
+    #[test]
+    fn all_lists_every_variant() {
+        let names: Vec<String> = OrderBy::ALL
+            .iter()
+            .map(|o| serde_json::to_value(o).unwrap().as_str().unwrap().to_string())
+            .collect();
+        let db: Vec<&str> = OrderBy::ALL.iter().map(|o| o.db_name()).collect();
+        assert_eq!(names, db);
+        let unique: HashSet<_> = db.iter().collect();
+        assert_eq!(unique.len(), OrderBy::ALL.len());
+    }
+
+    #[tokio::test]
+    async fn the_flag_round_trips_through_update_and_fetch() {
+        let pool = db().await;
+        let flag = |folders: &[Folder], id: &str| {
+            folders.iter().find(|f| f.id == id).unwrap().include_subfolders
+        };
+        assert!(!flag(&fetch_folders(&pool).await.unwrap(), "ch1"));
+        let patch = FolderPatch {
+            include_subfolders: Some(true),
+            ..Default::default()
+        };
+        update_folder(&pool, "ch1", patch).await.unwrap();
+        let folders = fetch_folders(&pool).await.unwrap();
+        assert!(flag(&folders, "ch1"));
+        // Only the flag changed.
+        let ch1 = folders.iter().find(|f| f.id == "ch1").unwrap();
+        assert_eq!((ch1.name.as_str(), ch1.order_by), ("Ch 01", OrderBy::Manual));
+    }
+
+    /// An existing library gains the column with every folder OFF, and keeps
+    /// everything else about its folders.
+    #[tokio::test]
+    async fn an_existing_library_survives_the_migration() {
+        const V1: &str = include_str!("../migrations/20240101000000_create_images_table.sql");
+        const V2: &str = include_str!("../migrations/20260815000000_online_assets.sql");
+        const V3: &str = include_str!("../migrations/20261019000000_include_subfolders.sql");
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::raw_sql(V1).execute(&pool).await.unwrap();
+        sqlx::raw_sql(V2).execute(&pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO folders (id, name, parent_id, position, order_by, is_ascending) \
+             VALUES ('f','Comics',NULL,3,'filename',0)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::raw_sql(V3)
+            .execute(&pool)
+            .await
+            .expect("must apply to a populated folders table");
+        let row: (String, f64, String, bool, bool) = sqlx::query_as(
+            "SELECT name, position, order_by, is_ascending, include_subfolders FROM folders",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(row, ("Comics".into(), 3.0, "filename".into(), false, false));
     }
 }

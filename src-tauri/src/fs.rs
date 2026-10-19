@@ -140,6 +140,7 @@ pub fn scan_directories(
                 // must not fill the sidebar's curated list.
                 color: None,
                 pin_position: None,
+                include_subfolders: false,
             });
             *position += 1.0;
 

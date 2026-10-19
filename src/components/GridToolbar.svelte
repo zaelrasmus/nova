@@ -103,6 +103,29 @@
 
     <SortControl />
 
+    <!-- Per folder, like its sort: a series folder can read as one list of
+         chapters while every other folder keeps showing only its own items. -->
+    {#if assetLibrary.scope.kind === "folder"}
+        {@const folderId = assetLibrary.scope.id}
+        <button
+            type="button"
+            onclick={() =>
+                assetLibrary
+                    .setIncludeSubfolders(folderId, !assetLibrary.includesSubfolders)
+                    .catch((e) =>
+                        toast.error(typeof e === "string" ? e : "Failed to update the folder."),
+                    )}
+            title="Include subfolders — show this folder's whole tree as one list"
+            aria-pressed={assetLibrary.includesSubfolders}
+            class="rounded px-2 py-0.5 text-xs font-medium transition-colors
+                   {assetLibrary.includesSubfolders
+                ? 'bg-blue-600 text-white'
+                : 'bg-neutral-800 text-neutral-400 hover:bg-neutral-700'}"
+        >
+            Subfolders
+        </button>
+    {/if}
+
     <!-- View switcher. Waterfall is disabled while sorting manually, because
          reading order is required for exact reorder; the title says why rather
          than the button just being dead. -->

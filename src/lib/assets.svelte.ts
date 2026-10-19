@@ -130,6 +130,8 @@ export interface FolderPatch {
   notes?: string;
   /** Pin accent token. `""` clears it, like every other free-text field here. */
   color?: string;
+  /** Show the whole subtree as one list in this folder's view. */
+  include_subfolders?: boolean;
 }
 
 /** "photo.jpg" -> "photo". The extension is shown separately and isn't editable. */
@@ -705,6 +707,8 @@ export interface Folder {
   color: PinColor | null;
   /** Rank among pinned folders. `null` = not pinned. */
   pin_position: number | null;
+  /** Show the whole subtree as one list in this folder's view. */
+  include_subfolders: boolean;
 }
 
 /** Exact totals for a set of assets, computed by the DB rather than estimated. */
@@ -1671,6 +1675,41 @@ class AssetLibrary {
   }
 
   /**
+   * True when the open folder shows its whole subtree as one list. Such a view
+   * merges several folders' orders, so it has no single order to drag within
+   * and its subfolders are already on screen as assets, not tiles.
+   */
+  get includesSubfolders(): boolean {
+    const scope = this.scope;
+    if (scope.kind !== "folder") return false;
+    return this.folders.find((f) => f.id === scope.id)?.include_subfolders ?? false;
+  }
+
+  /**
+   * Whether a change to folder `id`'s members shows on screen: it's the open
+   * folder, or one inside the subtree a merged view lists.
+   */
+  #showsFolder(id: string): boolean {
+    const scope = this.scope;
+    if (scope.kind !== "folder") return false;
+    if (scope.id === id) return true;
+    if (!this.includesSubfolders) return false;
+    const parentOf = new Map(this.folders.map((f) => [f.id, f.parent_id]));
+    const seen = new Set<string>();
+    for (let at = parentOf.get(id) ?? null; at !== null && !seen.has(at); at = parentOf.get(at) ?? null) {
+      if (at === scope.id) return true;
+      seen.add(at);
+    }
+    return false;
+  }
+
+  /** Turn a folder's merged view on or off, and show the result if it's open. */
+  async setIncludeSubfolders(id: string, on: boolean): Promise<void> {
+    await this.updateFolder(id, { include_subfolders: on });
+    if (this.scope.kind === "folder" && this.scope.id === id) await this.reload();
+  }
+
+  /**
    * Apply a partial asset update, then refresh the cached row from what the DB
    * actually stored — without this, scrolling away and back would show the old
    * name, since the grid renders from `heavy`, not from the inspector.
@@ -1700,12 +1739,17 @@ class AssetLibrary {
     const active = this.scope;
     if (active.kind === "folder" && !this.folders.some((f) => f.id === active.id)) {
       await this.setScope({ kind: "all" });
+    } else if (this.includesSubfolders) {
+      // A deleted subfolder took its memberships with it.
+      await this.reload();
     }
   }
 
   async moveFolder(id: string, newParentId: string | null): Promise<void> {
     await invoke("move_folder", { id, newParentId });
     await this.loadFolders();
+    // Into or out of a merged subtree changes what it lists, and where.
+    if (this.includesSubfolders) await this.reload();
   }
 
   /**
@@ -1714,7 +1758,9 @@ class AssetLibrary {
    * drag & drop; `moveFolder` appends instead.
    *
    * The scope deliberately doesn't change: moving a folder rearranges the tree,
-   * not what's on screen. Its assets are unaffected, so the manifest is too.
+   * not what's on screen. Its assets are unaffected, so a plain folder's
+   * manifest is too — but a merged view lists the tree in sidebar order, so it
+   * reloads.
    */
   async reorderFolder(
     id: string,
@@ -1723,6 +1769,7 @@ class AssetLibrary {
   ): Promise<void> {
     await invoke("reorder_folder", { id, newParentId, afterId });
     await this.loadFolders();
+    if (this.includesSubfolders) await this.reload();
   }
 
   // ── Pinned folders ──────────────────────────────────────────────────────
@@ -2045,8 +2092,7 @@ class AssetLibrary {
     // the inspector shows. Cheap enough to do unconditionally: the summary
     // doesn't say whether any fired, and a drag is not a hot path.
     await this.loadTags();
-    const active = this.scope;
-    if (active.kind === "uncategorized" || (active.kind === "folder" && active.id === folderId)) {
+    if (this.scope.kind === "uncategorized" || this.#showsFolder(folderId)) {
       await this.reload();
     }
   }
@@ -2083,10 +2129,10 @@ class AssetLibrary {
     );
     this.membershipVersion++;
     await this.loadTags(); // the target may seed auto-tags
-    const active = this.scope;
     if (
-      active.kind === "uncategorized" ||
-      (active.kind === "folder" && (active.id === targetFolderId || active.id === sourceFolderId))
+      this.scope.kind === "uncategorized" ||
+      this.#showsFolder(targetFolderId) ||
+      (sourceFolderId !== null && this.#showsFolder(sourceFolderId))
     ) {
       await this.reload();
     }
@@ -2098,10 +2144,9 @@ class AssetLibrary {
       [{ op: { type: "remove_from_folder", folder_id: folderId } }],
       assetIds,
     );
-    const active = this.scope;
     // "uncategorized" too: dropping an asset's last membership is exactly what
     // makes it appear there.
-    if (active.kind === "uncategorized" || (active.kind === "folder" && active.id === folderId)) {
+    if (this.scope.kind === "uncategorized" || this.#showsFolder(folderId)) {
       await this.reload();
     }
   }

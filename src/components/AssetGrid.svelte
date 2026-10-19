@@ -229,6 +229,13 @@
     // Direct subfolders of the current folder, reported by <FolderTiles>.
     let childFolderCount = $state(0);
 
+    // A merged subtree ("Include subfolders") already lists the subfolders'
+    // assets, so their tiles would show everything twice; and it interleaves
+    // several folders' own orders, so there's no one order to drag within.
+    const merged = $derived(assetLibrary.includesSubfolders);
+    const tilesShown = $derived(!merged && childFolderCount > 0);
+    const canReorder = $derived(manualSort && !merged);
+
     // Ordinal badges ("page 12") show only when a PERSON chose the order, and
     // only over the whole scope: under a filter or search the index of what's
     // left is not that item's place, so a number would mislead. Derived from
@@ -523,16 +530,16 @@
 
     /** Live insertion bar while dragging assets over the grid in manual mode. */
     const reorderBar = $derived.by(() => {
-        if (drag.payload?.kind !== "assets" || !manualSort) return null;
+        if (drag.payload?.kind !== "assets" || !canReorder) return null;
         // Over a folder row we're filing, not reordering — no bar.
         if (drag.target?.kind === "folder") return null;
         if (!withinGrid(drag.x, drag.y)) return null;
         return insertionAt(drag.x, drag.y).bar; // reactive via drag.x / drag.y
     });
 
-    /** Blocked reorder: dragging assets over the grid while NOT in manual sort. */
+    /** Blocked reorder: dragging assets over the grid where no order can be written. */
     const reorderBlocked = $derived(
-        drag.payload?.kind === "assets" && drag.target?.kind === "library" && !manualSort,
+        drag.payload?.kind === "assets" && drag.target?.kind === "library" && !canReorder,
     );
 
     async function reorderTo(index: number, movedIds: string[]) {
@@ -610,16 +617,22 @@
         // in the empty space past the last card no longer falls through.
         const onGrid = target?.kind === "library" || (target === null && withinGrid(ctx.x, ctx.y));
         if (onGrid) {
-            if (manualSort) await reorderTo(insertionAt(ctx.x, ctx.y).index, ids);
+            if (canReorder) await reorderTo(insertionAt(ctx.x, ctx.y).index, ids);
             return;
         }
         if (target?.kind !== "folder") return;
 
         // Move only means something when the drag STARTED somewhere: in "All" or
         // "Uncategorized" there is no source membership to remove, so Shift
-        // quietly degrades to an add.
-        const source = assetLibrary.scope.kind === "folder" ? assetLibrary.scope.id : null;
-        if (source === target.id) return; // dropped on the folder we're already in
+        // quietly degrades to an add. A merged view is the same: its assets
+        // live in its subfolders, not in the open folder, and one may sit in
+        // several — there is no single place to move it FROM.
+        const source =
+            assetLibrary.scope.kind === "folder" && !merged ? assetLibrary.scope.id : null;
+        // Dropped on the folder we're already in. Checked against the scope, not
+        // `source`, so a merged view (source null) doesn't file its subfolders'
+        // assets into the open folder itself and jump them to the front.
+        if (assetLibrary.scope.kind === "folder" && assetLibrary.scope.id === target.id) return;
 
         try {
             if (ctx.move) {
@@ -673,13 +686,15 @@
 
     <!-- A folder's subfolders, above its own assets. Takes the whole pane when
          the folder holds nothing but folders (a series of chapters). -->
-    <FolderTiles
-        bind:count={childFolderCount}
-        fill={assets.length === 0}
-        columns={numColumns}
-        gap={GAP}
-    />
-    {#if childFolderCount > 0 && assets.length > 0}
+    {#if !merged}
+        <FolderTiles
+            bind:count={childFolderCount}
+            fill={assets.length === 0}
+            columns={numColumns}
+            gap={GAP}
+        />
+    {/if}
+    {#if tilesShown && assets.length > 0}
         <h2 class="shrink-0 px-3 pb-1 pt-2 text-xs font-medium text-neutral-500">
             Assets · {assets.length}
         </h2>
@@ -707,7 +722,7 @@
                     ✕ Clear
                 </button>
             </div>
-        {:else if assets.length === 0 && childFolderCount > 0}
+        {:else if assets.length === 0 && tilesShown}
             <!-- Only folders here: the tiles above are the content. -->
         {:else if assets.length === 0}
             <div class="flex items-center justify-center h-32 text-sm text-neutral-500">No assets in this library yet.</div>
@@ -870,14 +885,20 @@
                 class="pointer-events-auto flex items-center gap-2 rounded-full bg-neutral-900/95 px-3
                        py-1.5 text-xs text-neutral-200 shadow-lg ring-1 ring-neutral-700"
             >
-                <span>Sorted by {assetLibrary.sort.order_by.replace("_", " ")} — reordering needs Manual sort.</span>
-                <button
-                    type="button"
-                    onclick={() => assetLibrary.setSort({ order_by: "manual", is_ascending: true })}
-                    class="rounded-full bg-blue-600 px-2 py-0.5 font-medium text-white hover:bg-blue-500"
-                >
-                    Switch
-                </button>
+                {#if merged}
+                    <!-- No switch offered: turning the merge off mid-drag would
+                         swap the whole list under the cursor. -->
+                    <span>Showing subfolders — reorder inside each subfolder instead.</span>
+                {:else}
+                    <span>Sorted by {assetLibrary.sort.order_by.replace("_", " ")} — reordering needs Manual sort.</span>
+                    <button
+                        type="button"
+                        onclick={() => assetLibrary.setSort({ order_by: "manual", is_ascending: true })}
+                        class="rounded-full bg-blue-600 px-2 py-0.5 font-medium text-white hover:bg-blue-500"
+                    >
+                        Switch
+                    </button>
+                {/if}
             </div>
         </div>
     {/if}

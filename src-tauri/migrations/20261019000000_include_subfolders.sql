@@ -1,0 +1,11 @@
+-- Include subfolders: a folder can show its whole subtree as one list.
+--
+-- SAME RULE AS EVERY MIGRATION: once this has shipped, it is FROZEN. `sqlx`
+-- checksums every byte, comments included, so editing this later makes every
+-- library that already ran it refuse to open. Changes go in a NEW file.
+--
+-- Per folder, like `order_by` and `is_ascending`: a series folder reads as one
+-- list of chapters while every other folder keeps showing only its own items.
+-- 0 = off. Defaulted, so every existing folder is correct as written and no
+-- backfill is needed.
+ALTER TABLE folders ADD COLUMN include_subfolders INTEGER NOT NULL DEFAULT 0;
