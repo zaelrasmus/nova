@@ -21,6 +21,10 @@ const store = new LazyStore("settings.json");
 // commented out, and every component hardcodes its own neutral-* colours. A real
 // light theme is a design pass, not a preference, so the fields went with the
 // section. Anything left in an existing settings.json is simply ignored.
+/** Viewer backdrops, in the order `B` cycles through them. */
+export const VIEWER_BACKGROUNDS = ["gray", "checker", "black", "white"] as const;
+export type ViewerBackground = (typeof VIEWER_BACKGROUNDS)[number];
+
 export interface AppPreferences {
   navItemVisibility: Record<string, boolean>;
   thumbnailQuality: "auto" | "lossy" | "lossless";
@@ -40,6 +44,8 @@ export interface AppPreferences {
   animateGifsInGrid: boolean;
   /** Number each card by its place in a Manual sort ("page 12"). */
   showOrdinals: boolean;
+  /** Backdrop the viewer opens with. `B` cycles it for one viewing only. */
+  viewerBackground: ViewerBackground;
 
   // ── Media playback ──────────────────────────────────────────────────────
   // Set from the viewer's player rather than a settings screen: a volume the
@@ -84,6 +90,7 @@ const DEFAULT_PREFERENCES: AppPreferences = {
   gridView: "waterfall",
   animateGifsInGrid: false,
   showOrdinals: true,
+  viewerBackground: "gray",
   mediaVolume: 1,
   mediaMuted: false,
   sidebarWidth: 240,

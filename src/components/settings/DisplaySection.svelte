@@ -7,7 +7,7 @@
   the exclusive side of the backend's `thumb_gen` lock.
 -->
 <script lang="ts">
-    import { settings } from "../../routes/settings.svelte";
+    import { settings, VIEWER_BACKGROUNDS } from "../../routes/settings.svelte";
     import { assetLibrary } from "$lib/assets.svelte";
     import { Label } from "$components/ui/label";
     import { toast } from "svelte-sonner";
@@ -93,6 +93,32 @@
                        {settings.preferences.showOrdinals ? 'translate-x-6' : 'translate-x-1'}"
             ></span>
         </button>
+    </div>
+
+    <!-- Viewer background -->
+    <div class="flex flex-col gap-2">
+        <div class="flex flex-col gap-0.5">
+            <Label class="text-sm text-neutral-200">Viewer background</Label>
+            <p class="text-xs text-neutral-500">
+                The backdrop the viewer opens with. Press B in the viewer to try another
+                for that viewing only.
+            </p>
+        </div>
+        <div class="inline-flex w-fit rounded-md border border-neutral-700 p-0.5">
+            {#each VIEWER_BACKGROUNDS as b}
+                <button
+                    type="button"
+                    aria-pressed={settings.preferences.viewerBackground === b}
+                    onclick={() => settings.set("viewerBackground", b)}
+                    class="rounded px-3 py-1 text-xs font-medium capitalize transition-colors
+                        {settings.preferences.viewerBackground === b
+                        ? 'bg-blue-600 text-white'
+                        : 'text-neutral-400 hover:text-neutral-200'}"
+                >
+                    {b}
+                </button>
+            {/each}
+        </div>
     </div>
 
     <!-- Thumbnail quality -->

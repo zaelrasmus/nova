@@ -24,6 +24,11 @@
     import { PanZoom } from "$lib/panzoom.svelte";
     import { isRemote, remoteAssetUrl, keepRemoteOffline, setMediaDuration } from "$lib/remote";
     import MediaPlayer from "./MediaPlayer.svelte";
+    import {
+        settings,
+        VIEWER_BACKGROUNDS,
+        type ViewerBackground,
+    } from "../routes/settings.svelte";
 
     const current = $derived(viewer.current);
 
@@ -104,13 +109,16 @@
 
     // ── Background modes (B) ─────────────────────────────────────────────────
     // For judging transparent PNG/SVG/WebP against different backdrops.
-    const BG_MODES = ["checker", "black", "white", "gray"] as const;
-    type BgMode = (typeof BG_MODES)[number];
-    let bg = $state<BgMode>("checker");
+    // Every opening starts from the user's default (Settings › Display); `B`
+    // is a temporary override for this viewing, not a new default.
+    let bg = $state<ViewerBackground>(settings.preferences.viewerBackground);
+    $effect(() => {
+        if (viewer.isOpen) bg = untrack(() => settings.preferences.viewerBackground);
+    });
     function cycleBg() {
-        bg = BG_MODES[(BG_MODES.indexOf(bg) + 1) % BG_MODES.length];
+        bg = VIEWER_BACKGROUNDS[(VIEWER_BACKGROUNDS.indexOf(bg) + 1) % VIEWER_BACKGROUNDS.length];
     }
-    const BG_STYLE: Record<BgMode, string> = {
+    const BG_STYLE: Record<ViewerBackground, string> = {
         // A CSS checkerboard — no image asset needed.
         checker:
             "background-color:#808080;background-image:" +
