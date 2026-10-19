@@ -225,6 +225,19 @@
 
     const manualSort = $derived(assetLibrary.sort.order_by === "manual");
 
+    // Ordinal badges ("page 12") show only when a PERSON chose the order, and
+    // only over the whole scope: under a filter or search the index of what's
+    // left is not that item's place, so a number would mislead. Derived from
+    // the visible order on every render, never stored, so a reorder renumbers
+    // live. Descending manual still counts from the first item in manual order.
+    const showOrdinals = $derived(
+        manualSort && !assetLibrary.hasFilters && !assetLibrary.nameFiltering,
+    );
+    function ordinalOf(index: number): number | null {
+        if (!showOrdinals) return null;
+        return assetLibrary.sort.is_ascending ? index + 1 : assets.length - index;
+    }
+
     // The layout actually rendered. Waterfall is the staggered masonry; justified
     // fills full-width rows in reading order. Manual sort FORCES justified,
     // regardless of the saved preference, because only reading order supports
@@ -746,6 +759,7 @@
                                     selected={selection.has(light.id)}
                                     dataId={light.id}
                                     dataIndex={it.index}
+                                    ordinal={ordinalOf(it.index)}
                                     onPointerDown={(e) =>
                                         selection.pointerDownAsset(idsNow(), it.index, mods(e))}
                                     onClick={() => selection.clickAsset(light.id)}
@@ -778,6 +792,7 @@
                                 selected={selection.has(light.id)}
                                 dataId={light.id}
                                 dataIndex={item.index}
+                                ordinal={ordinalOf(item.index)}
                                 onPointerDown={(e) =>
                                     selection.pointerDownAsset(idsNow(), item.index, mods(e))}
                                 onClick={() => selection.clickAsset(light.id)}

@@ -27,6 +27,11 @@
         dataId?: string;
         dataIndex?: number;
         /**
+         * 1-based place in a human-chosen (manual) order, or null for no badge.
+         * Computed by the grid from the visible order — never stored.
+         */
+        ordinal?: number | null;
+        /**
          * Press. Fires BEFORE `onClick` and is where the selection change
          * normally lands, so a drag begins with the right payload.
          */
@@ -47,6 +52,7 @@
         selected = false,
         dataId,
         dataIndex,
+        ordinal = null,
         onPointerDown,
         onClick,
         onOpen,
@@ -207,6 +213,19 @@
 >
     {#if online}
         {@render onlineBadge()}
+    {/if}
+
+    <!-- Place in the manual order ("page 12"). Top-left: top-right is the
+         online badge, bottom-left the media badge. z-10 keeps it above the
+         thumbnail, which renders after it. -->
+    {#if ordinal !== null}
+        <span
+            class="pointer-events-none absolute left-1 top-1 z-10 min-w-5 rounded-full
+                   bg-black/60 px-1.5 text-center text-[11px] font-medium leading-5
+                   tabular-nums text-white/90 ring-1 ring-white/15"
+        >
+            {ordinal}
+        </span>
     {/if}
 
     {#if placeholder || previewSrc}
