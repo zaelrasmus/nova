@@ -537,10 +537,95 @@ impl OrderBy {
 
 /// One asset↔folder membership row, built at import time from each asset's
 /// source parent directory. `position` seeds the manual order within the folder.
+#[derive(Debug)]
 struct FolderLink {
     folder_id: String,
     asset_id: String,
     position: f64,
+}
+
+/// Membership rows for an import: each `(asset_id, source_path)` joins the
+/// folder `folder_for` resolves, or none. Positions count up from 0 per folder
+/// in NATURAL filename order (`page_2` before `page_10`), whatever order the
+/// scan or the dedup split delivered them in — this seeds the manual order a
+/// freshly imported folder opens with.
+fn build_folder_links<'a>(
+    entries: impl Iterator<Item = (&'a str, &'a str)>,
+    folder_for: impl Fn(&str) -> Option<String>,
+) -> Vec<FolderLink> {
+    let file_name = |p: &str| {
+        Path::new(p)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    };
+    let mut entries: Vec<(&str, &str)> = entries.collect();
+    // Full path breaks ties so equal-looking names (`01` vs `1`) still land in
+    // a deterministic order.
+    entries.sort_by(|a, b| {
+        natural_cmp(&file_name(a.1), &file_name(b.1)).then_with(|| a.1.cmp(b.1))
+    });
+
+    let mut counters: HashMap<String, f64> = HashMap::new();
+    entries
+        .into_iter()
+        .filter_map(|(asset_id, source_path)| {
+            let folder_id = folder_for(source_path)?;
+            let position = counters.entry(folder_id.clone()).or_insert(0.0);
+            let link = FolderLink {
+                folder_id,
+                asset_id: asset_id.to_string(),
+                position: *position,
+            };
+            *position += 1.0;
+            Some(link)
+        })
+        .collect()
+}
+
+/// Compare names the way people read them: runs of digits by numeric value
+/// (`2` < `10`, `02` == `2`), everything else case-insensitively. Zero padding
+/// only breaks a tie, shorter first, so the order stays total.
+fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+
+    let (mut a, mut b) = (a.chars().peekable(), b.chars().peekable());
+    let mut padding_tiebreak = Ordering::Equal;
+    loop {
+        match (a.peek().copied(), b.peek().copied()) {
+            (None, None) => return padding_tiebreak,
+            (None, Some(_)) => return Ordering::Less,
+            (Some(_), None) => return Ordering::Greater,
+            (Some(x), Some(y)) if x.is_ascii_digit() && y.is_ascii_digit() => {
+                let take_run = |it: &mut std::iter::Peekable<std::str::Chars>| {
+                    let mut run = String::new();
+                    while let Some(c) = it.next_if(|c| c.is_ascii_digit()) {
+                        run.push(c);
+                    }
+                    run
+                };
+                let (ra, rb) = (take_run(&mut a), take_run(&mut b));
+                let (va, vb) = (ra.trim_start_matches('0'), rb.trim_start_matches('0'));
+                // Without leading zeros a longer run is a bigger number, and
+                // equal lengths compare digit by digit — no overflow at any size.
+                let by_value = va.len().cmp(&vb.len()).then_with(|| va.cmp(vb));
+                if by_value != Ordering::Equal {
+                    return by_value;
+                }
+                if padding_tiebreak == Ordering::Equal {
+                    padding_tiebreak = ra.len().cmp(&rb.len());
+                }
+            }
+            (Some(x), Some(y)) => {
+                let by_char = x.to_lowercase().cmp(y.to_lowercase());
+                if by_char != Ordering::Equal {
+                    return by_char;
+                }
+                a.next();
+                b.next();
+            }
+        }
+    }
 }
 
 /// A real folder in the sidebar tree. Membership is an explicit list
@@ -3914,8 +3999,7 @@ pub async fn import_assets(
     // still says where the user wanted it, so the EXISTING asset picks up that
     // membership. Re-dropping a folder you've already imported therefore
     // organises rather than doing nothing.
-    let links: Vec<FolderLink> = {
-        let mut counters: HashMap<String, f64> = HashMap::new();
+    let links: Vec<FolderLink> = build_folder_links(
         staged_assets
             .iter()
             .map(|a| (a.id.as_str(), a.source_path.as_str()))
@@ -3923,28 +4007,19 @@ pub async fn import_assets(
                 duplicates
                     .iter()
                     .map(|(existing_id, staged)| (existing_id.as_str(), staged.source_path.as_str())),
-            )
-            .filter_map(|(asset_id, source_path)| {
-                // A file whose directory was scanned joins that folder. Anything
-                // else — a loose dropped file, or every file when structure is
-                // off — falls back to the drop target. With no target (the
-                // dialog path) it stays free, preserving the old behaviour where
-                // files directly under the import root are uncategorized.
-                let folder_id = Path::new(source_path)
-                    .parent()
-                    .and_then(|p| folder_id_by_path.get(p).cloned())
-                    .or_else(|| target_folder.clone())?;
-                let position = counters.entry(folder_id.clone()).or_insert(0.0);
-                let link = FolderLink {
-                    folder_id,
-                    asset_id: asset_id.to_string(),
-                    position: *position,
-                };
-                *position += 1.0;
-                Some(link)
-            })
-            .collect()
-    };
+            ),
+        |source_path| {
+            // A file whose directory was scanned joins that folder. Anything
+            // else — a loose dropped file, or every file when structure is
+            // off — falls back to the drop target. With no target (the
+            // dialog path) it stays free, preserving the old behaviour where
+            // files directly under the import root are uncategorized.
+            Path::new(source_path)
+                .parent()
+                .and_then(|p| folder_id_by_path.get(p).cloned())
+                .or_else(|| target_folder.clone())
+        },
+    );
 
     // Stage 5: Persist all metadata atomically. If it fails, remove the originals
     // we just copied so a failed import leaves nothing orphaned on disk (T1.3).
@@ -6077,5 +6152,96 @@ mod migration_upgrade_tests {
                 .await
                 .unwrap();
         assert_eq!(remote, 0);
+    }
+}
+
+/// Import seeds each folder's manual order. Scans name pages `page_1 … page_10`
+/// without zero padding, so the seed has to be natural order, not discovery or
+/// byte order — otherwise a freshly imported chapter reads 1, 10, 2.
+#[cfg(test)]
+mod import_order_tests {
+    use super::*;
+
+    /// Every entry joins the folder named by its parent directory.
+    fn links(entries: &[(&str, &str)]) -> Vec<(String, String, f64)> {
+        build_folder_links(entries.iter().copied(), |source_path| {
+            Path::new(source_path)
+                .parent()
+                .map(|p| p.to_string_lossy().into_owned())
+        })
+        .into_iter()
+        .map(|l| (l.folder_id, l.asset_id, l.position))
+        .collect()
+    }
+
+    fn order_in(links: &[(String, String, f64)], folder: &str) -> Vec<String> {
+        let mut rows: Vec<_> = links.iter().filter(|(f, _, _)| f == folder).collect();
+        rows.sort_by(|a, b| a.2.total_cmp(&b.2));
+        rows.into_iter().map(|(_, id, _)| id.clone()).collect()
+    }
+
+    #[test]
+    fn numbered_pages_get_natural_positions() {
+        let got = links(&[
+            ("p10", "/c/ch1/page_10.jpg"),
+            ("p1", "/c/ch1/page_1.jpg"),
+            ("p2", "/c/ch1/page_2.jpg"),
+        ]);
+        assert_eq!(order_in(&got, "/c/ch1"), ["p1", "p2", "p10"]);
+    }
+
+    #[test]
+    fn text_compares_case_insensitively() {
+        let got = links(&[
+            ("b", "/c/ch1/b.png"),
+            ("A", "/c/ch1/A.png"),
+            ("c", "/c/ch1/C.png"),
+        ]);
+        assert_eq!(order_in(&got, "/c/ch1"), ["A", "b", "c"]);
+    }
+
+    #[test]
+    fn zero_padding_does_not_change_the_value() {
+        let got = links(&[
+            ("p10", "/c/ch1/010.jpg"),
+            ("p9", "/c/ch1/9.jpg"),
+            ("p2", "/c/ch1/02.jpg"),
+        ]);
+        assert_eq!(order_in(&got, "/c/ch1"), ["p2", "p9", "p10"]);
+    }
+
+    /// Duplicates arrive after every fresh file; they still take their natural
+    /// place rather than landing at the end.
+    #[test]
+    fn duplicates_interleave_with_new_files() {
+        let got = links(&[
+            ("p1", "/c/ch1/page_1.jpg"),
+            ("p3", "/c/ch1/page_3.jpg"),
+            ("dup2", "/c/ch1/page_2.jpg"),
+        ]);
+        assert_eq!(order_in(&got, "/c/ch1"), ["p1", "dup2", "p3"]);
+    }
+
+    /// Positions stay per folder: two chapters each start at 0.
+    #[test]
+    fn each_folder_counts_from_zero() {
+        let got = links(&[
+            ("a2", "/c/ch1/2.jpg"),
+            ("b1", "/c/ch2/1.jpg"),
+            ("a1", "/c/ch1/1.jpg"),
+        ]);
+        let pos = |id: &str| got.iter().find(|(_, a, _)| a == id).unwrap().2;
+        assert_eq!((pos("a1"), pos("a2"), pos("b1")), (0.0, 1.0, 0.0));
+    }
+
+    /// An entry with no folder stays free and consumes no position.
+    #[test]
+    fn unfiled_entries_are_skipped() {
+        let got = build_folder_links(
+            [("loose", "/drop/x.jpg"), ("p1", "/c/ch1/1.jpg")].into_iter(),
+            |p| p.starts_with("/c/").then(|| "ch1".to_string()),
+        );
+        assert_eq!(got.len(), 1);
+        assert_eq!((got[0].asset_id.as_str(), got[0].position), ("p1", 0.0));
     }
 }
