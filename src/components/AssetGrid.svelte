@@ -235,7 +235,10 @@
     // the visible order on every render, never stored, so a reorder renumbers
     // live. Descending manual still counts from the first item in manual order.
     const showOrdinals = $derived(
-        manualSort && !assetLibrary.hasFilters && !assetLibrary.nameFiltering,
+        settings.preferences.showOrdinals &&
+            manualSort &&
+            !assetLibrary.hasFilters &&
+            !assetLibrary.nameFiltering,
     );
     function ordinalOf(index: number): number | null {
         if (!showOrdinals) return null;
@@ -670,7 +673,12 @@
 
     <!-- A folder's subfolders, above its own assets. Takes the whole pane when
          the folder holds nothing but folders (a series of chapters). -->
-    <FolderTiles bind:count={childFolderCount} fill={assets.length === 0} />
+    <FolderTiles
+        bind:count={childFolderCount}
+        fill={assets.length === 0}
+        columns={numColumns}
+        gap={GAP}
+    />
     {#if childFolderCount > 0 && assets.length > 0}
         <h2 class="shrink-0 px-3 pb-1 pt-2 text-xs font-medium text-neutral-500">
             Assets · {assets.length}

@@ -26,9 +26,14 @@
         count?: number;
         /** Take the whole pane: the folder has no assets of its own. */
         fill?: boolean;
+        /** Tiles per row — the grid's Size/Columns slider, so folders and
+         *  assets resize together. */
+        columns: number;
+        /** Gap between tiles, px — the grid's, so the two sections line up. */
+        gap: number;
     }
 
-    let { count = $bindable(0), fill = false }: Props = $props();
+    let { count = $bindable(0), fill = false, columns, gap }: Props = $props();
 
     const parentId = $derived(
         assetLibrary.scope.kind === "folder" ? assetLibrary.scope.id : null,
@@ -113,7 +118,10 @@
         <h2 class="mb-2 text-xs font-medium text-neutral-500">
             Folders · {children.length}
         </h2>
-        <div class="grid grid-cols-[repeat(auto-fill,minmax(120px,1fr))] gap-3">
+        <div
+            class="grid"
+            style="grid-template-columns: repeat({columns}, minmax(0, 1fr)); gap: {gap}px;"
+        >
             {#each children as child (child.folder_id)}
                 {@const src = coverSrc(child.cover_id ? covers.get(child.cover_id) : undefined)}
                 {@const selected = selectedFolder === child.folder_id}
