@@ -6,6 +6,7 @@
     import { describeSteps, type QuickAction } from "$lib/actions";
     import { runAction, undoRun } from "./run";
     import QuickActionDialog from "./QuickActionDialog.svelte";
+    import Popover from "../controls/Popover.svelte";
 
     /**
      * The ⚡ menu in the grid toolbar.
@@ -61,45 +62,34 @@
     }
 </script>
 
-<div class="relative">
-    <button
-        type="button"
-        onclick={() => (open = !open)}
-        title="Quick actions"
-        aria-label="Quick actions"
-        aria-expanded={open}
-        class="grid h-7 w-7 shrink-0 place-items-center rounded transition-colors
-               {open
-            ? 'bg-neutral-800 text-neutral-100'
-            : 'text-neutral-500 hover:bg-neutral-800 hover:text-neutral-200'}"
-    >
-        <Zap class="h-4 w-4" />
-    </button>
-
-    {#if open}
-        <!-- Click-away catcher, matching the context menus. -->
+<!-- A fixed-position Popover, not an absolute panel: the toolbar lives in an
+     overflow-hidden header, which clipped the old panel to the header strip. -->
+<Popover bind:open label="Quick actions" width="w-72">
+    {#snippet trigger({ open: isOpen, toggle })}
         <button
             type="button"
-            tabindex="-1"
-            aria-label="Close menu"
-            class="fixed inset-0 z-[90] cursor-default"
-            onclick={() => (open = false)}
-        ></button>
-
-        <div
-            role="menu"
-            tabindex="-1"
-            class="absolute right-0 top-9 z-[91] w-72 rounded-lg border border-neutral-800
-                   bg-neutral-900 p-1 shadow-2xl"
+            onclick={toggle}
+            title="Quick actions"
+            aria-label="Quick actions"
+            aria-expanded={isOpen}
+            class="grid h-7 w-7 shrink-0 place-items-center rounded-md transition-colors
+                   {isOpen
+                ? 'bg-wash-strong text-neutral-100'
+                : 'text-neutral-500 hover:bg-wash hover:text-neutral-200'}"
         >
-            <p class="px-2 py-1.5 text-[11px] font-semibold text-neutral-500">
+            <Zap class="h-4 w-4" />
+        </button>
+    {/snippet}
+    {#snippet children()}
+        <div role="menu" tabindex="-1">
+            <p class="nv-menu-label">
                 {count === 0
                     ? "Nothing selected"
                     : `${count.toLocaleString()} selected`}
             </p>
 
             {#each actions as action (action.id)}
-                <div class="group flex items-center rounded hover:bg-neutral-800">
+                <div class="group flex items-center rounded-md hover:bg-wash-strong">
                     <button
                         type="button"
                         role="menuitem"
@@ -108,8 +98,8 @@
                         title={count === 0
                             ? "Select some assets first"
                             : describeSteps(action.steps, names)}
-                        class="flex min-w-0 flex-1 items-center gap-2 rounded px-2 py-1.5 text-left
-                               text-sm text-neutral-300 disabled:opacity-40"
+                        class="flex min-h-[30px] min-w-0 flex-1 items-center gap-2.5 rounded-md px-2 text-left
+                               text-neutral-300 disabled:opacity-40"
                     >
                         <span
                             aria-hidden="true"
@@ -135,7 +125,7 @@
                                 editing = action;
                                 open = false;
                             }}
-                            class="px-1 text-neutral-500 hover:text-neutral-200"
+                            class="grid h-6 w-6 place-items-center rounded text-neutral-500 hover:text-neutral-200"
                         >
                             <Pencil class="h-3 w-3" />
                         </button>
@@ -144,7 +134,7 @@
                             title="Delete"
                             aria-label="Delete"
                             onclick={() => remove(action)}
-                            class="px-1 text-neutral-500 hover:text-red-400"
+                            class="grid h-6 w-6 place-items-center rounded text-neutral-500 hover:text-red-400"
                         >
                             <Trash2 class="h-3 w-3" />
                         </button>
@@ -156,7 +146,7 @@
                 </p>
             {/each}
 
-            <div class="my-1 h-px bg-neutral-800"></div>
+            <div class="nv-menu-sep"></div>
 
             {#if undoable}
                 <button
@@ -166,8 +156,7 @@
                         open = false;
                         void undoRun(undoable.id);
                     }}
-                    class="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm
-                           text-neutral-300 hover:bg-neutral-800"
+                    class="nv-menu-item"
                 >
                     <Undo2 class="h-3.5 w-3.5 shrink-0" />
                     <span class="truncate">Undo "{undoable.name}"</span>
@@ -181,14 +170,13 @@
                     editing = null;
                     open = false;
                 }}
-                class="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm
-                       text-neutral-300 hover:bg-neutral-800"
+                class="nv-menu-item"
             >
                 <Plus class="h-3.5 w-3.5 shrink-0" /> New action…
             </button>
         </div>
-    {/if}
-</div>
+    {/snippet}
+</Popover>
 
 {#if editing !== undefined}
     <QuickActionDialog existing={editing ?? undefined} onclose={() => (editing = undefined)} />

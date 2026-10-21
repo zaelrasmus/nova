@@ -22,6 +22,7 @@
         rgbToHex,
     } from "$lib/assets.svelte";
     import { toast } from "svelte-sonner";
+    import { X } from "@lucide/svelte";
 
     interface Props {
         fieldClass: string;
@@ -86,7 +87,7 @@
         bind:value={hex}
         onchange={apply}
         aria-label="Filter by color"
-        class="h-6 w-8 cursor-pointer rounded border border-neutral-300 bg-white p-0.5"
+        class="h-6 w-8 cursor-pointer rounded-md border border-line bg-raised p-0.5"
     />
     <input
         type="text"
@@ -107,7 +108,7 @@
                 style="background-color: {preset}"
                 class="h-4 w-4 rounded-sm border border-neutral-400/60 transition-transform
                        hover:scale-125 {color && rgbToHex(color).toUpperCase() === preset.toUpperCase()
-                    ? 'ring-2 ring-blue-600 ring-offset-1'
+                    ? 'ring-2 ring-brand ring-offset-1 ring-offset-canvas'
                     : ''}"
             ></button>
         {/each}
@@ -123,7 +124,8 @@
             bind:value={accuracy}
             onchange={apply}
             aria-label="Color match accuracy"
-            class="w-20 accent-blue-600"
+            style:--fill="{accuracy}%"
+            class="nv-range w-20"
         />
 
         <!-- TESTING: uncomment (and the two lines in the script) to drive the
@@ -142,7 +144,9 @@
             type="button"
             onclick={() => assetLibrary.setColorFilter(null)}
             title="Clear color filter"
-            class="px-1 text-neutral-500 hover:text-neutral-800">✕</button
+            aria-label="Clear color filter"
+            class="grid h-5 w-5 place-items-center rounded text-neutral-500 hover:bg-wash-strong
+                   hover:text-neutral-200"><X class="h-3 w-3" /></button
         >
     {/if}
 

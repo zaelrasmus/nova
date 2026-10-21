@@ -461,6 +461,67 @@ body {
     padding-right: var(--wc-w);
 }
 
+/* ── Menus and popovers ─────────────────────────────────────────────────────────────
+   One panel look for every dropdown: toolbar menus, context menus, the search
+   typeahead. `.nv-menu-item` is the row; `.nv-menu-label` the small heading. */
+.nv-menu {
+    padding: 4px;
+    border-radius: 10px;
+    background: rgb(26 26 30 / 0.96);
+    backdrop-filter: blur(16px);
+    box-shadow:
+        0 0 0 1px var(--nv-line-strong),
+        0 16px 40px rgb(0 0 0 / 0.6);
+    color: #d4d4d8;
+    font-size: 13px;
+    animation: nv-menu-in 120ms ease;
+}
+@keyframes nv-menu-in {
+    from {
+        opacity: 0;
+        transform: translateY(-4px) scale(0.98);
+    }
+}
+@media (prefers-reduced-motion: reduce) {
+    .nv-menu {
+        animation: none;
+    }
+}
+.nv-menu-label {
+    padding: 6px 8px 4px;
+    font-size: 11px;
+    font-weight: 600;
+    color: #71717a;
+}
+.nv-menu-item {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    width: 100%;
+    min-height: 30px;
+    padding: 0 8px;
+    border-radius: 6px;
+    text-align: left;
+    color: #d4d4d8;
+    transition: background-color 80ms;
+}
+.nv-menu-item:hover,
+.nv-menu-item:focus-visible {
+    background: var(--nv-wash-strong);
+    color: #fafafa;
+    outline: none;
+}
+.nv-menu-item:disabled,
+.nv-menu-item[aria-disabled="true"] {
+    opacity: 0.4;
+    pointer-events: none;
+}
+.nv-menu-sep {
+    height: 1px;
+    margin: 4px 2px;
+    background: var(--nv-line);
+}
+
 /* ── Grid tiles (AssetCard) ───────────────────────────────────────────────────────
    Plain CSS rather than utilities because every state here keys off a data
    attribute on <html> (Settings › Appearance), and the card is the hottest

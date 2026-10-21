@@ -7,7 +7,9 @@
   degrade to a fallback elsewhere, so they're only offered where they're honest.
 -->
 <script lang="ts">
+    import { ArrowDownWideNarrow, ArrowUpNarrowWide, Check } from "@lucide/svelte";
     import { assetLibrary, ORDER_BY_LABELS, type OrderBy } from "$lib/assets.svelte";
+    import Popover from "./controls/Popover.svelte";
 
     const sort = $derived(assetLibrary.sort);
 
@@ -34,29 +36,65 @@
 
     const toggleDirection = () =>
         assetLibrary.setSort({ ...sort, is_ascending: !sort.is_ascending });
+
+    const currentLabel = $derived(
+        ORDER_BY_LABELS.find((o) => o.value === sort.order_by)?.label ?? "Sort",
+    );
 </script>
 
-<div class="flex items-center gap-1.5">
-    <span class="text-xs text-neutral-500">Sort</span>
-    <select
-        value={sort.order_by}
-        onchange={(e) => setCriterion(e.currentTarget.value as OrderBy)}
-        aria-label="Sort by"
-        class="rounded border border-neutral-300 bg-white px-1.5 py-0.5 text-xs text-neutral-700
-               focus:outline-none focus-visible:ring-1 focus-visible:ring-neutral-400"
-    >
-        {#each options as opt (opt.value)}
-            <option value={opt.value}>{opt.label}</option>
-        {/each}
-    </select>
+<!-- Criterion and direction are two controls on purpose: flipping the order is
+     the common move, and burying it inside the menu would make it two clicks. -->
+<div class="flex shrink-0 items-center">
+    <Popover label="Sort by" align="start" width="w-56">
+        {#snippet trigger({ open, toggle })}
+            <button
+                type="button"
+                onclick={toggle}
+                aria-expanded={open}
+                aria-label="Sort by {currentLabel}"
+                title="Sort by"
+                class="flex h-7 items-center rounded-l-md pl-2 pr-1.5 text-xs font-medium transition-colors
+                       {open
+                    ? 'bg-wash-strong text-neutral-100'
+                    : 'text-neutral-400 hover:bg-wash hover:text-neutral-100'}"
+            >
+                {currentLabel}
+            </button>
+        {/snippet}
+        {#snippet children({ close })}
+            <p class="nv-menu-label">Sort by</p>
+            {#each options as opt (opt.value)}
+                <button
+                    type="button"
+                    role="menuitemradio"
+                    aria-checked={sort.order_by === opt.value}
+                    onclick={() => {
+                        setCriterion(opt.value);
+                        close();
+                    }}
+                    class="nv-menu-item"
+                >
+                    <span class="grid w-3.5 place-items-center text-brand-text">
+                        {#if sort.order_by === opt.value}<Check class="h-3.5 w-3.5" />{/if}
+                    </span>
+                    {opt.label}
+                </button>
+            {/each}
+        {/snippet}
+    </Popover>
     <button
         type="button"
         onclick={toggleDirection}
-        title={sort.is_ascending ? "Ascending" : "Descending"}
+        title={sort.is_ascending ? "Ascending — click for descending" : "Descending — click for ascending"}
         aria-label={sort.is_ascending ? "Sort ascending" : "Sort descending"}
-        class="rounded px-1.5 py-0.5 text-xs text-neutral-500
-               hover:bg-neutral-200 hover:text-neutral-800"
+        class="grid h-7 w-6 place-items-center rounded-r-md text-neutral-500 transition-colors
+               hover:bg-wash hover:text-neutral-200"
     >
-        {sort.is_ascending ? "↑" : "↓"}
+        {#if sort.is_ascending}
+            <ArrowUpNarrowWide class="h-3.5 w-3.5" />
+        {:else}
+            <ArrowDownWideNarrow class="h-3.5 w-3.5" />
+        {/if}
     </button>
 </div>
+

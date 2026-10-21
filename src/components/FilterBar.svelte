@@ -44,9 +44,9 @@
     // from the rest. Matches the app's other dark surfaces: a neutral-900 field
     // on a hairline border, brightening on focus rather than glowing.
     const fieldClass =
-        "rounded border border-neutral-700 bg-neutral-900 px-1.5 py-0.5 text-neutral-200 " +
-        "focus:border-neutral-500 focus:outline-none focus-visible:ring-1 focus-visible:ring-neutral-500";
-    const labelClass = "text-neutral-500";
+        "h-6 rounded-md border border-line bg-raised px-1.5 text-neutral-200 transition-colors " +
+        "hover:border-line-strong focus:border-brand-line focus:outline-none";
+    const labelClass = "font-medium text-neutral-500";
 
     // ── Shape ────────────────────────────────────────────────────────────────
     // Custom ratio inputs, seeded from the active shape so reopening "Custom"
@@ -160,16 +160,16 @@
 <!-- Always visible, even with nothing active. Filters hide data, so the controls
      that produced the current view must never be more than a glance away — an
      invisible active filter is the #1 "the app is broken" report in every DAM. -->
-<!-- Active state is a left accent rail plus a barely-there blue wash, not a
+<!-- Active state is a left accent rail plus a barely-there accent wash, not a
      filled panel: the bar sits directly above the grid, and a solid tint there
      competes with the assets it is supposed to be framing. It still reads as
      "something is on" at a glance, which is the whole job. -->
 <div
-    class="flex flex-wrap items-center gap-x-4 gap-y-1.5 border-b border-neutral-800 px-4 py-2 text-xs
+    class="flex flex-wrap items-center gap-x-4 gap-y-1.5 border-b border-line py-2 text-xs
            transition-colors
            {active
-        ? 'border-l-2 border-l-blue-500 bg-blue-500/[0.07] pl-[calc(1rem-2px)]'
-        : 'bg-neutral-950'}"
+        ? 'border-l-2 border-l-brand bg-brand/[0.07] pl-[calc(var(--nv-grid-mx)-2px)] pr-[var(--nv-grid-mx)]'
+        : 'bg-canvas px-[var(--nv-grid-mx)]'}"
 >
     <div class="flex items-center gap-1.5">
         <span class={labelClass}>Type</span>
@@ -178,10 +178,10 @@
                 type="button"
                 onclick={() => assetLibrary.toggleAssetType(opt.value)}
                 aria-pressed={isType(opt.value)}
-                class="rounded px-2 py-0.5 font-medium transition-colors
+                class="h-6 rounded-md px-2 font-medium transition-colors
                     {isType(opt.value)
-                    ? 'bg-blue-600 text-white'
-                    : 'bg-neutral-800 text-neutral-400 hover:bg-neutral-700 hover:text-neutral-200'}"
+                    ? 'bg-brand-soft text-brand-text ring-1 ring-inset ring-brand-line'
+                    : 'text-neutral-400 ring-1 ring-inset ring-line-strong hover:bg-wash hover:text-neutral-200'}"
             >
                 {opt.label}
             </button>
@@ -314,8 +314,8 @@
         <button
             type="button"
             onclick={() => assetLibrary.clearFilters()}
-            class="ml-auto inline-flex shrink-0 items-center gap-1 rounded px-2 py-0.5 font-medium
-                   text-blue-400 transition-colors hover:bg-blue-500/15 hover:text-blue-300"
+            class="ml-auto inline-flex h-6 shrink-0 items-center gap-1 rounded-md px-2 font-medium
+                   text-brand-text transition-colors hover:bg-brand-soft"
         >
             <X class="h-3 w-3" />
             Clear filters

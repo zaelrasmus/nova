@@ -28,7 +28,7 @@
     import { tweened } from "svelte/motion";
     import type { Component } from "svelte";
     import { toast } from "svelte-sonner";
-    import { PanelLeft, PanelRight, Settings, Download } from "@lucide/svelte";
+    import { PanelLeft, PanelRight, Settings, Download, ChevronRight, X } from "@lucide/svelte";
 
     import {
         assetLibrary,
@@ -819,8 +819,8 @@
                         title="Show sidebar (Ctrl+B)"
                         aria-label="Show sidebar"
                         onclick={() => layout.toggleSidebar()}
-                        class="grid h-7 w-7 shrink-0 place-items-center rounded text-neutral-500
-                               transition-colors hover:bg-neutral-800 hover:text-neutral-200"
+                        class="grid h-7 w-7 shrink-0 place-items-center rounded-md text-neutral-500
+                               transition-colors hover:bg-wash hover:text-neutral-200"
                     >
                         <PanelLeft class="h-4 w-4" />
                     </button>
@@ -836,40 +836,63 @@
                     <!-- Breadcrumb: ancestors elide first, the open folder last. -->
                     <nav
                         aria-label="Folder path"
-                        class="flex min-w-0 items-center px-1 text-sm font-medium"
+                        class="flex min-w-0 items-center pl-1 text-[13.5px] font-semibold"
                     >
                         {#each folderTrail.slice(0, -1) as crumb (crumb.id)}
                             <button
                                 type="button"
-                                class="min-w-0 truncate rounded px-0.5 text-neutral-500
-                                       hover:bg-neutral-800 hover:text-neutral-200"
+                                class="min-w-0 truncate rounded-md px-1 py-0.5 font-medium text-neutral-500
+                                       transition-colors hover:bg-wash hover:text-neutral-200"
                                 onclick={() => openFolder(crumb.id)}
                             >
                                 {crumb.name}
                             </button>
-                            <span class="shrink-0 px-0.5 text-neutral-600" aria-hidden="true">›</span>
+                            <ChevronRight class="h-3.5 w-3.5 shrink-0 text-neutral-600" aria-hidden="true" />
                         {/each}
-                        <span class="shrink-0 truncate text-neutral-200" data-tauri-drag-region>
+                        <span class="shrink-0 truncate px-1 text-neutral-100" data-tauri-drag-region>
                             {folderTrail[folderTrail.length - 1].name}
                         </span>
                     </nav>
                 {:else}
                     <span
-                        class="min-w-0 truncate px-1 text-sm font-medium text-neutral-200"
+                        class="min-w-0 truncate pl-2 pr-1 text-[13.5px] font-semibold text-neutral-100"
                         data-tauri-drag-region
                     >
                         {scopeLabel}
                     </span>
                 {/if}
-                <!-- Say "(filtered)" when narrowed, so a small view never reads as
+                <!-- Say "filtered" when narrowed, so a small view never reads as
                      a small library. -->
-                <span class="shrink-0 text-xs text-neutral-500" data-tauri-drag-region>
-                    {assetLibrary.displayed.length}
-                    {assetLibrary.hasFilters || assetLibrary.nameFiltering ? "filtered" : "assets"}
-                    {#if selection.assetCount > 0}
-                        <span class="text-blue-400">· {selection.assetCount} selected</span>
-                    {/if}
+                <span
+                    class="ml-1 shrink-0 rounded-full bg-raised px-2 py-0.5 text-[11px] tabular-nums
+                           text-neutral-400"
+                    data-tauri-drag-region
+                    title={assetLibrary.hasFilters || assetLibrary.nameFiltering
+                        ? "Assets matching the current search and filters"
+                        : "Assets in this view"}
+                >
+                    {assetLibrary.displayed.length.toLocaleString()}{assetLibrary.hasFilters ||
+                    assetLibrary.nameFiltering
+                        ? " filtered"
+                        : ""}
                 </span>
+                {#if selection.assetCount > 0}
+                    <span
+                        class="ml-1 inline-flex shrink-0 items-center gap-1 rounded-full bg-brand-soft py-0.5
+                               pl-2 pr-0.5 text-[11px] font-medium tabular-nums text-brand-text"
+                    >
+                        {selection.assetCount.toLocaleString()} selected
+                        <button
+                            type="button"
+                            onclick={() => selection.clear()}
+                            title="Clear selection (Esc)"
+                            aria-label="Clear selection"
+                            class="grid h-4 w-4 place-items-center rounded-full hover:bg-brand-soft"
+                        >
+                            <X class="h-3 w-3" />
+                        </button>
+                    </span>
+                {/if}
 
                 <div class="h-full flex-1" data-tauri-drag-region></div>
 
@@ -883,20 +906,26 @@
                      and the toolbar was simply cut off. -->
                 <div class="w-64 min-w-16 shrink"><SearchBar /></div>
 
+                <div class="mx-1.5 h-4 w-px shrink-0 bg-line-strong" aria-hidden="true"></div>
+
+                <GridToolbar />
+
+                <div class="mx-1.5 h-4 w-px shrink-0 bg-line-strong" aria-hidden="true"></div>
+
+                <!-- The one labelled button in the row: importing is how a library
+                     starts, and an unlabelled arrow among a dozen icons hid it. -->
                 <button
                     type="button"
                     onclick={handleImport}
                     disabled={isImporting || noLibraryConnected}
                     title="Import a folder — or paste a link to add from the web"
-                    aria-label="Import"
-                    class="grid h-7 w-7 shrink-0 place-items-center rounded text-neutral-500
-                           transition-colors hover:bg-neutral-800 hover:text-neutral-200
-                           disabled:opacity-40"
+                    class="flex h-7 shrink-0 items-center gap-1.5 rounded-md bg-raised-2 px-2.5 text-xs
+                           font-medium text-neutral-100 ring-1 ring-inset ring-line-strong
+                           transition-colors hover:bg-neutral-700 disabled:opacity-40"
                 >
-                    <Download class="h-4 w-4" />
+                    <Download class="h-3.5 w-3.5" />
+                    Import
                 </button>
-
-                <GridToolbar />
 
                 {#if layout.inspectorHidden}
                     <button
@@ -904,8 +933,8 @@
                         title="Show inspector (Ctrl+I)"
                         aria-label="Show inspector"
                         onclick={() => layout.toggleInspector()}
-                        class="grid h-7 w-7 shrink-0 place-items-center rounded text-neutral-500
-                               transition-colors hover:bg-neutral-800 hover:text-neutral-200"
+                        class="grid h-7 w-7 shrink-0 place-items-center rounded-md text-neutral-500
+                               transition-colors hover:bg-wash hover:text-neutral-200"
                     >
                         <PanelRight class="h-4 w-4" />
                     </button>
@@ -942,7 +971,7 @@
             <header class="pane-header border-b border-line">
                 <div class="drag-region" data-tauri-drag-region></div>
 
-                <span class="truncate text-xs text-neutral-400" data-tauri-drag-region>
+                <span class="truncate pl-1.5 text-[12.5px] font-semibold text-neutral-200" data-tauri-drag-region>
                     {inspectorLabel}
                 </span>
                 <div class="h-full flex-1" data-tauri-drag-region></div>
@@ -951,8 +980,8 @@
                     title="Hide inspector (Ctrl+I)"
                     aria-label="Hide inspector"
                     onclick={() => layout.toggleInspector()}
-                    class="grid h-7 w-7 shrink-0 place-items-center rounded text-neutral-500
-                           transition-colors hover:bg-neutral-800 hover:text-neutral-200"
+                    class="grid h-7 w-7 shrink-0 place-items-center rounded-md text-neutral-500
+                           transition-colors hover:bg-wash hover:text-neutral-200"
                 >
                     <PanelRight class="h-4 w-4" />
                 </button>
