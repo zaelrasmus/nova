@@ -681,7 +681,7 @@
                     type="button"
                     onclick={() => pz?.fit()}
                     title="Fit to screen (2 / 0)"
-                    class="rounded px-2 py-1 hover:bg-white/10 {pz.fitted ? 'bg-white/15' : ''}"
+                    class="rounded px-2 py-1 {pz.fitted ? 'bg-brand-soft text-brand-text' : 'hover:bg-white/10'}"
                     >Fit</button
                 >
                 <div class="mx-0.5 h-4 w-px bg-white/15"></div>
@@ -690,7 +690,7 @@
                     onclick={() => (pixelated = !pixelated)}
                     title="Pixel-perfect (nearest neighbour)"
                     aria-pressed={pixelated}
-                    class="rounded px-2 py-1 hover:bg-white/10 {pixelated ? 'bg-white/15' : ''}"
+                    class="rounded px-2 py-1 {pixelated ? 'bg-brand-soft text-brand-text' : 'hover:bg-white/10'}"
                     >⊞</button
                 >
                 <button
@@ -698,7 +698,7 @@
                     onclick={() => (eyedropper = !eyedropper)}
                     title="Color eyedropper — click a pixel to copy its HEX"
                     aria-pressed={eyedropper}
-                    class="rounded px-2 py-1 hover:bg-white/10 {eyedropper ? 'bg-white/15' : ''}"
+                    class="rounded px-2 py-1 {eyedropper ? 'bg-brand-soft text-brand-text' : 'hover:bg-white/10'}"
                     >🎨</button
                 >
                 <button

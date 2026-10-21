@@ -140,6 +140,22 @@
 @theme inline {
     --font-sans: "Inter Variable", sans-serif;
 
+    /* Nova surfaces and accent (tokens below, under DESIGN TOKENS). Named so
+       they never collide with shadcn's own `accent`/`muted`, which the ui/
+       primitives still use. */
+    --color-canvas: var(--nv-canvas);
+    --color-pane: var(--nv-pane);
+    --color-raised: var(--nv-raised);
+    --color-raised-2: var(--nv-raised-2);
+    --color-wash: var(--nv-wash);
+    --color-wash-strong: var(--nv-wash-strong);
+    --color-line: var(--nv-line);
+    --color-line-strong: var(--nv-line-strong);
+    --color-brand: var(--nv-accent);
+    --color-brand-soft: var(--nv-accent-soft);
+    --color-brand-line: var(--nv-accent-line);
+    --color-brand-text: var(--nv-accent-text);
+
     --color-sidebar-ring: var(--sidebar-ring);
 
     --color-sidebar-border: var(--sidebar-border);
@@ -247,8 +263,87 @@
    --inspector-col; everything else here is static.
    ══════════════════════════════════════════════════════════════════════════ */
 
+/* ══ DESIGN TOKENS ════════════════════════════════════════════════════════════════════════════
+
+   One neutral ramp and one accent. The accent means exactly three things —
+   selected, on, and "you are here" — and is never decoration; that restraint
+   is what lets it read at a glance.
+
+   The values marked (pref) are written by $lib/appearance.ts from Settings ›
+   Appearance; the ones here are the same defaults, so the first paint (before
+   settings load) already looks right.
+   ═════════════════════════════════════════════════════════════════════════════ */
 :root {
-    --chrome-h: 52px; /* every pane header — the fake titlebar's height */
+    --nv-canvas: #0b0b0d; /* the grid: darkest, so the art is the brightest thing */
+    --nv-pane: #111114; /* sidebar + inspector, one step up */
+    --nv-raised: #19191d; /* inputs, chips, tiles still loading */
+    --nv-raised-2: #222227; /* the "on" segment, chips inside inputs */
+    --nv-wash: rgb(255 255 255 / 0.045); /* hover */
+    --nv-wash-strong: rgb(255 255 255 / 0.08); /* pressed / open */
+    --nv-line: rgb(255 255 255 / 0.07);
+    --nv-line-strong: rgb(255 255 255 / 0.12);
+
+    --nv-accent: oklch(0.68 0.16 277); /* (pref) */
+    --nv-accent-soft: color-mix(in oklch, var(--nv-accent) 17%, transparent);
+    --nv-accent-line: color-mix(in oklch, var(--nv-accent) 50%, transparent);
+    --nv-accent-text: color-mix(in oklch, var(--nv-accent) 65%, white);
+
+    --nv-grid-mx: 20px; /* (pref) */
+    --nv-grid-my: 20px; /* (pref) */
+    --nv-grid-gap: 8px; /* (pref) */
+    --nv-tile-radius: 8px; /* (pref) */
+    --nv-row-h: 30px; /* sidebar rows; density */
+}
+
+/* Flat: one tone for every pane, the way the app looked before. */
+:root[data-panes="flat"] {
+    --nv-pane: var(--nv-canvas);
+}
+
+:root[data-density="compact"] {
+    --nv-row-h: 26px;
+    --chrome-h: 44px;
+}
+
+/* The one slider style. Tailwind's `accent-*` only tints the native control,
+   which renders as a different widget on every platform. */
+.nv-range {
+    -webkit-appearance: none;
+    appearance: none;
+    height: 4px;
+    margin: 0;
+    border-radius: 4px;
+    background:
+        linear-gradient(var(--nv-accent), var(--nv-accent)) 0 / var(--fill, 50%) 100% no-repeat,
+        var(--nv-raised-2);
+    outline: none;
+}
+.nv-range::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 13px;
+    height: 13px;
+    border-radius: 50%;
+    background: #f4f4f5;
+    box-shadow:
+        0 0 0 1px rgb(0 0 0 / 0.35),
+        0 1px 3px rgb(0 0 0 / 0.6);
+    transition: transform 100ms;
+}
+.nv-range:active::-webkit-slider-thumb {
+    transform: scale(1.15);
+}
+.nv-range:focus-visible::-webkit-slider-thumb {
+    box-shadow: 0 0 0 3px var(--nv-accent-soft);
+}
+.nv-range:disabled {
+    opacity: 0.4;
+}
+
+:root:not([data-density="compact"]) {
+    --chrome-h: 48px; /* every pane header — the fake titlebar's height */
+}
+
+:root {
     --rail-w: 52px; /* collapsed sidebar (section icons) */
     --wc-w: 138px; /* 3 × 46px window buttons (Windows metrics) */
 
@@ -294,7 +389,7 @@ body {
     grid-template-columns: var(--sidebar-col, 240px) minmax(0, 1fr) var(--inspector-col, 320px);
     height: 100vh;
     overflow: hidden;
-    background-color: #0a0a0a;
+    background-color: var(--nv-canvas);
     color: #e5e5e5;
 }
 
@@ -366,6 +461,297 @@ body {
     padding-right: var(--wc-w);
 }
 
+/* ── Scrollbars ──────────────────────────────────────────────────────────────────
+   One style for every scroll area: a slim rounded thumb on a transparent
+   track, no arrow buttons. It is quiet at rest, brightens while the pointer is
+   over the scroll area, and brightens again on the thumb itself.
+
+   Do NOT add `scrollbar-width` or `scrollbar-color` anywhere (Tailwind's
+   `[scrollbar-width:thin]` included). WebView2 is Chromium, and Chromium drops
+   every ::-webkit-scrollbar rule for an element that sets either standard
+   property — that is how the app ended up with stock grey bars with arrows.
+
+   The thumb's look comes from a transparent border plus `background-clip`:
+   the track stays wide enough to grab while the visible bar stays thin. */
+::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+}
+::-webkit-scrollbar-track,
+::-webkit-scrollbar-corner {
+    background: transparent;
+}
+::-webkit-scrollbar-thumb {
+    border: 3px solid transparent;
+    border-radius: 10px;
+    background-color: rgb(255 255 255 / 0.09);
+    background-clip: padding-box;
+}
+:hover::-webkit-scrollbar-thumb {
+    background-color: rgb(255 255 255 / 0.16);
+}
+::-webkit-scrollbar-thumb:hover {
+    background-color: rgb(255 255 255 / 0.28);
+}
+::-webkit-scrollbar-thumb:active {
+    background-color: rgb(255 255 255 / 0.36);
+}
+
+/* The grid's bar: smaller still, so it doesn't compete with the art. 4px of
+   visible thumb in a 6px track, rounded at the ends. */
+.nv-scroll-tiny::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+}
+.nv-scroll-tiny::-webkit-scrollbar-thumb {
+    border-width: 1px;
+    background-color: rgb(255 255 255 / 0.07);
+}
+.nv-scroll-tiny:hover::-webkit-scrollbar-thumb {
+    background-color: rgb(255 255 255 / 0.16);
+}
+.nv-scroll-tiny::-webkit-scrollbar-thumb:hover {
+    background-color: rgb(255 255 255 / 0.3);
+}
+.nv-scroll-tiny::-webkit-scrollbar-thumb:active {
+    background-color: var(--nv-accent);
+}
+
+/* The sidebar sections' bar: the grid's slim size, invisible until the pointer
+   is over that section. The sidebar is navigation, and five permanent bars
+   stacked beside the resize handle would read as clutter, not information.
+   Hiding paints the thumb transparent rather than removing the scrollbar, so
+   rows don't shift sideways when it appears. */
+.nv-scroll-reveal::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+}
+.nv-scroll-reveal::-webkit-scrollbar-thumb {
+    border-width: 1px;
+    background-color: transparent;
+}
+.nv-scroll-reveal:hover::-webkit-scrollbar-thumb {
+    background-color: rgb(255 255 255 / 0.16);
+}
+.nv-scroll-reveal::-webkit-scrollbar-thumb:hover {
+    background-color: rgb(255 255 255 / 0.3);
+}
+.nv-scroll-reveal::-webkit-scrollbar-thumb:active {
+    background-color: rgb(255 255 255 / 0.36);
+}
+
+/* ── Menus and popovers ─────────────────────────────────────────────────────────────
+   One panel look for every dropdown: toolbar menus, context menus, the search
+   typeahead. `.nv-menu-item` is the row; `.nv-menu-label` the small heading. */
+.nv-menu {
+    padding: 4px;
+    border-radius: 10px;
+    background: rgb(26 26 30 / 0.96);
+    backdrop-filter: blur(16px);
+    box-shadow:
+        0 0 0 1px var(--nv-line-strong),
+        0 16px 40px rgb(0 0 0 / 0.6);
+    color: #d4d4d8;
+    font-size: 13px;
+    animation: nv-menu-in 120ms ease;
+}
+@keyframes nv-menu-in {
+    from {
+        opacity: 0;
+        transform: translateY(-4px) scale(0.98);
+    }
+}
+@media (prefers-reduced-motion: reduce) {
+    .nv-menu {
+        animation: none;
+    }
+}
+.nv-menu-label {
+    padding: 6px 8px 4px;
+    font-size: 11px;
+    font-weight: 600;
+    color: #71717a;
+}
+.nv-menu-item {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    width: 100%;
+    min-height: 30px;
+    padding: 0 8px;
+    border-radius: 6px;
+    text-align: left;
+    color: #d4d4d8;
+    transition: background-color 80ms;
+}
+.nv-menu-item:hover,
+.nv-menu-item:focus-visible {
+    background: var(--nv-wash-strong);
+    color: #fafafa;
+    outline: none;
+}
+.nv-menu-item:disabled,
+.nv-menu-item[aria-disabled="true"] {
+    opacity: 0.4;
+    pointer-events: none;
+}
+.nv-menu-sep {
+    height: 1px;
+    margin: 4px 2px;
+    background: var(--nv-line);
+}
+
+/* ── Grid tiles (AssetCard) ───────────────────────────────────────────────────────
+   Plain CSS rather than utilities because every state here keys off a data
+   attribute on <html> (Settings › Appearance), and the card is the hottest
+   component in the app: toggling "name on thumbnails" must repaint, not
+   re-render a few hundred Svelte components. */
+.nv-tile {
+    border-radius: var(--nv-tile-radius);
+    transition: box-shadow 120ms;
+}
+
+/* A hairline inside every tile. Without it a white sketch on the dark canvas
+   has no edge at all and bleeds into its neighbours. */
+.nv-tile::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: 5;
+    border-radius: inherit;
+    box-shadow: inset 0 0 0 1px rgb(255 255 255 / 0.06);
+    pointer-events: none;
+}
+
+.nv-tile:hover img {
+    filter: brightness(1.07);
+}
+
+/* The ring sits OUTSIDE the tile with a canvas-coloured gap, so it reads on any
+   art — and the grid margin keeps it from being clipped at the pane edge.
+   Selected and focused tiles are lifted above their neighbours: with a tile gap
+   under 8px the 4px ring overlaps the next tile, which would paint over it. */
+.nv-tile[aria-selected="true"],
+.nv-tile:focus-visible {
+    z-index: 1;
+}
+.nv-tile[aria-selected="true"] {
+    box-shadow:
+        0 0 0 2px var(--nv-canvas),
+        0 0 0 4px var(--nv-accent);
+}
+.nv-tile:focus-visible {
+    box-shadow:
+        0 0 0 2px var(--nv-canvas),
+        0 0 0 4px rgb(255 255 255 / 0.45);
+}
+.nv-tile[aria-selected="true"]:focus-visible {
+    box-shadow:
+        0 0 0 2px var(--nv-canvas),
+        0 0 0 4px var(--nv-accent);
+}
+
+.nv-tile-meta {
+    position: absolute;
+    inset-inline: 0;
+    bottom: 0;
+    z-index: 6;
+    display: flex;
+    align-items: flex-end;
+    gap: 8px;
+    padding: 28px 10px 8px;
+    background: linear-gradient(to top, rgb(0 0 0 / 0.72), rgb(0 0 0 / 0.35) 55%, transparent);
+    opacity: 0;
+    transform: translateY(4px);
+    transition:
+        opacity 140ms,
+        transform 140ms;
+    pointer-events: none;
+}
+/* Leave room for the play/audio badge in the bottom-left corner. */
+.nv-tile:has(.nv-tile-media) .nv-tile-meta {
+    padding-left: 34px;
+}
+:root[data-tile-info="off"] .nv-tile-meta {
+    display: none;
+}
+:root[data-tile-info="hover"] .nv-tile:hover .nv-tile-meta,
+:root[data-tile-info="always"] .nv-tile-meta {
+    opacity: 1;
+    transform: none;
+}
+.nv-tile-name {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 12px;
+    font-weight: 500;
+    color: white;
+}
+.nv-tile-dims {
+    margin-left: auto;
+    flex-shrink: 0;
+    font-size: 10.5px;
+    font-variant-numeric: tabular-nums;
+    color: rgb(255 255 255 / 0.62);
+}
+
+.nv-tile-check {
+    position: absolute;
+    left: 8px;
+    top: 8px;
+    z-index: 11;
+    display: grid;
+    place-items: center;
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    border: 1.5px solid rgb(255 255 255 / 0.9);
+    background: rgb(0 0 0 / 0.28);
+    backdrop-filter: blur(4px);
+    color: white;
+    opacity: 0;
+    transform: scale(0.9);
+    /* Invisible means inert: a tap in the corner of an unhovered tile (touch,
+       pen) must select normally, not toggle. */
+    pointer-events: none;
+    transition:
+        opacity 120ms,
+        transform 120ms,
+        background-color 120ms;
+}
+.nv-tile-check svg {
+    width: 12px;
+    height: 12px;
+    opacity: 0;
+}
+.nv-tile-check:hover {
+    background: rgb(0 0 0 / 0.5);
+}
+:root[data-select-circle="off"] .nv-tile-check {
+    display: none;
+}
+.nv-tile:hover .nv-tile-check,
+.nv-tile[aria-selected="true"] .nv-tile-check {
+    opacity: 1;
+    transform: none;
+    pointer-events: auto;
+}
+.nv-tile[aria-selected="true"] .nv-tile-check {
+    border-color: var(--nv-accent);
+    background: var(--nv-accent);
+}
+.nv-tile[aria-selected="true"] .nv-tile-check svg {
+    opacity: 1;
+}
+/* The circle and the page number share the top-left corner; the circle wins
+   only while it's showing. */
+:root[data-select-circle="on"] .nv-tile:hover .nv-tile-ordinal,
+:root[data-select-circle="on"] .nv-tile[aria-selected="true"] .nv-tile-ordinal {
+    opacity: 0;
+}
+
 /* Loading skeleton for grid thumbnails that haven't been generated yet — a soft
    light sweep across a dark tile, so a pending card reads as "loading" rather
    than "empty/broken". Honors reduced-motion. */
@@ -379,7 +765,7 @@ body {
 }
 
 .skeleton-shimmer {
-    background-color: #1c1c1c;
+    background-color: var(--nv-raised);
     background-image: linear-gradient(
         100deg,
         rgba(255, 255, 255, 0) 30%,

@@ -77,22 +77,16 @@
 <div
     role="menu"
     tabindex="-1"
-    class="fixed z-[91] w-[200px] rounded-lg border border-neutral-800 bg-neutral-900 p-1 shadow-2xl"
+    class="nv-menu fixed z-[91] w-[200px]"
     style="left: {left}px; top: {top}px"
 >
-    <p class="truncate px-2 py-1.5 text-[11px] font-semibold text-neutral-500">{folder.name}</p>
+    <p class="nv-menu-label truncate">{folder.name}</p>
 
-    <button
-        type="button"
-        role="menuitem"
-        onclick={togglePin}
-        class="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm text-neutral-300
-               hover:bg-neutral-800"
-    >
+    <button type="button" role="menuitem" onclick={togglePin} class="nv-menu-item">
         {#if pinned}
-            <PinOff class="h-3.5 w-3.5" /> Unpin from sidebar
+            <PinOff class="h-3.5 w-3.5 text-neutral-500" /> Unpin from sidebar
         {:else}
-            <Pin class="h-3.5 w-3.5" /> Pin to sidebar
+            <Pin class="h-3.5 w-3.5 text-neutral-500" /> Pin to sidebar
         {/if}
     </button>
 
@@ -107,38 +101,27 @@
     {/if}
 
     {#if onNewSubfolder || onRename || onDelete}
-        <div class="my-1 h-px bg-neutral-800"></div>
+        <div class="nv-menu-sep"></div>
     {/if}
 
     {#if onNewSubfolder}
-        <button
-            type="button"
-            role="menuitem"
-            onclick={() => run(onNewSubfolder)}
-            class="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm
-                   text-neutral-300 hover:bg-neutral-800"
-        >
-            <FolderPlus class="h-3.5 w-3.5" /> New subfolder
+        <button type="button" role="menuitem" onclick={() => run(onNewSubfolder)} class="nv-menu-item">
+            <FolderPlus class="h-3.5 w-3.5 text-neutral-500" /> New subfolder
         </button>
     {/if}
     {#if onRename}
-        <button
-            type="button"
-            role="menuitem"
-            onclick={() => run(onRename)}
-            class="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm
-                   text-neutral-300 hover:bg-neutral-800"
-        >
-            <Pencil class="h-3.5 w-3.5" /> Rename…
+        <button type="button" role="menuitem" onclick={() => run(onRename)} class="nv-menu-item">
+            <Pencil class="h-3.5 w-3.5 text-neutral-500" /> Rename…
         </button>
     {/if}
     {#if onDelete}
+        <!-- `!`: .nv-menu-item sets its own colour outside Tailwind's layers,
+             so a plain utility would lose to it. -->
         <button
             type="button"
             role="menuitem"
             onclick={() => run(onDelete)}
-            class="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm
-                   text-red-400 hover:bg-neutral-800"
+            class="nv-menu-item text-red-400!"
         >
             <Trash2 class="h-3.5 w-3.5" /> Delete…
         </button>

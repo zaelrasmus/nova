@@ -68,9 +68,9 @@
     }
 
     const fieldClass =
-        "rounded border border-neutral-800 bg-neutral-900 px-2.5 py-1.5 text-sm text-neutral-100 " +
-        "placeholder:text-neutral-600 focus:border-neutral-600 focus:outline-none";
-    const legendClass = "text-[11px] font-medium uppercase tracking-wide text-neutral-500";
+        "rounded-md border border-line bg-raised px-2.5 py-1.5 text-sm text-neutral-100 " +
+        "placeholder:text-neutral-600 focus:border-brand-line focus:outline-none";
+    const legendClass = "text-[11.5px] font-semibold text-neutral-500";
 </script>
 
 <svelte:window
@@ -93,9 +93,9 @@
         aria-modal="true"
         aria-label={existing ? "Edit action" : "New action"}
         class="relative flex max-h-[80vh] w-[640px] max-w-full flex-col overflow-hidden rounded-xl
-               border border-neutral-800 bg-neutral-950 shadow-2xl"
+               border border-line-strong bg-pane shadow-2xl"
     >
-        <div class="shrink-0 border-b border-neutral-800 px-5 py-4">
+        <div class="shrink-0 border-b border-line px-5 py-4">
             <h2 class="text-sm font-semibold text-neutral-100">
                 {existing ? "Edit action" : "New action"}
             </h2>
@@ -105,7 +105,7 @@
             </p>
         </div>
 
-        <div class="flex flex-1 flex-col gap-4 overflow-y-auto px-5 py-4 [scrollbar-width:thin]">
+        <div class="flex flex-1 flex-col gap-4 overflow-y-auto px-5 py-4">
             <div class="flex gap-3">
                 <label class="flex flex-1 flex-col gap-1.5">
                     <span class={legendClass}>Name</span>
@@ -139,7 +139,7 @@
                         aria-label="No accent"
                         aria-pressed={color === null}
                         class="h-5 w-5 rounded-full border transition-colors
-                               {color === null ? 'border-neutral-300' : 'border-neutral-700'}"
+                               {color === null ? 'border-neutral-300' : 'border-line-strong'}"
                     ></button>
                     {#each PIN_COLORS as token (token)}
                         <button
@@ -173,7 +173,7 @@
                     type="button"
                     onclick={() => (steps = [...steps, emptyStep("add_tags")])}
                     class="flex items-center gap-1.5 self-start rounded px-2 py-1 text-xs
-                           text-neutral-500 transition-colors hover:bg-neutral-800
+                           text-neutral-500 transition-colors hover:bg-wash
                            hover:text-neutral-300"
                 >
                     <Plus class="h-3 w-3" /> Add step
@@ -181,7 +181,7 @@
             </div>
         </div>
 
-        <div class="flex shrink-0 items-center gap-3 border-t border-neutral-800 px-5 py-3">
+        <div class="flex shrink-0 items-center gap-3 border-t border-line px-5 py-3">
             <!-- The pipeline read back as a sentence. Steps run top to bottom, so
                  this is also the order they apply in. -->
             <span class="min-w-0 flex-1 truncate text-xs text-neutral-500" title={summary}>
@@ -191,8 +191,8 @@
             <button
                 type="button"
                 onclick={onclose}
-                class="rounded border border-neutral-800 px-3 py-1.5 text-xs text-neutral-300
-                       transition-colors hover:bg-neutral-800"
+                class="rounded-md bg-raised-2 px-3 py-1.5 text-xs font-medium text-neutral-200
+                       ring-1 ring-inset ring-line-strong transition-colors hover:bg-neutral-700"
             >
                 Cancel
             </button>
@@ -200,8 +200,8 @@
                 type="button"
                 onclick={save}
                 disabled={!canSave}
-                class="rounded bg-blue-600 px-3 py-1.5 text-xs font-medium text-white
-                       transition-colors hover:bg-blue-500 disabled:opacity-40"
+                class="rounded-md bg-brand px-3 py-1.5 text-xs font-medium text-white
+                       transition-[filter] hover:brightness-110 disabled:opacity-40"
             >
                 {existing ? "Save" : "Create"}
             </button>

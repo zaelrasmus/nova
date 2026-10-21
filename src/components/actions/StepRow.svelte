@@ -117,11 +117,11 @@
         onchange({ ...step, when: step.when ? null : emptyRules() });
 
     const controlClass =
-        "rounded border border-neutral-700 bg-neutral-950 px-1.5 py-1 text-xs text-neutral-200 " +
-        "focus:border-neutral-500 focus:outline-none";
+        "rounded-md border border-line bg-raised px-1.5 py-1 text-xs text-neutral-200 " +
+        "focus:border-brand-line focus:outline-none";
 </script>
 
-<div class="flex flex-col gap-2 rounded border border-neutral-800 p-2">
+<div class="flex flex-col gap-2 rounded-md border border-line p-2">
   <div class="flex items-start gap-1.5">
     <select
         value={step.op.type}
@@ -142,7 +142,7 @@
         <!-- Plain multi-select, not the rule editor's tri-state: the step type
              already says add or remove, so a chip only has to answer "is this
              tag involved". -->
-        <div class="flex max-h-20 min-w-0 flex-1 flex-wrap gap-1 overflow-y-auto [scrollbar-width:thin]">
+        <div class="flex max-h-20 min-w-0 flex-1 flex-wrap gap-1 overflow-y-auto">
             {#if assetLibrary.tags.length === 0}
                 <span class="text-xs text-neutral-600">No tags in this library yet.</span>
             {/if}
@@ -154,8 +154,8 @@
                     onclick={() => toggleTag(tag.id)}
                     class="rounded px-1.5 py-0.5 text-xs transition-colors
                            {on
-                        ? 'bg-blue-600 text-white'
-                        : 'bg-neutral-800 text-neutral-400 hover:bg-neutral-700'}"
+                        ? 'bg-brand-soft text-brand-text ring-1 ring-inset ring-brand-line'
+                        : 'bg-raised-2 text-neutral-400 hover:bg-wash-strong hover:text-neutral-200'}"
                 >
                     {tag.name}
                 </button>
@@ -186,8 +186,7 @@
     {:else if step.op.type === "set_folders"}
         <div class="flex min-w-0 flex-1 flex-col gap-1">
             <div
-                class="max-h-24 overflow-y-auto rounded border border-neutral-800
-                       [scrollbar-width:thin]"
+                class="max-h-24 overflow-y-auto rounded-md border border-line"
             >
                 {#if folderRows.length === 0}
                     <p class="px-2 py-1 text-xs text-neutral-600">No folders in this library yet.</p>
@@ -199,14 +198,14 @@
                         aria-pressed={on}
                         onclick={() => toggleFolder(folder.id)}
                         class="flex w-full items-center gap-2 py-0.5 pr-2 text-left text-xs
-                               text-neutral-300 transition-colors hover:bg-neutral-800"
+                               text-neutral-300 transition-colors hover:bg-wash"
                         style="padding-left: {8 + depth * 12}px"
                     >
                         <span
                             aria-hidden="true"
                             class="grid h-3.5 w-3.5 shrink-0 place-items-center rounded-sm border
                                    text-[9px] leading-none text-white
-                                   {on ? 'border-blue-500 bg-blue-600' : 'border-neutral-600'}"
+                                   {on ? 'border-brand bg-brand' : 'border-neutral-600'}"
                         >
                             {on ? "✓" : ""}
                         </span>
@@ -273,7 +272,7 @@
             title="Remove step"
             aria-label="Remove step"
             class="grid h-6 w-6 place-items-center rounded text-neutral-500
-                   transition-colors hover:bg-neutral-800 hover:text-neutral-200"
+                   transition-colors hover:bg-wash hover:text-neutral-200"
         >
             <Minus class="h-3.5 w-3.5" />
         </button>
@@ -285,8 +284,8 @@
             aria-pressed={!!step.when}
             class="grid h-6 w-6 place-items-center rounded transition-colors
                    {step.when
-                ? 'bg-neutral-800 text-blue-400'
-                : 'text-neutral-600 hover:bg-neutral-800 hover:text-neutral-300'}"
+                ? 'bg-brand-soft text-brand-text'
+                : 'text-neutral-600 hover:bg-wash hover:text-neutral-300'}"
         >
             <Filter class="h-3.5 w-3.5" />
         </button>
@@ -299,7 +298,7 @@
        the SAME rule editor as smart folders — one language, one editor, so a
        rule learned in one place reads the same in the other. -->
   {#if step.when}
-    <div class="ml-2 flex flex-col gap-1 border-l border-neutral-800 pl-2">
+    <div class="ml-2 flex flex-col gap-1 border-l border-line pl-2">
         <span class="text-[10px] font-medium uppercase tracking-wide text-neutral-500">
             only if
         </span>

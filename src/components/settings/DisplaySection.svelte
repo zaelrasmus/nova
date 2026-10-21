@@ -10,14 +10,10 @@
     import { settings, VIEWER_BACKGROUNDS } from "../../routes/settings.svelte";
     import { assetLibrary } from "$lib/assets.svelte";
     import { Label } from "$components/ui/label";
+    import Segmented from "$components/controls/Segmented.svelte";
+    import Switch from "$components/controls/Switch.svelte";
+    import Range from "$components/controls/Range.svelte";
     import { toast } from "svelte-sonner";
-
-    const toggleGifs = () =>
-        settings.set("animateGifsInGrid", !settings.preferences.animateGifsInGrid);
-    const toggleOrdinals = () =>
-        settings.set("showOrdinals", !settings.preferences.showOrdinals);
-    const toggleNextFolder = () =>
-        settings.set("viewerNextFolder", !settings.preferences.viewerNextFolder);
 
     // Values match ThumbMode::from_setting on the Rust side.
     const QUALITIES = [
@@ -26,8 +22,13 @@
         { value: "lossless", label: "Lossless", hint: "Exact quality, largest files" },
     ] as const;
 
+    const BACKGROUNDS = VIEWER_BACKGROUNDS.map((b) => ({
+        value: b,
+        label: b[0].toUpperCase() + b.slice(1),
+    }));
+
     // Local mirror so the label tracks the drag smoothly; we persist on release
-    // (onchange) rather than on every input tick to avoid a disk write per pixel.
+    // (Range's oncommit) rather than on every input tick to avoid a disk write per pixel.
     let lossyQuality = $state(settings.preferences.thumbnailLossyQuality);
 
     let isRebuilding = $state(false);
@@ -48,175 +49,117 @@
     }
 </script>
 
+{#snippet row(label: string, hint: string)}
+    <div class="flex flex-col gap-0.5">
+        <Label class="text-sm text-neutral-200">{label}</Label>
+        <p class="text-xs text-neutral-500">{hint}</p>
+    </div>
+{/snippet}
+
 <div class="flex flex-col gap-6">
     <!-- Animate GIFs in grid -->
     <div class="flex items-center justify-between gap-8">
-        <div class="flex flex-col gap-0.5">
-            <Label class="text-sm text-neutral-200">Animate GIFs in grid</Label>
-            <p class="text-xs text-neutral-500">
-                Play animated files in the grid instead of a static thumbnail.
-            </p>
-        </div>
-        <button
-            type="button"
-            role="switch"
-            aria-label="Animate GIFs in grid"
-            aria-checked={settings.preferences.animateGifsInGrid}
-            onclick={toggleGifs}
-            class="relative inline-flex h-6 w-11 items-center rounded-full transition-colors
-                   {settings.preferences.animateGifsInGrid ? 'bg-blue-600' : 'bg-neutral-700'}"
-        >
-            <span
-                class="inline-block h-4 w-4 transform rounded-full bg-white transition-transform
-                       {settings.preferences.animateGifsInGrid ? 'translate-x-6' : 'translate-x-1'}"
-            ></span>
-        </button>
+        {@render row(
+            "Animate GIFs in grid",
+            "Play animated files in the grid instead of a static thumbnail.",
+        )}
+        <Switch
+            label="Animate GIFs in grid"
+            checked={settings.preferences.animateGifsInGrid}
+            onchange={(v) => settings.set("animateGifsInGrid", v)}
+        />
     </div>
 
     <!-- Ordinal badges -->
     <div class="flex items-center justify-between gap-8">
-        <div class="flex flex-col gap-0.5">
-            <Label class="text-sm text-neutral-200">Number items in manual order</Label>
-            <p class="text-xs text-neutral-500">
-                Show each item's place (1, 2, 3…) when a view is sorted manually.
-            </p>
-        </div>
-        <button
-            type="button"
-            role="switch"
-            aria-label="Number items in manual order"
-            aria-checked={settings.preferences.showOrdinals}
-            onclick={toggleOrdinals}
-            class="relative inline-flex h-6 w-11 items-center rounded-full transition-colors
-                   {settings.preferences.showOrdinals ? 'bg-blue-600' : 'bg-neutral-700'}"
-        >
-            <span
-                class="inline-block h-4 w-4 transform rounded-full bg-white transition-transform
-                       {settings.preferences.showOrdinals ? 'translate-x-6' : 'translate-x-1'}"
-            ></span>
-        </button>
+        {@render row(
+            "Number items in manual order",
+            "Show each item's place (1, 2, 3…) when a view is sorted manually.",
+        )}
+        <Switch
+            label="Number items in manual order"
+            checked={settings.preferences.showOrdinals}
+            onchange={(v) => settings.set("showOrdinals", v)}
+        />
     </div>
 
     <!-- Viewer background -->
-    <div class="flex flex-col gap-2">
-        <div class="flex flex-col gap-0.5">
-            <Label class="text-sm text-neutral-200">Viewer background</Label>
-            <p class="text-xs text-neutral-500">
-                The backdrop the viewer opens with. Press B in the viewer to try another
-                for that viewing only.
-            </p>
-        </div>
-        <div class="inline-flex w-fit rounded-md border border-neutral-700 p-0.5">
-            {#each VIEWER_BACKGROUNDS as b}
-                <button
-                    type="button"
-                    aria-pressed={settings.preferences.viewerBackground === b}
-                    onclick={() => settings.set("viewerBackground", b)}
-                    class="rounded px-3 py-1 text-xs font-medium capitalize transition-colors
-                        {settings.preferences.viewerBackground === b
-                        ? 'bg-blue-600 text-white'
-                        : 'text-neutral-400 hover:text-neutral-200'}"
-                >
-                    {b}
-                </button>
-            {/each}
-        </div>
+    <div class="flex items-center justify-between gap-8">
+        {@render row(
+            "Viewer background",
+            "The backdrop the viewer opens with. Press B in the viewer to try another for that viewing only.",
+        )}
+        <Segmented
+            label="Viewer background"
+            value={settings.preferences.viewerBackground}
+            options={BACKGROUNDS}
+            onchange={(v) => settings.set("viewerBackground", v)}
+        />
     </div>
 
     <!-- Next folder in the viewer -->
     <div class="flex items-center justify-between gap-8">
-        <div class="flex flex-col gap-0.5">
-            <Label class="text-sm text-neutral-200">Continue into the next folder</Label>
-            <p class="text-xs text-neutral-500">
-                At a folder's last item, the viewer offers the next folder beside it — the next
-                chapter. Also with →.
-            </p>
-        </div>
-        <button
-            type="button"
-            role="switch"
-            aria-label="Continue into the next folder"
-            aria-checked={settings.preferences.viewerNextFolder}
-            onclick={toggleNextFolder}
-            class="relative inline-flex h-6 w-11 items-center rounded-full transition-colors
-                   {settings.preferences.viewerNextFolder ? 'bg-blue-600' : 'bg-neutral-700'}"
-        >
-            <span
-                class="inline-block h-4 w-4 transform rounded-full bg-white transition-transform
-                       {settings.preferences.viewerNextFolder ? 'translate-x-6' : 'translate-x-1'}"
-            ></span>
-        </button>
+        {@render row(
+            "Continue into the next folder",
+            "At a folder's last item, the viewer offers the next folder beside it — the next chapter. Also with →.",
+        )}
+        <Switch
+            label="Continue into the next folder"
+            checked={settings.preferences.viewerNextFolder}
+            onchange={(v) => settings.set("viewerNextFolder", v)}
+        />
     </div>
 
     <!-- Thumbnail quality -->
-    <div class="flex flex-col gap-2">
-        <div class="flex flex-col gap-0.5">
-            <Label class="text-sm text-neutral-200">Thumbnail quality</Label>
-            <p class="text-xs text-neutral-500">
-                How grid thumbnails are encoded. Applies to newly generated thumbnails —
-                use “Rebuild” to re-encode the current library.
-            </p>
-        </div>
-        <div class="inline-flex w-fit rounded-md border border-neutral-700 p-0.5">
-            {#each QUALITIES as q}
-                <button
-                    type="button"
-                    title={q.hint}
-                    aria-pressed={settings.preferences.thumbnailQuality === q.value}
-                    onclick={() => settings.set("thumbnailQuality", q.value)}
-                    class="rounded px-3 py-1 text-xs font-medium transition-colors
-                        {settings.preferences.thumbnailQuality === q.value
-                        ? 'bg-blue-600 text-white'
-                        : 'text-neutral-400 hover:text-neutral-200'}"
-                >
-                    {q.label}
-                </button>
-            {/each}
-        </div>
+    <div class="flex items-center justify-between gap-8">
+        {@render row(
+            "Thumbnail quality",
+            "How grid thumbnails are encoded. Applies to newly generated thumbnails — use “Rebuild” to re-encode the current library.",
+        )}
+        <Segmented
+            label="Thumbnail quality"
+            value={settings.preferences.thumbnailQuality}
+            options={QUALITIES.map((q) => ({ value: q.value, label: q.label, title: q.hint }))}
+            onchange={(v) => settings.set("thumbnailQuality", v)}
+        />
     </div>
 
     <!-- Lossy quality slider (irrelevant to Lossless mode) -->
     {#if settings.preferences.thumbnailQuality !== "lossless"}
         <div class="flex flex-col gap-2">
             <div class="flex items-center justify-between gap-8">
-                <div class="flex flex-col gap-0.5">
-                    <Label class="text-sm text-neutral-200">Lossy quality</Label>
-                    <p class="text-xs text-neutral-500">
-                        Lower = smaller files, more compression artifacts. Higher = closer to
-                        the original, larger files. Applies to Lossy (and Auto's photo path).
-                    </p>
-                </div>
+                {@render row(
+                    "Lossy quality",
+                    "Lower = smaller files, more compression artifacts. Higher = closer to the original, larger files. Applies to Lossy (and Auto's photo path).",
+                )}
                 <span class="w-8 shrink-0 text-right text-sm tabular-nums text-neutral-300">
                     {lossyQuality}
                 </span>
             </div>
-            <input
-                type="range"
-                min="20"
-                max="100"
-                step="1"
+            <Range
+                label="Lossy quality"
                 bind:value={lossyQuality}
-                onchange={() => settings.set("thumbnailLossyQuality", lossyQuality)}
-                class="w-full accent-blue-600"
+                min={20}
+                max={100}
+                oncommit={(v) => settings.set("thumbnailLossyQuality", v)}
+                class="w-full"
             />
         </div>
     {/if}
 
     <!-- Rebuild thumbnails -->
     <div class="flex items-center justify-between gap-8">
-        <div class="flex flex-col gap-0.5">
-            <Label class="text-sm text-neutral-200">Rebuild thumbnails</Label>
-            <p class="text-xs text-neutral-500">
-                Clear and regenerate every thumbnail in the active library with the
-                current quality.
-            </p>
-        </div>
+        {@render row(
+            "Rebuild thumbnails",
+            "Clear and regenerate every thumbnail in the active library with the current quality.",
+        )}
         <button
             type="button"
             onclick={rebuild}
             disabled={isRebuilding}
-            class="shrink-0 rounded-md bg-neutral-800 px-3 py-1.5 text-xs font-medium text-neutral-100
-                   transition-colors hover:bg-neutral-700 disabled:cursor-not-allowed disabled:opacity-50"
+            class="shrink-0 rounded-md bg-raised-2 px-3 py-1.5 text-xs font-medium text-neutral-100
+                   ring-1 ring-inset ring-line-strong transition-colors hover:bg-neutral-700
+                   disabled:cursor-not-allowed disabled:opacity-50"
         >
             {isRebuilding ? "Rebuilding…" : "Rebuild"}
         </button>

@@ -26,9 +26,18 @@
     import { open } from "@tauri-apps/plugin-dialog";
     import { cubicOut } from "svelte/easing";
     import { tweened } from "svelte/motion";
-    import type { Component } from "svelte";
+    import type { Component, Snippet } from "svelte";
     import { toast } from "svelte-sonner";
-    import { PanelLeft, PanelRight, Settings, Download } from "@lucide/svelte";
+    import {
+        PanelLeft,
+        PanelRight,
+        Settings,
+        Download,
+        ChevronRight,
+        ChevronDown,
+        Tag,
+        X,
+    } from "@lucide/svelte";
 
     import {
         assetLibrary,
@@ -63,10 +72,12 @@
     import * as Dialog from "$components/ui/dialog";
     import * as Tabs from "$components/ui/tabs";
     import { SETTINGS_SECTIONS, DEFAULT_SECTION_ID } from "./settings-sections";
+    import AppearanceSection from "../components/settings/AppearanceSection.svelte";
     import DisplaySection from "../components/settings/DisplaySection.svelte";
     import ExtensionSection from "../components/settings/ExtensionSection.svelte";
     import AboutSection from "../components/settings/AboutSection.svelte";
-    import { libraryManager } from "./settings.svelte";
+    import { libraryManager, settings } from "./settings.svelte";
+    import { applyAppearance } from "$lib/appearance";
 
     interface LibraryInfo {
         db_path: string;
@@ -107,10 +118,17 @@
     // Every id in SETTINGS_SECTIONS must appear here — a missing entry renders an
     // empty panel, which is exactly how the old Library and About tabs looked.
     const sectionComponents: Record<string, Component> = {
+        appearance: AppearanceSection,
         display: DisplaySection,
         extension: ExtensionSection,
         about: AboutSection,
     };
+
+    // Paint Settings › Appearance onto <html>. Re-runs on any appearance change,
+    // live while a slider is still being dragged.
+    $effect(() => {
+        applyAppearance(settings.preferences);
+    });
 
     // Import progress state
     let isImporting = $state(false);
@@ -127,6 +145,10 @@
 
     // The Tag Manager is a full-screen view, opened over the library.
     let tagManagerOpen = $state(false);
+
+    // Which sidebar sections are collapsed. Not persisted: every section
+    // opens again on the next launch.
+    let closedSections = $state<Record<string, boolean>>({});
 
     // Controlled rather than left to the component, so closing is observable.
     let settingsOpen = $state(false);
@@ -607,8 +629,8 @@
              Three modes (see layout.svelte.ts): expanded, rail, hidden. The
              toggle button only does shown/hidden; the rail is reached by
              dragging the resize handle past the snap threshold. -->
-        <aside class="pane sidebar border-r border-neutral-800 bg-neutral-950">
-            <header class="pane-header">
+        <aside class="pane sidebar border-r border-line bg-pane">
+            <header class="pane-header border-b border-line">
                 <!-- Drag surface. Full-bleed and BEHIND the controls, because
                      Tauri matches the attribute on the exact element the pointer
                      hit — see the note in layout.css. -->
@@ -623,8 +645,8 @@
                     title="Hide sidebar (Ctrl+B)"
                     aria-label="Hide sidebar"
                     onclick={() => layout.toggleSidebar()}
-                    class="grid h-7 w-7 shrink-0 place-items-center rounded text-neutral-500
-                           transition-colors hover:bg-neutral-800 hover:text-neutral-200"
+                    class="grid h-7 w-7 shrink-0 place-items-center rounded-md text-neutral-500
+                           transition-colors hover:bg-wash hover:text-neutral-200"
                 >
                     <PanelLeft class="h-4 w-4" />
                 </button>
@@ -643,85 +665,121 @@
                      The rule is consistent even though the picture isn't: fixed
                      controls sit in the top group, and the ONE variable-length
                      list takes the space that's left. In the rail the tree is a
-                     button; here it's a panel.
-
-                     Auto-scrolls while a drag hovers its edges: the folder you
-                     want is often below the fold, and there's no way to scroll a
-                     sidebar with a pointer already holding something. -->
-                <nav
-                    class="flex min-h-0 flex-1 flex-col overflow-y-auto pb-2 [scrollbar-width:thin]"
-                    {...{ [DRAG_SCROLL_ATTR]: "" }}
-                >
+                     button; here it's a panel. -->
+                <!-- The library roots never scroll away: All assets, Uncategorized
+                     and Trash stay put however long the lists below get. -->
+                <div class="shrink-0 pt-2">
                     <SystemViews variant="expanded" />
+                </div>
 
-                    <div class="mx-3 my-2 h-px shrink-0 bg-neutral-800"></div>
+                <!-- Each section owns its scrolling. The fixed-size lists (pins,
+                     smart folders, saved filters) are capped at a share of the
+                     height and scroll inside it; Folders, the one list that can
+                     run to hundreds, always gets at least 35% and takes whatever
+                     else is left. So a long tree never
+                     pushes the other sections out of reach, and a long pin list
+                     never squeezes the tree to nothing.
 
-                    <p
-                        class="px-3 pb-1 text-[10px] font-semibold uppercase tracking-wider
-                               text-neutral-600"
+                     Every scroll area carries DRAG_SCROLL_ATTR: a drag holding
+                     assets auto-scrolls whichever section it hovers near the edge
+                     of, since there is no other way to scroll with the pointer
+                     already busy. The outer column keeps `overflow-y-auto` only
+                     as a fallback for a window too short for the minimums. -->
+                {#snippet section(id: string, title: string, body: Snippet, size: "fit" | "fill", cap = "")}
+                    {@const open = !closedSections[id]}
+                    <section
+                        class="mt-3 flex flex-col
+                               {!open
+                            ? 'flex-none'
+                            : size === 'fill'
+                              ? 'min-h-[max(7.5rem,35%)] flex-[1_1_0]'
+                              : `min-h-[calc(26px+var(--nv-row-h))] flex-[0_1_auto] ${cap}`}"
                     >
-                        Pinned
-                    </p>
+                        <button
+                            type="button"
+                            aria-expanded={open}
+                            onclick={() => (closedSections[id] = open)}
+                            class="group/head flex h-[26px] shrink-0 items-center gap-1 px-4 text-left
+                                   text-[11.5px] font-semibold text-neutral-500 transition-colors
+                                   hover:text-neutral-300"
+                        >
+                            {title}
+                            <!-- Shown on hover, and kept while closed so a closed
+                                 section never reads as an empty one. -->
+                            <ChevronDown
+                                class="h-3 w-3 transition
+                                       {open
+                                    ? 'opacity-0 group-hover/head:opacity-100'
+                                    : '-rotate-90 opacity-100'}"
+                            />
+                        </button>
+                        {#if open}
+                            <div
+                                class="nv-scroll-reveal min-h-0 flex-auto overflow-y-auto"
+                                {...{ [DRAG_SCROLL_ATTR]: "" }}
+                            >
+                                {@render body()}
+                            </div>
+                        {/if}
+                    </section>
+                {/snippet}
+
+                {#snippet pinnedBody()}
                     <PinnedFolders variant="expanded" />
-
-                    <div class="mx-3 my-2 h-px shrink-0 bg-neutral-800"></div>
-
-                    <p
-                        class="px-3 pb-1 text-[10px] font-semibold uppercase tracking-wider
-                               text-neutral-600"
-                    >
-                        Smart folders
-                    </p>
+                {/snippet}
+                {#snippet smartBody()}
+                    <div class="px-2"><SmartFolders /></div>
+                {/snippet}
+                {#snippet foldersBody()}
+                    <div class="px-2"><FolderTree /></div>
+                {/snippet}
+                {#snippet tagsBody()}
+                    <!-- Tags stay a door to the manager, not a tag cloud. -->
                     <div class="px-2">
-                        <SmartFolders />
+                        <button
+                            type="button"
+                            onclick={() => (tagManagerOpen = true)}
+                            class="flex h-[var(--nv-row-h)] w-full items-center gap-2.5 rounded-md
+                                   px-2 text-left text-[13px] text-neutral-400 transition-colors
+                                   hover:bg-wash hover:text-neutral-100"
+                        >
+                            <Tag class="h-4 w-4 shrink-0 text-neutral-500" strokeWidth={1.5} />
+                            <span class="truncate">Manage tags…</span>
+                        </button>
                     </div>
+                {/snippet}
+                {#snippet savedBody()}
+                    <div class="px-2"><SavedFilters /></div>
+                {/snippet}
 
-                    <div class="mx-3 my-2 h-px shrink-0 bg-neutral-800"></div>
-
-                    <p
-                        class="px-3 pb-1 text-[10px] font-semibold uppercase tracking-wider
-                               text-neutral-600"
-                    >
-                        Folders
-                    </p>
-                    <div class="px-2">
-                        <FolderTree />
-                    </div>
-
-                    <button
-                        type="button"
-                        onclick={() => (tagManagerOpen = true)}
-                        class="mx-2 mt-2 rounded px-2 py-1.5 text-left text-sm text-neutral-400
-                               transition-colors hover:bg-neutral-800 hover:text-neutral-200"
-                    >
-                        Manage tags…
-                    </button>
-
-                    <div class="mt-2 px-2">
-                        <SavedFilters />
-                    </div>
+                <nav class="flex min-h-0 flex-1 flex-col overflow-y-auto pb-3">
+                    {@render section("pinned", "Pinned", pinnedBody, "fit", "max-h-[24%]")}
+                    {@render section("smart", "Smart folders", smartBody, "fit", "max-h-[24%]")}
+                    {@render section("folders", "Folders", foldersBody, "fill")}
+                    {@render section("tags", "Tags", tagsBody, "fit")}
+                    {@render section("saved", "Saved filters", savedBody, "fit", "max-h-[18%]")}
                 </nav>
             {/if}
 
             <!-- Footer: settings live at the bottom of the sidebar, not in a
                  header — it's a destination you visit rarely, not a control. -->
-            <div class="shrink-0 border-t border-neutral-800 p-2">
+            <div class="shrink-0 border-t border-line p-2">
                 <Dialog.Root bind:open={settingsOpen}>
                     <Dialog.Trigger
                         type="button"
-                        class="flex w-full items-center gap-2 rounded px-2 py-1.5 text-sm
-                               text-neutral-400 transition-colors hover:bg-neutral-800
-                               hover:text-neutral-200 {layout.sidebarMode === 'rail'
+                        class="flex h-[var(--nv-row-h)] w-full items-center gap-2.5 rounded-md px-2
+                               text-[13px] text-neutral-400 transition-colors hover:bg-wash
+                               hover:text-neutral-100 {layout.sidebarMode === 'rail'
                             ? 'justify-center'
                             : ''}"
                         aria-label="Settings"
                     >
-                        <Settings class="h-4 w-4 shrink-0" />
+                        <Settings class="h-4 w-4 shrink-0 text-neutral-500" strokeWidth={1.5} />
                         {#if layout.sidebarMode === "expanded"}<span>Settings</span>{/if}
                     </Dialog.Trigger>
                     <Dialog.Content
                         class="sm:max-w-[calc(100%-10rem)] flex gap-0 p-0 overflow-hidden h-[85vh]
-                               bg-neutral-950 border border-neutral-800 rounded-xl shadow-2xl flex-col"
+                               bg-pane border border-line-strong rounded-xl shadow-2xl flex-col"
                     >
                         <Dialog.Title class="sr-only">Settings</Dialog.Title>
 
@@ -731,11 +789,11 @@
                             class="flex flex-1 overflow-hidden h-full w-full"
                         >
                             <Tabs.List
-                                class="w-52 shrink-0 h-full rounded-none border-r border-neutral-800
-                                       bg-neutral-900/60 justify-start pt-4 gap-0.5 px-2"
+                                class="w-52 shrink-0 h-full rounded-none border-r border-line
+                                       bg-canvas justify-start pt-4 gap-0.5 px-2"
                             >
                                 <p
-                                    class="px-3 pb-3 w-full text-[11px] font-semibold uppercase tracking-widest text-neutral-500"
+                                    class="px-3 pb-3 w-full text-[11.5px] font-semibold text-neutral-500"
                                 >
                                     Settings
                                 </p>
@@ -743,7 +801,7 @@
                                 {#each SETTINGS_SECTIONS as section (section.id)}
                                     {#if section.dividerAbove}
                                         <div
-                                            class="my-2 mx-1 h-px w-full bg-neutral-800"
+                                            class="my-2 mx-1 h-px w-full bg-line"
                                             aria-hidden="true"
                                         ></div>
                                     {/if}
@@ -751,8 +809,8 @@
                                     <Tabs.Trigger
                                         value={section.id}
                                         class="gap-2.5 px-3 text-neutral-400
-                                               hover:bg-neutral-800/60 hover:text-neutral-200
-                                               data-[state=active]:bg-neutral-800
+                                               hover:bg-wash hover:text-neutral-200
+                                               data-[state=active]:bg-brand-soft
                                                data-[state=active]:text-neutral-100"
                                     >
                                         {section.label}
@@ -768,7 +826,7 @@
                                         value={section.id}
                                         class="flex flex-col flex-1 overflow-hidden mt-0"
                                     >
-                                        <div class="px-6 py-4 border-b border-neutral-800 shrink-0">
+                                        <div class="px-6 py-4 border-b border-line shrink-0">
                                             <h2 class="text-sm font-semibold text-neutral-100">
                                                 {section.label}
                                             </h2>
@@ -797,8 +855,8 @@
         <!-- ── GRID ─────────────────────────────────────────────────────────
              One header row: place + count · drag region · search · view controls.
              Everything below it is assets. -->
-        <main class="pane grid-pane bg-neutral-950">
-            <header class="pane-header border-b border-neutral-800">
+        <main class="pane grid-pane bg-canvas">
+            <header class="pane-header border-b border-line">
                 <div class="drag-region" data-tauri-drag-region></div>
 
                 {#if layout.sidebarHidden}
@@ -810,8 +868,8 @@
                         title="Show sidebar (Ctrl+B)"
                         aria-label="Show sidebar"
                         onclick={() => layout.toggleSidebar()}
-                        class="grid h-7 w-7 shrink-0 place-items-center rounded text-neutral-500
-                               transition-colors hover:bg-neutral-800 hover:text-neutral-200"
+                        class="grid h-7 w-7 shrink-0 place-items-center rounded-md text-neutral-500
+                               transition-colors hover:bg-wash hover:text-neutral-200"
                     >
                         <PanelLeft class="h-4 w-4" />
                     </button>
@@ -827,40 +885,63 @@
                     <!-- Breadcrumb: ancestors elide first, the open folder last. -->
                     <nav
                         aria-label="Folder path"
-                        class="flex min-w-0 items-center px-1 text-sm font-medium"
+                        class="flex min-w-0 items-center pl-1 text-[13.5px] font-semibold"
                     >
                         {#each folderTrail.slice(0, -1) as crumb (crumb.id)}
                             <button
                                 type="button"
-                                class="min-w-0 truncate rounded px-0.5 text-neutral-500
-                                       hover:bg-neutral-800 hover:text-neutral-200"
+                                class="min-w-0 truncate rounded-md px-1 py-0.5 font-medium text-neutral-500
+                                       transition-colors hover:bg-wash hover:text-neutral-200"
                                 onclick={() => openFolder(crumb.id)}
                             >
                                 {crumb.name}
                             </button>
-                            <span class="shrink-0 px-0.5 text-neutral-600" aria-hidden="true">›</span>
+                            <ChevronRight class="h-3.5 w-3.5 shrink-0 text-neutral-600" aria-hidden="true" />
                         {/each}
-                        <span class="shrink-0 truncate text-neutral-200" data-tauri-drag-region>
+                        <span class="shrink-0 truncate px-1 text-neutral-100" data-tauri-drag-region>
                             {folderTrail[folderTrail.length - 1].name}
                         </span>
                     </nav>
                 {:else}
                     <span
-                        class="min-w-0 truncate px-1 text-sm font-medium text-neutral-200"
+                        class="min-w-0 truncate pl-2 pr-1 text-[13.5px] font-semibold text-neutral-100"
                         data-tauri-drag-region
                     >
                         {scopeLabel}
                     </span>
                 {/if}
-                <!-- Say "(filtered)" when narrowed, so a small view never reads as
+                <!-- Say "filtered" when narrowed, so a small view never reads as
                      a small library. -->
-                <span class="shrink-0 text-xs text-neutral-500" data-tauri-drag-region>
-                    {assetLibrary.displayed.length}
-                    {assetLibrary.hasFilters || assetLibrary.nameFiltering ? "filtered" : "assets"}
-                    {#if selection.assetCount > 0}
-                        <span class="text-blue-400">· {selection.assetCount} selected</span>
-                    {/if}
+                <span
+                    class="ml-1 shrink-0 rounded-full bg-raised px-2 py-0.5 text-[11px] tabular-nums
+                           text-neutral-400"
+                    data-tauri-drag-region
+                    title={assetLibrary.hasFilters || assetLibrary.nameFiltering
+                        ? "Assets matching the current search and filters"
+                        : "Assets in this view"}
+                >
+                    {assetLibrary.displayed.length.toLocaleString()}{assetLibrary.hasFilters ||
+                    assetLibrary.nameFiltering
+                        ? " filtered"
+                        : ""}
                 </span>
+                {#if selection.assetCount > 0}
+                    <span
+                        class="ml-1 inline-flex shrink-0 items-center gap-1 rounded-full bg-brand-soft py-0.5
+                               pl-2 pr-0.5 text-[11px] font-medium tabular-nums text-brand-text"
+                    >
+                        {selection.assetCount.toLocaleString()} selected
+                        <button
+                            type="button"
+                            onclick={() => selection.clear()}
+                            title="Clear selection (Esc)"
+                            aria-label="Clear selection"
+                            class="grid h-4 w-4 place-items-center rounded-full hover:bg-brand-soft"
+                        >
+                            <X class="h-3 w-3" />
+                        </button>
+                    </span>
+                {/if}
 
                 <div class="h-full flex-1" data-tauri-drag-region></div>
 
@@ -874,20 +955,26 @@
                      and the toolbar was simply cut off. -->
                 <div class="w-64 min-w-16 shrink"><SearchBar /></div>
 
+                <div class="mx-1.5 h-4 w-px shrink-0 bg-line-strong" aria-hidden="true"></div>
+
+                <GridToolbar />
+
+                <div class="mx-1.5 h-4 w-px shrink-0 bg-line-strong" aria-hidden="true"></div>
+
+                <!-- The one labelled button in the row: importing is how a library
+                     starts, and an unlabelled arrow among a dozen icons hid it. -->
                 <button
                     type="button"
                     onclick={handleImport}
                     disabled={isImporting || noLibraryConnected}
                     title="Import a folder — or paste a link to add from the web"
-                    aria-label="Import"
-                    class="grid h-7 w-7 shrink-0 place-items-center rounded text-neutral-500
-                           transition-colors hover:bg-neutral-800 hover:text-neutral-200
-                           disabled:opacity-40"
+                    class="flex h-7 shrink-0 items-center gap-1.5 rounded-md bg-raised-2 px-2.5 text-xs
+                           font-medium text-neutral-100 ring-1 ring-inset ring-line-strong
+                           transition-colors hover:bg-neutral-700 disabled:opacity-40"
                 >
-                    <Download class="h-4 w-4" />
+                    <Download class="h-3.5 w-3.5" />
+                    Import
                 </button>
-
-                <GridToolbar />
 
                 {#if layout.inspectorHidden}
                     <button
@@ -895,8 +982,8 @@
                         title="Show inspector (Ctrl+I)"
                         aria-label="Show inspector"
                         onclick={() => layout.toggleInspector()}
-                        class="grid h-7 w-7 shrink-0 place-items-center rounded text-neutral-500
-                               transition-colors hover:bg-neutral-800 hover:text-neutral-200"
+                        class="grid h-7 w-7 shrink-0 place-items-center rounded-md text-neutral-500
+                               transition-colors hover:bg-wash hover:text-neutral-200"
                     >
                         <PanelRight class="h-4 w-4" />
                     </button>
@@ -929,11 +1016,11 @@
         <!-- ── INSPECTOR ────────────────────────────────────────────────────
              Always mounted, width-collapsed when hidden: remounting would reset
              its scroll and drop in-flight field writes. -->
-        <aside class="pane inspector border-l border-neutral-800 bg-neutral-950">
-            <header class="pane-header border-b border-neutral-800">
+        <aside class="pane inspector border-l border-line bg-pane">
+            <header class="pane-header border-b border-line">
                 <div class="drag-region" data-tauri-drag-region></div>
 
-                <span class="truncate text-xs text-neutral-400" data-tauri-drag-region>
+                <span class="truncate pl-1.5 text-[12.5px] font-semibold text-neutral-200" data-tauri-drag-region>
                     {inspectorLabel}
                 </span>
                 <div class="h-full flex-1" data-tauri-drag-region></div>
@@ -942,14 +1029,14 @@
                     title="Hide inspector (Ctrl+I)"
                     aria-label="Hide inspector"
                     onclick={() => layout.toggleInspector()}
-                    class="grid h-7 w-7 shrink-0 place-items-center rounded text-neutral-500
-                           transition-colors hover:bg-neutral-800 hover:text-neutral-200"
+                    class="grid h-7 w-7 shrink-0 place-items-center rounded-md text-neutral-500
+                           transition-colors hover:bg-wash hover:text-neutral-200"
                 >
                     <PanelRight class="h-4 w-4" />
                 </button>
             </header>
 
-            <div class="flex-1 overflow-y-auto [scrollbar-width:thin]">
+            <div class="flex-1 overflow-y-auto">
                 <Inspector />
             </div>
 
@@ -992,12 +1079,12 @@
          whatever the last folder import left behind. -->
     {#if isImporting && !urlImportUrl}
         <div
-            class="fixed bottom-4 right-4 z-40 w-72 space-y-3 rounded-lg border border-neutral-700
-                   bg-neutral-900/95 p-4 shadow-xl"
+            class="fixed bottom-4 right-4 z-40 w-72 space-y-3 rounded-xl border border-line-strong
+                   bg-neutral-900/95 p-4 shadow-xl backdrop-blur-lg"
         >
             <div class="flex items-start justify-between gap-3">
                 <div class="flex min-w-0 flex-col">
-                    <span class="text-[10px] font-bold uppercase tracking-wider text-blue-400">
+                    <span class="text-[11px] font-semibold text-brand-text">
                         {currentStage ?? "Starting"}
                     </span>
                     <span class="truncate text-xs text-neutral-300">{statusMessage}</span>
@@ -1010,8 +1097,8 @@
                 </div>
             </div>
 
-            <div class="h-1.5 w-full overflow-hidden rounded-full bg-neutral-800">
-                <div class="h-full bg-blue-500" style="width: {$smoothPercentage}%"></div>
+            <div class="h-1.5 w-full overflow-hidden rounded-full bg-raised-2">
+                <div class="h-full bg-brand" style="width: {$smoothPercentage}%"></div>
             </div>
 
             <p class="text-[10px] italic text-neutral-500">Don't close the app while importing.</p>
@@ -1020,17 +1107,17 @@
         <!-- Background thumbnail generation (Rebuild / large runs). -->
         <div
             class="fixed bottom-4 right-4 z-40 flex items-center gap-3 rounded-lg border
-                   border-neutral-700 bg-neutral-900/95 px-4 py-2.5 text-neutral-200 shadow-xl"
+                   border-line-strong bg-neutral-900/95 px-4 py-2.5 text-neutral-200 shadow-xl backdrop-blur-lg"
         >
-            <span class="h-2 w-2 shrink-0 animate-pulse rounded-full bg-blue-500"></span>
+            <span class="h-2 w-2 shrink-0 animate-pulse rounded-full bg-brand"></span>
             <div class="flex flex-col gap-1">
                 <span class="text-xs">
                     Generating thumbnails… {assetLibrary.thumbProgress.current}/{assetLibrary
                         .thumbProgress.total}
                 </span>
-                <div class="h-1 w-40 overflow-hidden rounded-full bg-neutral-800">
+                <div class="h-1 w-40 overflow-hidden rounded-full bg-raised-2">
                     <div
-                        class="h-full bg-blue-500 transition-all"
+                        class="h-full bg-brand transition-all"
                         style="width: {(assetLibrary.thumbProgress.current /
                             assetLibrary.thumbProgress.total) *
                             100}%"

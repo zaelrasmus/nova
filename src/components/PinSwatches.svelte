@@ -22,8 +22,9 @@
 
     const swatchClass =
         "h-4 w-4 rounded-full border transition-transform hover:scale-110 " +
-        "aria-pressed:ring-2 aria-pressed:ring-neutral-300 aria-pressed:ring-offset-1 " +
-        "aria-pressed:ring-offset-neutral-900";
+        // An outline, not a ring: its offset gap is transparent, so the
+        // swatches read the same on a menu and on the inspector's pane.
+        "aria-pressed:outline-2 aria-pressed:outline-offset-2 aria-pressed:outline-neutral-200";
 
     function pick(color: PinColor | null) {
         void assetLibrary.setPinColor(kind, id, color);
@@ -31,7 +32,7 @@
 </script>
 
 {#if pin}
-    <div class="flex flex-wrap items-center gap-1">
+    <div class="flex flex-wrap items-center gap-1.5">
         {#each PIN_COLORS as color (color)}
             <button
                 type="button"

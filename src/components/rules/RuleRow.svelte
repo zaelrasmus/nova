@@ -252,8 +252,8 @@
     };
 
     const selectClass =
-        "rounded border border-neutral-700 bg-neutral-950 px-1.5 py-1 text-xs text-neutral-200 " +
-        "focus:border-neutral-500 focus:outline-none";
+        "rounded-md border border-line bg-raised px-1.5 py-1 text-xs text-neutral-200 " +
+        "focus:border-brand-line focus:outline-none";
     const inputClass = `${selectClass} min-w-0 flex-1`;
 </script>
 
@@ -390,8 +390,8 @@
                         } as Condition)}
                     class="rounded px-2 py-0.5 text-xs capitalize transition-colors
                            {on
-                        ? 'bg-blue-600 text-white'
-                        : 'bg-neutral-800 text-neutral-400 hover:bg-neutral-700'}"
+                        ? 'bg-brand-soft text-brand-text ring-1 ring-inset ring-brand-line'
+                        : 'bg-raised-2 text-neutral-400 hover:bg-wash-strong hover:text-neutral-200'}"
                 >
                     {label}
                 </button>
@@ -434,7 +434,7 @@
              has always supported both lists; an editor that could only write
              `include` made "everything except drafts" — the most common tag rule
              there is — impossible to express here. -->
-        <div class="flex max-h-16 min-w-0 flex-1 flex-wrap gap-1 overflow-y-auto [scrollbar-width:thin]">
+        <div class="flex max-h-16 min-w-0 flex-1 flex-wrap gap-1 overflow-y-auto">
             {#if assetLibrary.tags.length === 0}
                 <span class="text-xs text-neutral-600">No tags in this library yet.</span>
             {/if}
@@ -465,10 +465,10 @@
                         } as Condition)}
                     class="rounded px-1.5 py-0.5 text-xs transition-colors
                            {included
-                        ? 'bg-blue-600 text-white'
+                        ? 'bg-brand-soft text-brand-text ring-1 ring-inset ring-brand-line'
                         : excluded
                           ? 'bg-red-700 text-white line-through'
-                          : 'bg-neutral-800 text-neutral-400 hover:bg-neutral-700'}"
+                          : 'bg-raised-2 text-neutral-400 hover:bg-wash-strong hover:text-neutral-200'}"
                 >
                     {tag.name}
                 </button>
@@ -479,7 +479,7 @@
              read as broken the first time a click lands on a state the user
              didn't expect — which is exactly how it was reported. -->
         <span class="shrink-0 whitespace-nowrap text-[10px] leading-tight text-neutral-600">
-            click:<br /><span class="text-blue-400">include</span> ·
+            click:<br /><span class="text-brand-text">include</span> ·
             <span class="text-red-400">exclude</span>
         </span>
 
@@ -489,7 +489,7 @@
                 checked={condition.untagged}
                 onchange={(e) =>
                     onchange({ ...condition, untagged: e.currentTarget.checked } as Condition)}
-                class="h-3 w-3 accent-blue-600"
+                class="h-3 w-3 accent-brand"
             />
             untagged
         </label>
@@ -513,8 +513,7 @@
         </select>
 
         <div
-            class="max-h-24 min-w-0 flex-1 overflow-y-auto rounded border border-neutral-800
-                   [scrollbar-width:thin]"
+            class="max-h-24 min-w-0 flex-1 overflow-y-auto rounded-md border border-line"
         >
             {#if folderRows.length === 0}
                 <p class="px-2 py-1 text-xs text-neutral-600">No folders in this library yet.</p>
@@ -533,14 +532,14 @@
                                 : [...condition.ids, folder.id],
                         } as Condition)}
                     class="flex w-full items-center gap-2 py-0.5 pr-2 text-left text-xs
-                           text-neutral-300 transition-colors hover:bg-neutral-800"
+                           text-neutral-300 transition-colors hover:bg-wash"
                     style="padding-left: {8 + depth * 12}px"
                 >
                     <span
                         aria-hidden="true"
                         class="grid h-3.5 w-3.5 shrink-0 place-items-center rounded-sm border
                                text-[9px] leading-none text-white
-                               {on ? 'border-blue-500 bg-blue-600' : 'border-neutral-600'}"
+                               {on ? 'border-brand bg-brand' : 'border-neutral-600'}"
                     >
                         {on ? "✓" : ""}
                     </span>
@@ -561,7 +560,7 @@
                         ...condition,
                         include_subfolders: e.currentTarget.checked,
                     } as Condition)}
-                class="h-3 w-3 accent-blue-600"
+                class="h-3 w-3 accent-brand"
             />
             + subfolders
         </label>
@@ -575,7 +574,7 @@
         title="Remove condition"
         aria-label="Remove condition"
         class="grid h-6 w-6 shrink-0 place-items-center rounded text-neutral-500
-               transition-colors hover:bg-neutral-800 hover:text-neutral-200"
+               transition-colors hover:bg-wash hover:text-neutral-200"
     >
         <Minus class="h-3.5 w-3.5" />
     </button>

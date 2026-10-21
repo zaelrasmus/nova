@@ -11,6 +11,7 @@
 -->
 <script lang="ts">
     import { toast } from "svelte-sonner";
+    import { Palette, Pencil, Plus, Star, Trash2, X } from "@lucide/svelte";
     import { assetLibrary, type Tag, type TagGroup } from "$lib/assets.svelte";
 
     interface Props {
@@ -148,31 +149,32 @@
     const swatch = (t: Tag) => t.color ?? "#9ca3af";
 
     const rowBtn =
-        "rounded px-2 py-1 text-left text-sm transition-colors flex items-center gap-2";
+        "flex h-[var(--nv-row-h)] items-center gap-2 rounded-md px-2 text-left text-sm transition-colors";
 </script>
 
-<div class="fixed inset-0 z-50 flex flex-col bg-neutral-950 text-neutral-200">
+<div class="fixed inset-0 z-50 flex flex-col bg-canvas text-neutral-200">
     <!-- Header -->
-    <div class="flex items-center justify-between border-b border-neutral-800 px-4 py-2.5">
+    <div class="flex items-center justify-between border-b border-line bg-pane px-4 py-2.5">
         <h1 class="text-sm font-semibold">Tags</h1>
         <button
             type="button"
             onclick={onClose}
-            class="rounded px-2 py-1 text-xs text-neutral-400 hover:bg-neutral-800 hover:text-neutral-100"
+            class="flex items-center gap-1 rounded-md px-2 py-1 text-xs text-neutral-400 transition-colors
+                   hover:bg-wash hover:text-neutral-100"
         >
-            Close ✕
+            Close <X class="h-3.5 w-3.5" />
         </button>
     </div>
 
     <div class="flex min-h-0 flex-1">
         <!-- Sidebar -->
-        <div class="flex w-56 shrink-0 flex-col gap-0.5 overflow-y-auto border-r border-neutral-800 p-2">
+        <div class="flex w-56 shrink-0 flex-col gap-0.5 overflow-y-auto border-r border-line bg-pane p-2">
             <button
                 type="button"
                 onclick={() => (view = { kind: "all" })}
                 class="{rowBtn} {view.kind === 'all'
-                    ? 'bg-neutral-800 text-neutral-100'
-                    : 'text-neutral-300 hover:bg-neutral-800/60'}"
+                    ? 'bg-brand-soft text-neutral-100'
+                    : 'text-neutral-300 hover:bg-wash'}"
             >
                 <span class="flex-1">All</span>
                 <span class="text-xs text-neutral-500">{counts.all}</span>
@@ -181,8 +183,8 @@
                 type="button"
                 onclick={() => (view = { kind: "uncategorized" })}
                 class="{rowBtn} {view.kind === 'uncategorized'
-                    ? 'bg-neutral-800 text-neutral-100'
-                    : 'text-neutral-300 hover:bg-neutral-800/60'}"
+                    ? 'bg-brand-soft text-neutral-100'
+                    : 'text-neutral-300 hover:bg-wash'}"
             >
                 <span class="flex-1">Ungrouped</span>
                 <span class="text-xs text-neutral-500">{counts.uncategorized}</span>
@@ -191,23 +193,28 @@
                 type="button"
                 onclick={() => (view = { kind: "starred" })}
                 class="{rowBtn} {view.kind === 'starred'
-                    ? 'bg-neutral-800 text-neutral-100'
-                    : 'text-neutral-300 hover:bg-neutral-800/60'}"
+                    ? 'bg-brand-soft text-neutral-100'
+                    : 'text-neutral-300 hover:bg-wash'}"
             >
-                <span class="flex-1">★ Starred</span>
+                <Star class="h-3.5 w-3.5 shrink-0 text-neutral-500" />
+                <span class="flex-1">Starred</span>
                 <span class="text-xs text-neutral-500">{counts.starred}</span>
             </button>
 
             <div class="mt-3 flex items-center justify-between px-2 pb-1">
-                <span class="text-[11px] font-semibold uppercase tracking-wide text-neutral-500">
+                <span class="text-[11.5px] font-semibold text-neutral-500">
                     Groups ({groups.length})
                 </span>
                 <button
                     type="button"
                     onclick={newGroup}
                     title="New group"
-                    class="text-neutral-500 hover:text-neutral-200">＋</button
+                    aria-label="New group"
+                    class="grid h-5 w-5 place-items-center rounded text-neutral-500 transition-colors
+                           hover:bg-wash hover:text-neutral-200"
                 >
+                    <Plus class="h-3.5 w-3.5" />
+                </button>
             </div>
 
             {#each groups as group (group.id)}
@@ -216,8 +223,8 @@
                         type="button"
                         onclick={() => (view = { kind: "group", id: group.id })}
                         class="{rowBtn} flex-1 {view.kind === 'group' && view.id === group.id
-                            ? 'bg-neutral-800 text-neutral-100'
-                            : 'text-neutral-300 hover:bg-neutral-800/60'}"
+                            ? 'bg-brand-soft text-neutral-100'
+                            : 'text-neutral-300 hover:bg-wash'}"
                     >
                         <span
                             class="h-2.5 w-2.5 shrink-0 rounded-sm"
@@ -231,7 +238,7 @@
                             title="Group color"
                             class="cursor-pointer px-1 text-neutral-500 hover:text-neutral-200"
                         >
-                            🎨
+                            <Palette class="h-3.5 w-3.5" />
                             <input
                                 type="color"
                                 value={group.color ?? "#6b7280"}
@@ -244,14 +251,20 @@
                             type="button"
                             title="Rename group"
                             onclick={() => renameGroup(group)}
-                            class="px-1 text-neutral-500 hover:text-neutral-200">✎</button
+                            aria-label="Rename group"
+                            class="px-1 text-neutral-500 hover:text-neutral-200"
                         >
+                            <Pencil class="h-3.5 w-3.5" />
+                        </button>
                         <button
                             type="button"
                             title="Delete group"
+                            aria-label="Delete group"
                             onclick={() => deleteGroup(group)}
-                            class="px-1 text-neutral-500 hover:text-red-400">🗑</button
+                            class="px-1 text-neutral-500 hover:text-red-400"
                         >
+                            <Trash2 class="h-3.5 w-3.5" />
+                        </button>
                     </div>
                 </div>
             {/each}
@@ -259,7 +272,7 @@
 
         <!-- Main panel -->
         <div class="flex min-w-0 flex-1 flex-col">
-            <div class="flex items-center gap-3 border-b border-neutral-800 px-4 py-2.5">
+            <div class="flex items-center gap-3 border-b border-line px-4 py-2.5">
                 <h2 class="text-sm font-medium">{title}</h2>
                 <span class="text-xs text-neutral-500">({visible.length})</span>
                 <div class="ml-auto flex items-center gap-2">
@@ -271,8 +284,8 @@
                             ? `New tag in ${title}…`
                             : "New tag…"}
                         spellcheck="false"
-                        class="w-48 rounded border border-neutral-700 bg-neutral-900 px-2 py-1 text-xs
-                               text-neutral-200 placeholder:text-neutral-600 focus:border-neutral-500
+                        class="w-48 rounded-md border border-line bg-raised px-2 py-1 text-xs
+                               text-neutral-200 placeholder:text-neutral-600 focus:border-brand-line
                                focus:outline-none"
                     />
                 </div>
@@ -284,17 +297,19 @@
                 {:else}
                     {#each visible as tag (tag.id)}
                         <div
-                            class="group flex items-center gap-2 rounded px-2 py-1.5 hover:bg-neutral-900"
+                            class="group flex items-center gap-2 rounded-md px-2 py-1.5 hover:bg-wash"
                         >
                             <button
                                 type="button"
                                 onclick={() => assetLibrary.setTagStarred(tag.id, !tag.is_starred)}
                                 title={tag.is_starred ? "Unstar" : "Star"}
+                                aria-label={tag.is_starred ? "Unstar" : "Star"}
+                                aria-pressed={tag.is_starred}
                                 class="shrink-0 {tag.is_starred
                                     ? 'text-amber-400'
                                     : 'text-neutral-600 hover:text-neutral-400'}"
                             >
-                                {tag.is_starred ? "★" : "☆"}
+                                <Star class="h-3.5 w-3.5 {tag.is_starred ? 'fill-current' : ''}" />
                             </button>
 
                             <label class="shrink-0 cursor-pointer" title="Tag color">
@@ -332,8 +347,8 @@
                                     onchange={(e) =>
                                         assetLibrary.setTagGroup(tag.id, e.currentTarget.value || null)}
                                     title="Move to group"
-                                    class="rounded border border-neutral-700 bg-neutral-900 px-1 py-0.5
-                                           text-xs text-neutral-300"
+                                    class="rounded-md border border-line bg-raised px-1 py-0.5
+                                           text-xs text-neutral-300 focus:border-brand-line focus:outline-none"
                                 >
                                     <option value="">No group</option>
                                     {#each groups as g (g.id)}
@@ -350,8 +365,8 @@
                                         t.value = "";
                                     }}
                                     title="Merge into…"
-                                    class="rounded border border-neutral-700 bg-neutral-900 px-1 py-0.5
-                                           text-xs text-neutral-300"
+                                    class="rounded-md border border-line bg-raised px-1 py-0.5
+                                           text-xs text-neutral-300 focus:border-brand-line focus:outline-none"
                                 >
                                     <option value="">Merge…</option>
                                     {#each tags.filter((t) => t.id !== tag.id) as other (other.id)}
@@ -363,8 +378,11 @@
                                     type="button"
                                     onclick={() => deleteTag(tag)}
                                     title="Delete tag"
-                                    class="px-1 text-neutral-500 hover:text-red-400">🗑</button
+                                    aria-label="Delete tag"
+                                    class="px-1 text-neutral-500 hover:text-red-400"
                                 >
+                                    <Trash2 class="h-3.5 w-3.5" />
+                                </button>
                             </div>
                         </div>
                     {/each}

@@ -1,5 +1,5 @@
 <script lang="ts">
-    import { Plus, FolderPlus } from "@lucide/svelte";
+    import { Plus, FolderPlus, X } from "@lucide/svelte";
     import { MAX_DEPTH, type Condition, type GroupOp, type RuleNode } from "$lib/rules";
     import RuleRow from "./RuleRow.svelte";
     import Self from "./RuleGroup.svelte";
@@ -58,8 +58,8 @@
 </script>
 
 <div
-    class="flex flex-col gap-2 rounded-lg border border-neutral-800 p-2
-           {depth > 0 ? 'bg-neutral-950/60' : ''}"
+    class="flex flex-col gap-2 rounded-lg border border-line p-2
+           {depth > 0 ? 'bg-raised/60' : ''}"
 >
     <div class="flex items-center gap-2">
         <span class="text-xs text-neutral-400">Match</span>
@@ -67,8 +67,8 @@
             value={node.op}
             onchange={(e) => onchange({ ...node, op: e.currentTarget.value as GroupOp })}
             aria-label="Match mode"
-            class="rounded border border-neutral-700 bg-neutral-950 px-1.5 py-1 text-xs
-                   text-neutral-200 focus:border-neutral-500 focus:outline-none"
+            class="rounded-md border border-line bg-raised px-1.5 py-1 text-xs
+                   text-neutral-200 focus:border-brand-line focus:outline-none"
         >
             {#each OPS as o (o.value)}
                 <option value={o.value}>{o.label}</option>
@@ -84,7 +84,7 @@
             title="Add condition"
             aria-label="Add condition"
             class="grid h-6 w-6 place-items-center rounded text-neutral-500 transition-colors
-                   hover:bg-neutral-800 hover:text-neutral-200"
+                   hover:bg-wash hover:text-neutral-200"
         >
             <Plus class="h-3.5 w-3.5" />
         </button>
@@ -95,7 +95,7 @@
                 title="Add nested group"
                 aria-label="Add nested group"
                 class="grid h-6 w-6 place-items-center rounded text-neutral-500 transition-colors
-                       hover:bg-neutral-800 hover:text-neutral-200"
+                       hover:bg-wash hover:text-neutral-200"
             >
                 <FolderPlus class="h-3.5 w-3.5" />
             </button>
@@ -106,10 +106,10 @@
                 onclick={onremove}
                 title="Remove group"
                 aria-label="Remove group"
-                class="rounded px-1.5 text-xs text-neutral-500 transition-colors
-                       hover:bg-neutral-800 hover:text-neutral-200"
+                class="grid h-6 w-6 place-items-center rounded text-neutral-500 transition-colors
+                       hover:bg-wash hover:text-neutral-200"
             >
-                ✕
+                <X class="h-3.5 w-3.5" />
             </button>
         {/if}
     </div>

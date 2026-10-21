@@ -34,7 +34,7 @@
         </span>
     </div>
 
-    <div class="h-px bg-neutral-800" aria-hidden="true"></div>
+    <div class="h-px bg-line" aria-hidden="true"></div>
 
     <p class="max-w-prose text-xs leading-relaxed text-neutral-500">
         A media asset manager built for large libraries. This is a pre-release

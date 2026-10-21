@@ -10,6 +10,7 @@
         type ColorFormat,
         type PaletteSwatch,
     } from "$lib/assets.svelte";
+    import Segmented from "./controls/Segmented.svelte";
 
     interface Props {
         assetId: string;
@@ -84,7 +85,19 @@
 </script>
 
 <div>
-    <span class={legendClass}>Palette</span>
+    <div class="relative">
+        <span class={legendClass}>Palette</span>
+        {#if current}
+            <button
+                type="button"
+                onclick={findSimilar}
+                class="absolute -top-0.5 right-0 rounded-[5px] px-1.5 py-0.5 text-[11.5px] font-medium
+                       text-brand-text transition-colors hover:bg-brand-soft"
+            >
+                Find similar
+            </button>
+        {/if}
+    </div>
 
     {#if loading}
         <p class="text-xs text-neutral-600">Reading colors…</p>
@@ -98,7 +111,7 @@
         <!-- Width tracks coverage, so the bar reads as a composition rather than
              a row of equal chips: eight swatches with no weighting would imply
              the 4% color matters as much as the 40% one. -->
-        <div class="flex h-7 w-full overflow-hidden rounded border border-neutral-700">
+        <div class="flex h-7 w-full gap-0.5 overflow-hidden rounded-lg">
             {#each swatches as swatch, i (i)}
                 <button
                     type="button"
@@ -107,53 +120,40 @@
                     aria-label="Select {rgbToHex(swatch)}"
                     aria-pressed={picked === i}
                     style="background-color: {rgbToHex(swatch)}; flex: {swatch.ratio} 0 0"
-                    class="min-w-[10px] transition-shadow
-                           {picked === i ? 'shadow-[inset_0_0_0_2px_white]' : ''}"
+                    class="min-w-2 transition-shadow
+                           {picked === i
+                        ? 'shadow-[inset_0_0_0_2px_rgb(255_255_255/0.9),inset_0_0_0_3px_rgb(0_0_0/0.35)]'
+                        : ''}"
                 ></button>
             {/each}
         </div>
 
         {#if current}
-            <div class="mt-1.5 flex items-center gap-1.5">
+            <div class="mt-2 flex items-center gap-2">
+                <span
+                    class="h-4 w-4 shrink-0 rounded-[5px] shadow-[inset_0_0_0_1px_rgb(255_255_255/0.15)]"
+                    style="background-color: {rgbToHex(current)}"
+                ></span>
                 <button
                     type="button"
                     onclick={copy}
                     title="Copy {value}"
-                    class="flex-1 truncate rounded border border-neutral-700 bg-neutral-900 px-2 py-1
-                           text-left font-mono text-xs text-neutral-300 hover:border-neutral-500
-                           hover:text-neutral-100"
+                    class="-mx-1 min-w-0 truncate rounded px-1 py-0.5 text-left font-mono text-xs
+                           font-medium text-neutral-200 transition-colors hover:bg-wash hover:text-neutral-50"
                 >
                     {value}
                 </button>
-                <span class="w-8 shrink-0 text-right text-[10px] text-neutral-500">
+                <span class="shrink-0 text-[11px] tabular-nums text-neutral-600">
                     {Math.round(current.ratio * 100)}%
                 </span>
-            </div>
-
-            <div class="mt-1.5 flex items-center gap-1.5">
-                <div class="flex overflow-hidden rounded border border-neutral-700">
-                    {#each COLOR_FORMATS as f (f)}
-                        <button
-                            type="button"
-                            onclick={() => (format = f)}
-                            aria-pressed={format === f}
-                            class="px-1.5 py-0.5 text-[10px] font-medium transition-colors
-                                {format === f
-                                ? 'bg-neutral-700 text-neutral-100'
-                                : 'text-neutral-500 hover:bg-neutral-800'}"
-                        >
-                            {f}
-                        </button>
-                    {/each}
+                <div class="ml-auto">
+                    <Segmented
+                        value={format}
+                        options={COLOR_FORMATS.map((f) => ({ value: f, label: f }))}
+                        label="Color format"
+                        onchange={(f) => (format = f)}
+                    />
                 </div>
-                <button
-                    type="button"
-                    onclick={findSimilar}
-                    class="ml-auto rounded px-1.5 py-0.5 text-[10px] font-medium text-blue-400
-                           hover:bg-neutral-800 hover:text-blue-300"
-                >
-                    Find similar
-                </button>
             </div>
         {/if}
     {/if}

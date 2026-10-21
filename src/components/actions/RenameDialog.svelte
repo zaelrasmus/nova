@@ -82,8 +82,8 @@
         role="dialog"
         aria-modal="true"
         aria-label="Rename assets"
-        class="relative flex w-[560px] max-w-full flex-col gap-4 rounded-xl border border-neutral-800
-               bg-neutral-950 p-5 shadow-2xl"
+        class="relative flex w-[560px] max-w-full flex-col gap-4 rounded-xl border border-line-strong
+               bg-pane p-5 shadow-2xl"
     >
         <div>
             <h2 class="text-sm font-semibold text-neutral-100">
@@ -109,8 +109,8 @@
             <button
                 type="button"
                 onclick={onclose}
-                class="rounded border border-neutral-800 px-3 py-1.5 text-xs text-neutral-300
-                       transition-colors hover:bg-neutral-800"
+                class="rounded-md bg-raised-2 px-3 py-1.5 text-xs font-medium text-neutral-200
+                       ring-1 ring-inset ring-line-strong transition-colors hover:bg-neutral-700"
             >
                 Cancel
             </button>
@@ -118,8 +118,8 @@
                 type="button"
                 onclick={apply}
                 disabled={!canApply}
-                class="rounded bg-blue-600 px-3 py-1.5 text-xs font-medium text-white
-                       transition-colors hover:bg-blue-500 disabled:opacity-40"
+                class="rounded-md bg-brand px-3 py-1.5 text-xs font-medium text-white
+                       transition-[filter] hover:brightness-110 disabled:opacity-40"
             >
                 {running ? "Renaming…" : "Rename"}
             </button>

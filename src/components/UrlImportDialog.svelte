@@ -178,8 +178,8 @@
         role="dialog"
         aria-modal="true"
         aria-label="Add from URL"
-        class="relative flex w-[520px] max-w-full flex-col gap-4 rounded-xl border border-neutral-800
-               bg-neutral-950 p-5 shadow-2xl"
+        class="relative flex w-[520px] max-w-full flex-col gap-4 rounded-xl border border-line-strong
+               bg-pane p-5 shadow-2xl"
     >
         <div>
             <h2 class="text-sm font-semibold text-neutral-100">Add from URL</h2>
@@ -220,8 +220,8 @@
             </div>
         {:else if probe}
             <!-- The receipt -->
-            <div class="flex items-center gap-3 rounded-lg border border-neutral-800 bg-neutral-900/60 p-3">
-                <div class="grid h-10 w-10 shrink-0 place-items-center rounded-lg bg-neutral-800 text-neutral-400">
+            <div class="flex items-center gap-3 rounded-lg border border-line bg-raised p-3">
+                <div class="grid h-10 w-10 shrink-0 place-items-center rounded-lg bg-raised-2 text-neutral-400">
                     <TypeIcon class="h-5 w-5" />
                 </div>
                 <div class="min-w-0">
@@ -263,28 +263,28 @@
                             {formatBytes(received)}{total ? ` / ${formatBytes(total)}` : ""}
                         </span>
                     </div>
-                    <div class="h-1 w-full overflow-hidden rounded-full bg-neutral-800">
+                    <div class="h-1 w-full overflow-hidden rounded-full bg-raised-2">
                         {#if pct !== null}
                             <div
-                                class="h-full rounded-full bg-blue-500 transition-[width] duration-150"
+                                class="h-full rounded-full bg-brand transition-[width] duration-150"
                                 style="width:{pct}%"
                             ></div>
                         {:else}
                             <!-- No Content-Length: show motion, never a fake percentage. -->
-                            <div class="h-full w-1/3 animate-pulse rounded-full bg-blue-500"></div>
+                            <div class="h-full w-1/3 animate-pulse rounded-full bg-brand"></div>
                         {/if}
                     </div>
                 </div>
             {:else}
                 <label class="flex flex-col gap-1.5">
-                    <span class="text-xs text-neutral-400">Name</span>
+                    <span class="text-[11.5px] font-semibold text-neutral-500">Name</span>
                     <div class="flex items-center gap-2">
                         <input
                             type="text"
                             bind:value={stem}
                             spellcheck="false"
-                            class="min-w-0 flex-1 rounded border border-neutral-800 bg-neutral-900 px-2 py-1.5
-                                   text-sm text-neutral-100 outline-none focus:border-neutral-600"
+                            class="min-w-0 flex-1 rounded-md border border-line bg-raised px-2 py-1.5
+                                   text-sm text-neutral-100 outline-none focus:border-brand-line"
                         />
                         {#if probe.extension}
                             <span class="shrink-0 text-xs tabular-nums text-neutral-600">
@@ -301,29 +301,29 @@
                 <button
                     type="button"
                     onclick={onclose}
-                    class="rounded border border-neutral-800 px-3 py-1.5 text-xs text-neutral-300
-                           transition-colors hover:bg-neutral-800">Close</button
+                    class="rounded-md bg-raised-2 px-3 py-1.5 text-xs font-medium text-neutral-200
+                           ring-1 ring-inset ring-line-strong transition-colors hover:bg-neutral-700">Close</button
                 >
                 <button
                     type="button"
                     onclick={run}
-                    class="rounded bg-blue-600 px-3 py-1.5 text-xs font-medium text-white
-                           transition-colors hover:bg-blue-500">Try again</button
+                    class="rounded-md bg-brand px-3 py-1.5 text-xs font-medium text-white
+                           transition-[filter] hover:brightness-110">Try again</button
                 >
             {:else if probe?.is_html}
                 <button
                     type="button"
                     onclick={onclose}
-                    class="rounded bg-blue-600 px-3 py-1.5 text-xs font-medium text-white
-                           transition-colors hover:bg-blue-500">Close</button
+                    class="rounded-md bg-brand px-3 py-1.5 text-xs font-medium text-white
+                           transition-[filter] hover:brightness-110">Close</button
                 >
             {:else}
                 <button
                     type="button"
                     onclick={onclose}
                     disabled={phase === "downloading" || phase === "saving"}
-                    class="rounded border border-neutral-800 px-3 py-1.5 text-xs text-neutral-300
-                           transition-colors hover:bg-neutral-800 disabled:opacity-40">Cancel</button
+                    class="rounded-md bg-raised-2 px-3 py-1.5 text-xs font-medium text-neutral-200
+                           ring-1 ring-inset ring-line-strong transition-colors hover:bg-neutral-700 disabled:opacity-40">Cancel</button
                 >
                 <!-- Always both, at every size. Which one is EMPHASISED is the
                      only thing size and expiry change: a link that will die, or
@@ -334,11 +334,11 @@
                     onclick={saveLink}
                     disabled={phase !== "ready"}
                     title="Catalogue the link. Nothing is stored on disk but a thumbnail."
-                    class="rounded px-3 py-1.5 text-xs font-medium transition-colors
+                    class="rounded-md px-3 py-1.5 text-xs font-medium transition-colors
                            disabled:opacity-40
                            {preferDownload
-                        ? 'border border-neutral-800 text-neutral-300 hover:bg-neutral-800'
-                        : 'bg-blue-600 text-white hover:bg-blue-500'}"
+                        ? 'bg-raised-2 text-neutral-200 ring-1 ring-inset ring-line-strong hover:bg-neutral-700'
+                        : 'bg-brand text-white hover:brightness-110'}"
                 >
                     {phase === "saving" ? "Saving…" : "Save link only"}
                 </button>
@@ -346,11 +346,11 @@
                     type="button"
                     onclick={download}
                     disabled={phase !== "ready"}
-                    class="rounded px-3 py-1.5 text-xs font-medium transition-colors
+                    class="rounded-md px-3 py-1.5 text-xs font-medium transition-colors
                            disabled:opacity-40
                            {preferDownload
-                        ? 'bg-blue-600 text-white hover:bg-blue-500'
-                        : 'border border-neutral-800 text-neutral-300 hover:bg-neutral-800'}"
+                        ? 'bg-brand text-white hover:brightness-110'
+                        : 'bg-raised-2 text-neutral-200 ring-1 ring-inset ring-line-strong hover:bg-neutral-700'}"
                 >
                     {phase === "downloading" ? "Downloading…" : "Download"}
                 </button>

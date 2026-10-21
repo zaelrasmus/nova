@@ -18,6 +18,7 @@
 -->
 <script lang="ts">
     import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+    import { Folder } from "@lucide/svelte";
     import {
         assetLibrary,
         thumbHashUrl,
@@ -121,12 +122,13 @@
 
 {#if children.length > 0}
     <section
-        class="shrink-0 overflow-y-auto border-b border-neutral-800 px-3 pb-3 pt-2
+        class="shrink-0 overflow-y-auto border-b border-line px-[var(--nv-grid-mx)] pb-4 pt-3
                {fill ? 'min-h-0 flex-1 border-b-0' : 'max-h-[45%]'}"
         aria-label="Folders"
     >
-        <h2 class="mb-2 text-xs font-medium text-neutral-500">
-            Folders · {children.length}
+        <h2 class="mb-2.5 flex items-baseline gap-2 text-xs font-semibold text-neutral-400">
+            Folders
+            <span class="font-medium tabular-nums text-neutral-600">{children.length}</span>
         </h2>
         <div
             class="grid"
@@ -146,15 +148,16 @@
                 <button
                     type="button"
                     {...{ [DROP_FOLDER_ATTR]: child.folder_id, [DROP_FOLDER_NAME_ATTR]: name }}
-                    class="group flex min-w-0 flex-col gap-1.5 rounded-md p-1 text-left transition-colors
-                           focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-400
+                    class="group flex min-w-0 flex-col gap-1.5 rounded-[calc(var(--nv-tile-radius)+4px)] p-1.5
+                           text-left transition-colors
+                           focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-line
                            {dropping
                         ? 'bg-emerald-600/25 ring-1 ring-emerald-500'
                         : blocked
                           ? 'bg-red-600/15 ring-1 ring-red-600/50'
                           : selected
-                            ? 'bg-neutral-800'
-                            : 'hover:bg-neutral-900'}"
+                            ? 'bg-brand-soft'
+                            : 'hover:bg-wash'}"
                     onclick={() => selection.selectFolder(child.folder_id)}
                     ondblclick={() => open(child.folder_id)}
                     onkeydown={(e) => {
@@ -165,19 +168,23 @@
                     }}
                 >
                     <div
-                        class="relative aspect-[3/4] w-full overflow-hidden rounded bg-neutral-900
-                               ring-1 {selected ? 'ring-blue-500' : 'ring-white/10'}"
+                        class="relative aspect-[3/4] w-full overflow-hidden rounded-[var(--nv-tile-radius)] bg-raised
+                               {selected
+                            ? 'ring-2 ring-brand'
+                            : 'ring-1 ring-inset ring-white/[0.06]'}"
                     >
                         {#if src}
                             <img {src} alt="" class="absolute inset-0 h-full w-full object-cover" loading="lazy" />
                         {:else}
-                            <div class="grid h-full place-items-center text-2xl text-neutral-700">📁</div>
+                            <div class="grid h-full place-items-center text-neutral-600">
+                                <Folder class="h-8 w-8" strokeWidth={1.25} />
+                            </div>
                         {/if}
                     </div>
-                    <span class="truncate text-xs font-medium text-neutral-200">
+                    <span class="truncate px-0.5 text-xs font-medium text-neutral-200">
                         {name}
                     </span>
-                    <span class="-mt-1 truncate text-[11px] text-neutral-500">{describe(child)}</span>
+                    <span class="-mt-1 truncate px-0.5 text-[11px] text-neutral-500">{describe(child)}</span>
                 </button>
             {/each}
         </div>

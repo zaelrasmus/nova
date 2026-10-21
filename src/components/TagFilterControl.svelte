@@ -6,6 +6,7 @@
   a saved filter matches. "Untagged" is never a real tag row.
 -->
 <script lang="ts">
+    import { ChevronDown, X } from "@lucide/svelte";
     import {
         assetLibrary,
         emptyTagFilter,
@@ -124,15 +125,15 @@
         onclick={() => (open = !open)}
         aria-expanded={open}
         class="{fieldClass} flex items-center gap-1
-               {activeCount > 0 ? 'ring-1 ring-blue-400' : ''}"
+               {activeCount > 0 ? 'border-brand-line' : ''}"
     >
         {#if activeCount > 0}
-            <span class="rounded-full bg-blue-600 px-1.5 text-[10px] font-medium text-white">
+            <span class="rounded-full bg-brand px-1.5 text-[10px] font-medium text-white">
                 {activeCount}
             </span>
         {/if}
         <span>{activeCount > 0 ? tf?.mode.toUpperCase() : "Any"}</span>
-        <span aria-hidden="true" class="text-neutral-400">▾</span>
+        <ChevronDown class="h-3 w-3 text-neutral-500" aria-hidden="true" />
     </button>
 
     {#if activeCount > 0}
@@ -140,27 +141,28 @@
             type="button"
             onclick={clear}
             title="Clear tag filter"
-            class="px-0.5 text-neutral-400 hover:text-neutral-700">✕</button
+            aria-label="Clear tag filter"
+            class="grid h-5 w-5 place-items-center rounded text-neutral-500 hover:bg-wash-strong
+                   hover:text-neutral-200"><X class="h-3 w-3" /></button
         >
     {/if}
 
     {#if open}
         <div
-            class="absolute left-0 top-full z-20 mt-1 w-64 rounded-md border border-neutral-300
-                   bg-white p-2 shadow-xl"
+            class="nv-menu absolute left-0 top-full z-20 mt-1.5 w-64 p-2"
         >
             <!-- Mode: how the included tags combine. -->
-            <div class="mb-2 flex overflow-hidden rounded border border-neutral-300">
+            <div class="mb-2 flex gap-px rounded-lg border border-line bg-raised p-0.5">
                 {#each MODES as m (m.value)}
                     <button
                         type="button"
                         onclick={() => setMode(m.value)}
                         title={m.title}
                         aria-pressed={(tf?.mode ?? "all") === m.value}
-                        class="flex-1 px-1.5 py-0.5 text-xs font-medium transition-colors
+                        class="h-6 flex-1 rounded-md px-1.5 text-xs font-medium transition-colors
                             {(tf?.mode ?? 'all') === m.value
-                            ? 'bg-blue-600 text-white'
-                            : 'bg-white text-neutral-600 hover:bg-neutral-100'}"
+                            ? 'bg-raised-2 text-neutral-100 shadow-[0_1px_2px_rgb(0_0_0/0.45),inset_0_0_0_1px_var(--nv-line)]'
+                            : 'text-neutral-500 hover:text-neutral-200'}"
                     >
                         {m.label}
                     </button>
@@ -172,8 +174,8 @@
                 bind:value={search}
                 placeholder="Search tags…"
                 spellcheck="false"
-                class="mb-1.5 w-full rounded border border-neutral-300 bg-white px-2 py-1 text-xs
-                       text-neutral-700 focus:border-neutral-400 focus:outline-none"
+                class="mb-1.5 h-7 w-full rounded-md border border-line bg-raised px-2 text-xs
+                       text-neutral-200 placeholder:text-neutral-500 focus:border-brand-line focus:outline-none"
             />
 
             <div class="max-h-56 overflow-y-auto">
@@ -181,14 +183,14 @@
                 <button
                     type="button"
                     onclick={toggleUntagged}
-                    class="flex w-full items-center gap-2 rounded px-1.5 py-1 text-left text-xs
-                           text-neutral-600 hover:bg-neutral-100"
+                    class="flex w-full items-center gap-2 rounded-md px-1.5 py-1 text-left text-xs
+                           text-neutral-400 hover:bg-wash-strong"
                 >
                     <span
                         class="flex h-3.5 w-3.5 items-center justify-center rounded-sm border text-[9px]
                                text-white {tf?.untagged
-                            ? 'border-blue-500 bg-blue-600'
-                            : 'border-neutral-400'}"
+                            ? 'border-brand bg-brand'
+                            : 'border-neutral-600'}"
                     >
                         {tf?.untagged ? "✓" : ""}
                     </span>
@@ -196,7 +198,7 @@
                 </button>
 
                 {#if matched.length > 0}
-                    <div class="my-1 h-px bg-neutral-200"></div>
+                    <div class="nv-menu-sep"></div>
                 {/if}
 
                 {#each matched as tag (tag.id)}
@@ -209,21 +211,21 @@
                             toggleExclude(tag.id);
                         }}
                         title="Left-click include · right-click exclude"
-                        class="flex w-full items-center gap-2 rounded px-1.5 py-1 text-left text-xs
-                               hover:bg-neutral-100
+                        class="flex w-full items-center gap-2 rounded-md px-1.5 py-1 text-left text-xs
+                               hover:bg-wash-strong
                                {st === 'include'
-                            ? 'text-blue-700'
+                            ? 'text-brand-text'
                             : st === 'exclude'
-                              ? 'text-red-600'
-                              : 'text-neutral-600'}"
+                              ? 'text-red-400'
+                              : 'text-neutral-300'}"
                     >
                         <span
                             class="flex h-3.5 w-3.5 items-center justify-center rounded-sm border text-[9px]
                                    {st === 'include'
-                                ? 'border-blue-500 bg-blue-600 text-white'
+                                ? 'border-brand bg-brand text-white'
                                 : st === 'exclude'
                                   ? 'border-red-500 bg-red-500 text-white'
-                                  : 'border-neutral-400'}"
+                                  : 'border-neutral-600'}"
                         >
                             {st === "include" ? "✓" : st === "exclude" ? "−" : ""}
                         </span>
@@ -232,18 +234,18 @@
                             style="background-color: {swatch(tag)}"
                         ></span>
                         <span class="truncate">{tag.name}</span>
-                        <span class="ml-auto text-[10px] text-neutral-400">{tag.usage}</span>
+                        <span class="ml-auto text-[10px] tabular-nums text-neutral-500">{tag.usage}</span>
                     </button>
                 {/each}
 
                 {#if assetLibrary.tags.length === 0}
-                    <p class="px-1.5 py-2 text-xs text-neutral-400">No tags in this library yet.</p>
+                    <p class="px-1.5 py-2 text-xs text-neutral-500">No tags in this library yet.</p>
                 {/if}
             </div>
 
-            <div class="mt-1.5 border-t border-neutral-200 pt-1.5 text-[10px] text-neutral-400">
-                Left-click <span class="text-blue-600">include</span> · right-click
-                <span class="text-red-500">exclude</span>{tf?.mode === "equals"
+            <div class="mt-1.5 border-t border-line pt-1.5 text-[10px] text-neutral-500">
+                Left-click <span class="text-brand-text">include</span> · right-click
+                <span class="text-red-400">exclude</span>{tf?.mode === "equals"
                     ? " (off in Exact)"
                     : ""}
             </div>

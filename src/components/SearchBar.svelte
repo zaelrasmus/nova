@@ -16,6 +16,7 @@
 <script lang="ts">
     import { untrack } from "svelte";
     import { toast } from "svelte-sonner";
+    import { viewer } from "$lib/viewer.svelte";
     import {
         Search,
         X,
@@ -156,6 +157,19 @@
         }
     }
 
+    // Ctrl+K (Cmd+K) jumps to search from anywhere — including from inside
+    // another field, which is the point of a global shortcut. Except when the
+    // field is covered: behind the viewer or a modal, focusing it would run
+    // searches out of sight and let the arrow keys drive two things at once.
+    function onGlobalKey(e: KeyboardEvent) {
+        if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "k") {
+            if (viewer.isOpen || document.querySelector('[aria-modal="true"]')) return;
+            e.preventDefault();
+            input?.focus();
+            input?.select();
+        }
+    }
+
     // ── Typeahead: matching tags and folders ──────────────────────────────────
     // Live suggestions of ENTITIES, distinct from executing the free-text search:
     // clicking one drops its name into the query.
@@ -178,6 +192,28 @@
     const showPanel = $derived(
         focused && (searching ? suggestions.length > 0 : recent.length > 0),
     );
+
+    // Both dropdowns below are `fixed` at coordinates measured from their anchor.
+    // The search field sits in the grid pane header, which is overflow-hidden so
+    // a crowded toolbar shrinks instead of spilling — and an `absolute` panel in
+    // there was clipped to the header's strip.
+    let scopeButton = $state<HTMLButtonElement | null>(null);
+    let panelBox = $state({ top: 0, left: 0, width: 0 });
+    let scopeBox = $state({ top: 0, right: 0 });
+    // Bumped on window resize so the two effects below re-measure.
+    let resized = $state(0);
+    $effect(() => {
+        void resized;
+        if (!showPanel || !input) return;
+        const r = input.getBoundingClientRect();
+        panelBox = { top: r.bottom + 6, left: r.left, width: r.width };
+    });
+    $effect(() => {
+        void resized;
+        if (!scopesOpen || !scopeButton) return;
+        const r = scopeButton.getBoundingClientRect();
+        scopeBox = { top: r.bottom + 6, right: window.innerWidth - r.right };
+    });
 
     // Close the scope popover on an outside click.
     $effect(() => {
@@ -254,11 +290,13 @@
      the view controls, so it is sized to sit IN that row rather than to fill it:
      h-7 to match the icon buttons either side, and free to shrink when the panes
      are wide (see the header's min-w-0 / shrink rules in +page.svelte). -->
+<svelte:window onkeydown={onGlobalKey} onresize={() => resized++} />
+
 <div bind:this={root} class="relative flex min-w-0 items-center gap-1.5">
     <!-- Input -->
     <div class="relative min-w-0 flex-1">
         <Search
-            class="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-neutral-500"
+            class="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-neutral-500"
         />
         <input
             bind:this={input}
@@ -270,10 +308,21 @@
             spellcheck="false"
             placeholder="Search…"
             title={'Search name, tags and notes.  " " for exact, - to exclude'}
-            class="h-7 w-full rounded-md border border-neutral-800 bg-neutral-900 pl-7 pr-7 text-xs
-                   text-neutral-200 placeholder:text-neutral-500 transition-colors
-                   hover:border-neutral-700 focus:border-neutral-600 focus:outline-none"
+            class="h-7 w-full rounded-md border border-line bg-raised pl-8 pr-12 text-xs
+                   text-neutral-200 placeholder:text-neutral-500 transition-[border-color,box-shadow]
+                   hover:border-line-strong focus:border-brand-line focus:outline-none
+                   focus:ring-[3px] focus:ring-brand-soft"
         />
+        {#if !query && !focused}
+            <kbd
+                aria-hidden="true"
+                class="pointer-events-none absolute right-1.5 top-1/2 -translate-y-1/2 rounded border
+                       border-line-strong bg-canvas px-1 py-px font-sans text-[10px] font-medium
+                       text-neutral-500"
+            >
+                Ctrl K
+            </kbd>
+        {/if}
         {#if query}
             <button
                 type="button"
@@ -281,7 +330,7 @@
                 title="Clear search"
                 aria-label="Clear search"
                 class="absolute right-1.5 top-1/2 grid h-4 w-4 -translate-y-1/2 place-items-center
-                       rounded text-neutral-500 transition-colors hover:bg-neutral-800
+                       rounded text-neutral-500 transition-colors hover:bg-wash-strong
                        hover:text-neutral-200"
             >
                 <X class="h-3 w-3" />
@@ -291,16 +340,17 @@
         <!-- Recent / typeahead panel -->
         {#if showPanel}
             <div
-                class="absolute z-30 mt-1 w-full overflow-hidden rounded-md border border-neutral-800
-                       bg-neutral-900 shadow-lg"
+                style:top="{panelBox.top}px"
+                style:left="{panelBox.left}px"
+                style:width="{panelBox.width}px"
+                class="nv-menu fixed z-[91] overflow-hidden"
             >
                 {#if searching}
                     {#each suggestions as s (s.kind + s.label)}
                         <button
                             type="button"
                             onclick={() => apply(s.label)}
-                            class="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs
-                                   text-neutral-200 hover:bg-neutral-800"
+                            class="nv-menu-item text-xs"
                         >
                             {#if s.kind === "tag"}
                                 <Tag class="h-3 w-3 shrink-0 text-neutral-500" />
@@ -311,15 +361,12 @@
                         </button>
                     {/each}
                 {:else}
-                    <div class="px-3 pb-0.5 pt-1.5 text-[10px] font-medium uppercase text-neutral-400">
-                        Recent
-                    </div>
+                    <p class="nv-menu-label">Recent</p>
                     {#each recent as term (term)}
                         <button
                             type="button"
                             onclick={() => apply(term)}
-                            class="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs
-                                   text-neutral-200 hover:bg-neutral-800"
+                            class="nv-menu-item text-xs"
                         >
                             <Clock class="h-3 w-3 shrink-0 text-neutral-500" />
                             <span class="truncate">{term}</span>
@@ -334,14 +381,15 @@
     <div class="relative">
         <button
             type="button"
+            bind:this={scopeButton}
             onclick={() => (scopesOpen = !scopesOpen)}
             title="Choose where to search"
             aria-expanded={scopesOpen}
             class="flex h-7 shrink-0 items-center gap-1 rounded-md border px-2 text-xs
                    transition-colors
                    {allActive
-                ? 'border-neutral-800 bg-neutral-900 text-neutral-400 hover:border-neutral-700 hover:text-neutral-200'
-                : 'border-blue-500/40 bg-blue-500/10 text-blue-300 hover:bg-blue-500/20'}"
+                ? 'border-line bg-raised text-neutral-400 hover:border-line-strong hover:text-neutral-200'
+                : 'border-brand-line bg-brand-soft text-brand-text hover:brightness-110'}"
         >
             <!-- The count is the point: a narrowed scope is the other way a
                  search can quietly return less than expected, so it reads as
@@ -353,19 +401,19 @@
 
         {#if scopesOpen}
             <div
-                class="absolute right-0 z-30 mt-1 w-44 overflow-hidden rounded-md border border-neutral-800
-                       bg-neutral-900 py-1 shadow-lg"
+                style:top="{scopeBox.top}px"
+                style:right="{scopeBox.right}px"
+                class="nv-menu fixed z-[91] w-48"
             >
                 {#each SCOPE_LABELS as s (s.key)}
                     <label
-                        class="flex cursor-pointer items-center gap-2 px-3 py-1 text-sm text-neutral-200
-                               hover:bg-neutral-800"
+                        class="nv-menu-item cursor-pointer text-sm"
                     >
                         <input
                             type="checkbox"
                             checked={scopes[s.key]}
                             onchange={() => toggleScope(s.key)}
-                            class="accent-blue-600"
+                            class="accent-[var(--nv-accent)]"
                         />
                         {s.label}
                     </label>
@@ -382,8 +430,8 @@
                     type="button"
                     onclick={() => toggleScope(s.key)}
                     title="Remove {s.label} from the search"
-                    class="flex items-center gap-1 rounded-full bg-blue-100 px-2 py-0.5 text-[11px]
-                           text-blue-700 hover:bg-blue-200"
+                    class="flex items-center gap-1 rounded-full bg-brand-soft px-2 py-0.5 text-[11px]
+                           text-brand-text transition-colors hover:brightness-110"
                 >
                     {s.label}
                     <span aria-hidden="true">✕</span>

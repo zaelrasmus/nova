@@ -35,6 +35,7 @@
     import { MediaController, computeWaveform, SEEK_STEP_S, SEEK_JUMP_S } from "$lib/media.svelte";
     import { formatDuration, formatBytes } from "$lib/format";
     import { settings } from "../routes/settings.svelte";
+    import { ACCENTS, APPEARANCE_DEFAULTS } from "$lib/appearance";
 
     interface Props {
         /** Asset-protocol URL of the original file. */
@@ -183,12 +184,20 @@
         }
     }
 
+    // A canvas can't take a Tailwind class, so the accent is resolved from the
+    // preference the same way appearance.ts does — and read reactively, so a
+    // new accent repaints the played half without reopening the player.
+    const accent = $derived(
+        (ACCENTS[settings.preferences.accent] ?? ACCENTS[APPEARANCE_DEFAULTS.accent]).value,
+    );
+
     $effect(() => {
         const data = peaks;
         const w = waveWidth;
+        const fill = accent;
         if (!data || w <= 0) return;
         drawWave(baseCanvas, data, w, "rgba(255,255,255,0.22)");
-        drawWave(playedCanvas, data, w, "#3b82f6"); // blue-500, the app's accent
+        drawWave(playedCanvas, data, w, fill);
     });
 
     // ── Scrubbing ─────────────────────────────────────────────────────────────
@@ -362,8 +371,8 @@
 
     const BTN =
         "rounded-md p-1.5 text-white/75 transition-colors hover:bg-white/10 hover:text-white " +
-        "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-white/40";
-    const BTN_ON = "bg-white/15 text-white";
+        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-line";
+    const BTN_ON = "bg-brand-soft text-brand-text";
 
     // Capitalised because it IS the component the template renders — Svelte 5
     // resolves a capitalised identifier as a component, which saves a {@const}
@@ -409,7 +418,7 @@
     >
         <div class="relative h-1 w-full overflow-hidden rounded-full bg-white/15">
             <div class="absolute inset-y-0 left-0 bg-white/25" style="width:{bufferedPct}%"></div>
-            <div class="absolute inset-y-0 left-0 bg-blue-500" style="width:{progress * 100}%"></div>
+            <div class="absolute inset-y-0 left-0 bg-brand" style="width:{progress * 100}%"></div>
         </div>
         <!-- Knob: only materialises on hover/drag, so a resting bar stays a clean line. -->
         <div
@@ -484,7 +493,7 @@
                     value={ctrl?.muted ? 0 : (ctrl?.volume ?? 1)}
                     oninput={(e) => ctrl?.setVolume(Number(e.currentTarget.value))}
                     aria-label="Volume"
-                    class="h-1 w-0 cursor-pointer accent-blue-500 opacity-0 transition-all duration-150
+                    class="h-1 w-0 cursor-pointer accent-brand opacity-0 transition-all duration-150
                            group-hover/vol:w-20 group-hover/vol:opacity-100
                            focus-visible:w-20 focus-visible:opacity-100"
                 />

@@ -43,7 +43,7 @@
     }
 </script>
 
-<div class="flex flex-col gap-0.5 {variant === 'rail' ? 'items-center' : 'px-2'}">
+<div class="flex flex-col {variant === 'rail' ? 'items-center gap-0.5' : 'gap-px px-2'}">
     {#each VIEWS as view (view.scope.kind)}
         {@const Icon = view.icon}
         {@const active = scope.kind === view.scope.kind}
@@ -54,19 +54,26 @@
             aria-label={view.label}
             aria-current={active ? "true" : undefined}
             onclick={() => go(view.scope)}
-            class="relative flex items-center transition-colors
+            class="relative flex items-center rounded-md transition-colors
                    {variant === 'rail'
-                ? 'h-9 w-9 justify-center rounded-md'
-                : 'w-full gap-2 rounded px-2 py-1 text-left text-sm'}
+                ? 'h-9 w-9 justify-center'
+                : 'h-[var(--nv-row-h)] w-full gap-2.5 px-2 text-left text-[13px]'}
                    {active
-                ? 'bg-neutral-800 text-neutral-100'
-                : 'text-neutral-400 hover:bg-neutral-800/60 hover:text-neutral-200'}"
+                ? 'bg-brand-soft text-neutral-100'
+                : 'text-neutral-400 hover:bg-wash hover:text-neutral-100'}"
         >
-            <Icon class="h-4 w-4 shrink-0" strokeWidth={1.5} />
+            <Icon
+                class="h-4 w-4 shrink-0 {active
+                    ? 'text-brand-text'
+                    : variant === 'rail'
+                      ? ''
+                      : 'text-neutral-500'}"
+                strokeWidth={1.5}
+            />
             {#if variant === "expanded"}
-                <span class="truncate">{view.label}</span>
+                <span class="min-w-0 flex-1 truncate">{view.label}</span>
                 {#if count}
-                    <span class="ml-auto shrink-0 text-[10px] text-neutral-500">{count}</span>
+                    <span class="shrink-0 text-[11px] text-neutral-500 tabular-nums">{count}</span>
                 {/if}
             {:else if count}
                 <!-- In the rail there's no room for a number, so it degrades to

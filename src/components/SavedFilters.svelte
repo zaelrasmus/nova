@@ -10,6 +10,7 @@
   so it structurally cannot reach storage.
 -->
 <script lang="ts">
+    import { Filter, Pencil, Plus, RefreshCw, Trash2 } from "@lucide/svelte";
     import { assetLibrary, type SavedFilter } from "$lib/assets.svelte";
     import { describeRules } from "$lib/rules";
     import { toast } from "svelte-sonner";
@@ -68,51 +69,68 @@
     const describe = (f: SavedFilter) => describeRules(f.rules, assetLibrary.folderNames);
 </script>
 
-<div
-    class="flex flex-col gap-0.5 rounded-lg border border-neutral-800 bg-neutral-900/40 p-2 text-sm"
->
-    <span class="px-2 pb-1 text-[10px] font-medium uppercase tracking-wide text-neutral-500">
-        Saved filters
-    </span>
-
+<!-- No heading of its own: the sidebar section and the rail flyout both title
+     it already. -->
+<div class="flex flex-col gap-px">
     {#each saved as filter (filter.id)}
-        <div class="group flex items-center">
+        <div class="group relative flex items-center rounded-md">
             <!-- Applying is a lens over the CURRENT scope: clicking this does not
                  move you out of the folder you're in. -->
             <button
                 type="button"
                 title={describe(filter)}
                 onclick={() => assetLibrary.applySavedFilter(filter.id)}
-                class="flex-1 truncate rounded px-2 py-1 text-left text-neutral-300
-                       transition-colors hover:bg-neutral-800"
+                class="flex h-[var(--nv-row-h)] min-w-0 flex-1 items-center gap-2.5 rounded-md px-2
+                       text-left text-[13px] text-neutral-400 transition-colors
+                       group-hover:bg-wash group-hover:text-neutral-100"
             >
-                {filter.name}
+                <Filter class="h-4 w-4 shrink-0 text-neutral-500" strokeWidth={1.5} />
+                <span class="min-w-0 flex-1 truncate">{filter.name}</span>
             </button>
-            <div class="flex shrink-0 opacity-0 transition-opacity group-hover:opacity-100">
+            <!-- Overlaid rather than reserving width, like the folder tree's
+                 row actions. -->
+            <div
+                class="pointer-events-none invisible absolute inset-y-0 right-0 [&_button]:pointer-events-auto [&_select]:pointer-events-auto flex items-center gap-px rounded-r-md pl-4
+                       pr-1 group-focus-within:visible group-hover:visible
+                       [background:linear-gradient(var(--nv-wash),var(--nv-wash)),var(--nv-pane)]
+                       [mask-image:linear-gradient(to_right,transparent,black_14px)]"
+            >
                 {#if canSave}
                     <button
                         type="button"
                         title="Replace with the filters active now"
+                        aria-label="Replace with the filters active now"
                         onclick={() => update(filter)}
-                        class="px-1 text-neutral-500 hover:text-neutral-200">⭯</button
+                        class="grid h-[22px] w-[22px] place-items-center rounded-[5px] text-neutral-500
+                               transition-colors hover:bg-wash-strong hover:text-neutral-100"
                     >
+                        <RefreshCw class="h-3.5 w-3.5" />
+                    </button>
                 {/if}
                 <button
                     type="button"
                     title="Rename"
+                    aria-label="Rename"
                     onclick={() => rename(filter)}
-                    class="px-1 text-neutral-500 hover:text-neutral-200">✎</button
+                    class="grid h-[22px] w-[22px] place-items-center rounded-[5px] text-neutral-500
+                           transition-colors hover:bg-wash-strong hover:text-neutral-100"
                 >
+                    <Pencil class="h-3.5 w-3.5" />
+                </button>
                 <button
                     type="button"
                     title="Delete"
+                    aria-label="Delete"
                     onclick={() => remove(filter)}
-                    class="px-1 text-neutral-500 hover:text-red-400">🗑</button
+                    class="grid h-[22px] w-[22px] place-items-center rounded-[5px] text-neutral-500
+                           transition-colors hover:bg-wash-strong hover:text-red-400"
                 >
+                    <Trash2 class="h-3.5 w-3.5" />
+                </button>
             </div>
         </div>
     {:else}
-        <span class="px-2 py-1 text-xs text-neutral-600">
+        <span class="px-2 py-1 text-xs leading-relaxed text-neutral-600">
             Set some filters, then save them here.
         </span>
     {/each}
@@ -122,10 +140,11 @@
         onclick={saveCurrent}
         disabled={!canSave}
         title={canSave ? "Save the active filters" : "No filters are active"}
-        class="mt-1 rounded px-2 py-1 text-left text-xs transition-colors
-               enabled:text-neutral-500 enabled:hover:bg-neutral-800 enabled:hover:text-neutral-300
-               disabled:cursor-not-allowed disabled:text-neutral-700"
+        class="flex h-[var(--nv-row-h)] items-center gap-2.5 rounded-md px-2 text-left text-[13px]
+               transition-colors enabled:text-neutral-500 enabled:hover:bg-wash
+               enabled:hover:text-neutral-200 disabled:cursor-not-allowed disabled:text-neutral-700"
     >
-        ＋ Save current filters
+        <Plus class="h-4 w-4 shrink-0" strokeWidth={1.5} />
+        Save current filters
     </button>
 </div>

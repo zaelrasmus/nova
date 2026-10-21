@@ -57,24 +57,18 @@
 <div
     role="menu"
     tabindex="-1"
-    class="fixed z-[91] w-[200px] rounded-lg border border-neutral-800 bg-neutral-900 p-1 shadow-2xl"
+    class="nv-menu fixed z-[91] w-[200px]"
     style="left: {left}px; top: {top}px"
 >
-    <p class="truncate px-2 py-1.5 text-[11px] font-semibold text-neutral-500">{pin.name}</p>
+    <p class="nv-menu-label truncate">{pin.name}</p>
 
-    <button
-        type="button"
-        role="menuitem"
-        onclick={unpin}
-        class="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm text-neutral-300
-               hover:bg-neutral-800"
-    >
-        <PinOff class="h-3.5 w-3.5" /> Unpin from sidebar
+    <button type="button" role="menuitem" onclick={unpin} class="nv-menu-item">
+        <PinOff class="h-3.5 w-3.5 text-neutral-500" /> Unpin from sidebar
     </button>
 
     <!-- Picking a colour deliberately does NOT close the menu — trying two
          greens against each other is the normal way to choose one. -->
-    <div class="flex flex-wrap items-center gap-1 px-2 py-2">
+    <div class="flex flex-wrap items-center gap-1.5 px-2 py-2">
         {#each PIN_COLORS as color (color)}
             <button
                 type="button"
@@ -84,7 +78,7 @@
                 onclick={() => assetLibrary.setPinColor(pin.kind, pin.id, color as PinColor)}
                 class="h-4 w-4 rounded-full border transition-transform hover:scale-110
                        {pin.color === color
-                    ? 'ring-2 ring-neutral-300 ring-offset-1 ring-offset-neutral-900'
+                    ? 'outline-2 outline-offset-2 outline-neutral-200'
                     : ''}"
                 style="border-color: {pinColorVar(color)}; background-color: {pinColorVar(color)}"
             ></button>
@@ -97,7 +91,7 @@
             onclick={() => assetLibrary.setPinColor(pin.kind, pin.id, null)}
             class="h-4 w-4 rounded-full border border-neutral-600 transition-transform
                    hover:scale-110 {pin.color === null
-                ? 'ring-2 ring-neutral-300 ring-offset-1 ring-offset-neutral-900'
+                ? 'outline-2 outline-offset-2 outline-neutral-200'
                 : ''}"
         ></button>
     </div>

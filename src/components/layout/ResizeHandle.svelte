@@ -63,9 +63,9 @@
     aria-valuenow={Math.round(value)}
     tabindex="0"
     class="absolute inset-y-0 z-20 w-1.5 cursor-col-resize transition-colors
-           hover:bg-blue-500/40 focus-visible:bg-blue-500/60 focus-visible:outline-none
+           hover:bg-brand/40 focus-visible:bg-brand/60 focus-visible:outline-none
            {edge === 'left' ? 'right-0' : 'left-0'}
-           {dragging ? 'bg-blue-500/60' : ''}"
+           {dragging ? 'bg-brand/60' : ''}"
     onpointerdown={start}
     onpointermove={move}
     onpointerup={end}
