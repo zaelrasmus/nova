@@ -233,8 +233,11 @@
                         class="group flex h-[22px] max-w-full items-center gap-1.5 rounded-md border pr-1
                                pl-2 text-xs transition-colors disabled:opacity-50
                                {state === 'all'
-                            ? 'border-transparent bg-raised-2 text-neutral-100'
+                            ? 'text-neutral-100'
                             : 'border-dashed border-line-strong text-neutral-400 hover:text-neutral-200'}"
+                        style={state === "all"
+                            ? `background-color: color-mix(in oklch, ${swatch(tag)} 30%, var(--nv-raised-2)); border-color: color-mix(in oklch, ${swatch(tag)} 45%, transparent)`
+                            : ""}
                     >
                         <span
                             class="h-[7px] w-[7px] shrink-0 rounded-full"

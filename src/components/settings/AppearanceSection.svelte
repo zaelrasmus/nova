@@ -11,6 +11,7 @@
         ACCENTS,
         APPEARANCE_DEFAULTS,
         APPEARANCE_LIMITS,
+        clampAppearance,
         type AccentName,
     } from "$lib/appearance";
     import { Label } from "$components/ui/label";
@@ -87,16 +88,19 @@
     <!-- Spacing sliders -->
     {#each SLIDERS as s (s.key)}
         {@const limits = APPEARANCE_LIMITS[s.key]}
+        <!-- Show what is applied, not what is stored: a hand-edited
+             settings.json can hold a value the clamp overrides. -->
+        {@const applied = clampAppearance(s.key, prefs[s.key])}
         <div class="flex flex-col gap-2">
             <div class="flex items-center justify-between gap-8">
                 {@render row(s.label, s.hint)}
                 <span class="w-12 shrink-0 text-right text-sm tabular-nums text-neutral-300">
-                    {prefs[s.key]}px
+                    {applied}px
                 </span>
             </div>
             <Range
                 label={s.label}
-                value={prefs[s.key]}
+                value={applied}
                 min={limits.min}
                 max={limits.max}
                 oninput={(v) => live(s.key, v)}

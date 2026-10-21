@@ -16,6 +16,7 @@
 <script lang="ts">
     import { untrack } from "svelte";
     import { toast } from "svelte-sonner";
+    import { viewer } from "$lib/viewer.svelte";
     import {
         Search,
         X,
@@ -157,9 +158,12 @@
     }
 
     // Ctrl+K (Cmd+K) jumps to search from anywhere — including from inside
-    // another field, which is the point of a global shortcut.
+    // another field, which is the point of a global shortcut. Except when the
+    // field is covered: behind the viewer or a modal, focusing it would run
+    // searches out of sight and let the arrow keys drive two things at once.
     function onGlobalKey(e: KeyboardEvent) {
         if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "k") {
+            if (viewer.isOpen || document.querySelector('[aria-modal="true"]')) return;
             e.preventDefault();
             input?.focus();
             input?.select();
@@ -196,12 +200,16 @@
     let scopeButton = $state<HTMLButtonElement | null>(null);
     let panelBox = $state({ top: 0, left: 0, width: 0 });
     let scopeBox = $state({ top: 0, right: 0 });
+    // Bumped on window resize so the two effects below re-measure.
+    let resized = $state(0);
     $effect(() => {
+        void resized;
         if (!showPanel || !input) return;
         const r = input.getBoundingClientRect();
         panelBox = { top: r.bottom + 6, left: r.left, width: r.width };
     });
     $effect(() => {
+        void resized;
         if (!scopesOpen || !scopeButton) return;
         const r = scopeButton.getBoundingClientRect();
         scopeBox = { top: r.bottom + 6, right: window.innerWidth - r.right };
@@ -282,7 +290,7 @@
      the view controls, so it is sized to sit IN that row rather than to fill it:
      h-7 to match the icon buttons either side, and free to shrink when the panes
      are wide (see the header's min-w-0 / shrink rules in +page.svelte). -->
-<svelte:window onkeydown={onGlobalKey} />
+<svelte:window onkeydown={onGlobalKey} onresize={() => resized++} />
 
 <div bind:this={root} class="relative flex min-w-0 items-center gap-1.5">
     <!-- Input -->

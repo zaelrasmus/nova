@@ -9,9 +9,13 @@
 
   Dismissal matches the context menus: a full-window click-away catcher, Escape,
   and any choice that calls the `close` the content snippet receives.
+
+  Escape is caught in the CAPTURE phase and stopped there. The grid listens for
+  Escape on the window to clear the selection, and closing a menu must not also
+  throw away the selection the menu was about to act on.
 -->
 <script lang="ts">
-    import type { Snippet } from "svelte";
+    import { tick, type Snippet } from "svelte";
 
     interface Props {
         open?: boolean;
@@ -33,30 +37,68 @@
         children,
     }: Props = $props();
 
+    const EDGE = 8; // px kept clear of the window edges
+
     let anchor = $state<HTMLDivElement | null>(null);
+    let panel = $state<HTMLDivElement | null>(null);
     let pos = $state({ top: 0, left: 0, right: 0 });
 
+    /**
+     * Under the trigger, kept inside the window: shifted sideways when it would
+     * run past an edge, and flipped above the trigger when there's more room
+     * there than below. Runs again once the panel has rendered, because only
+     * then is its size known.
+     */
     function place() {
         if (!anchor) return;
         const r = anchor.getBoundingClientRect();
-        pos = { top: r.bottom + 6, left: r.left, right: window.innerWidth - r.right };
+        const w = panel?.offsetWidth ?? 0;
+        const h = panel?.offsetHeight ?? 0;
+        const vw = window.innerWidth;
+        const vh = window.innerHeight;
+
+        const below = r.bottom + 6;
+        const above = r.top - 6 - h;
+        const top = below + h > vh - EDGE && above >= EDGE ? above : below;
+
+        const left = Math.max(EDGE, Math.min(r.left, vw - w - EDGE));
+        const right = Math.max(EDGE, Math.min(vw - r.right, vw - w - EDGE));
+        pos = { top, left, right };
     }
 
     const close = () => (open = false);
     const toggle = () => {
-        if (!open) place();
+        if (!open) {
+            place();
+            void tick().then(place);
+        }
         open = !open;
     };
 
-    function onKey(e: KeyboardEvent) {
-        if (open && e.key === "Escape") {
+    // Content can change size while open (a membership toggle reflows chips),
+    // so keep the panel in place as it does.
+    $effect(() => {
+        if (!open || !panel) return;
+        const observer = new ResizeObserver(() => place());
+        observer.observe(panel);
+        if (anchor) observer.observe(anchor);
+        return () => observer.disconnect();
+    });
+
+    $effect(() => {
+        if (!open) return;
+        const onKey = (e: KeyboardEvent) => {
+            if (e.key !== "Escape") return;
             e.preventDefault();
+            e.stopPropagation();
             close();
-        }
-    }
+        };
+        window.addEventListener("keydown", onKey, true);
+        return () => window.removeEventListener("keydown", onKey, true);
+    });
 </script>
 
-<svelte:window onkeydown={onKey} onresize={() => open && place()} />
+<svelte:window onresize={() => open && place()} />
 
 <div bind:this={anchor} class="relative shrink-0">
     {@render trigger({ open, toggle })}
@@ -71,6 +113,7 @@
         onclick={close}
     ></button>
     <div
+        bind:this={panel}
         role="dialog"
         aria-label={label}
         style:top="{pos.top}px"

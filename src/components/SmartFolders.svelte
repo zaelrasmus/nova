@@ -115,7 +115,7 @@
              so the actions never reserve width from the name. Same treatment as
              the folder tree's row actions. -->
         <div
-            class="invisible absolute inset-y-0 right-0 flex items-center gap-px rounded-r-md pl-4
+            class="pointer-events-none invisible absolute inset-y-0 right-0 [&_button]:pointer-events-auto [&_select]:pointer-events-auto flex items-center gap-px rounded-r-md pl-4
                    pr-1 group-focus-within:visible group-hover:visible
                    [background:linear-gradient(var(--row-tint),var(--row-tint)),var(--nv-pane)]
                    [mask-image:linear-gradient(to_right,transparent,black_14px)]"
@@ -206,7 +206,7 @@
                 </span>
             </button>
             <div
-                class="invisible absolute inset-y-0 right-0 flex items-center rounded-r-md pl-4 pr-1
+                class="pointer-events-none invisible absolute inset-y-0 right-0 [&_button]:pointer-events-auto [&_select]:pointer-events-auto flex items-center rounded-r-md pl-4 pr-1
                        group-focus-within:visible group-hover:visible
                        [background:linear-gradient(var(--row-tint),var(--row-tint)),var(--nv-pane)]
                        [mask-image:linear-gradient(to_right,transparent,black_14px)]"

@@ -549,7 +549,13 @@ body {
 }
 
 /* The ring sits OUTSIDE the tile with a canvas-coloured gap, so it reads on any
-   art — and the grid margin keeps it from being clipped at the pane edge. */
+   art — and the grid margin keeps it from being clipped at the pane edge.
+   Selected and focused tiles are lifted above their neighbours: with a tile gap
+   under 8px the 4px ring overlaps the next tile, which would paint over it. */
+.nv-tile[aria-selected="true"],
+.nv-tile:focus-visible {
+    z-index: 1;
+}
 .nv-tile[aria-selected="true"] {
     box-shadow:
         0 0 0 2px var(--nv-canvas),
@@ -628,6 +634,9 @@ body {
     color: white;
     opacity: 0;
     transform: scale(0.9);
+    /* Invisible means inert: a tap in the corner of an unhovered tile (touch,
+       pen) must select normally, not toggle. */
+    pointer-events: none;
     transition:
         opacity 120ms,
         transform 120ms,
@@ -648,6 +657,7 @@ body {
 .nv-tile[aria-selected="true"] .nv-tile-check {
     opacity: 1;
     transform: none;
+    pointer-events: auto;
 }
 .nv-tile[aria-selected="true"] .nv-tile-check {
     border-color: var(--nv-accent);

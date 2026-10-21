@@ -43,7 +43,7 @@
             onclick={() => onchange(o.value)}
             class="grid h-6 min-w-7 place-items-center rounded-md text-xs font-medium transition-colors
                    focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-line
-                   disabled:pointer-events-none disabled:opacity-35
+                   disabled:cursor-default disabled:opacity-35
                    {Icon ? 'px-1.5' : 'px-2.5'}
                    {value === o.value
                 ? 'bg-raised-2 text-neutral-100 shadow-[0_1px_2px_rgb(0_0_0/0.45),inset_0_0_0_1px_var(--nv-line)]'

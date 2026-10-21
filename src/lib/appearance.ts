@@ -59,10 +59,14 @@ export const APPEARANCE_DEFAULTS: AppearancePreferences = {
     density: "comfortable",
 };
 
-/** Slider bounds, shared by the settings UI and the clamp below. */
+/**
+ * Slider bounds, shared by the settings UI and the clamp below. Margins start
+ * at 4px, not 0: the selection ring is drawn 4px outside a tile, and the grid's
+ * scroll container would clip it at the pane edge.
+ */
 export const APPEARANCE_LIMITS = {
-    gridMarginX: { min: 0, max: 48 },
-    gridMarginY: { min: 0, max: 48 },
+    gridMarginX: { min: 4, max: 48 },
+    gridMarginY: { min: 4, max: 48 },
     gridGap: { min: 2, max: 20 },
     tileRadius: { min: 0, max: 16 },
 } as const;

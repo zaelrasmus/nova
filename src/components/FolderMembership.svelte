@@ -1,4 +1,5 @@
 <script lang="ts">
+    import { untrack } from "svelte";
     import { toast } from "svelte-sonner";
     import { Check, Folder as FolderIcon, Minus, Plus, X } from "@lucide/svelte";
     import { assetLibrary, triStateOf, type Folder } from "$lib/assets.svelte";
@@ -17,8 +18,15 @@
     let loading = $state(true);
     let busy = $state<string | null>(null);
 
+    // Keyed on the ids' CONTENT, not the array: the inspector builds a fresh
+    // `[asset.id]` whenever the asset row refreshes (as it does after a toggle),
+    // and refetching then flipped `loading`, which unmounted the open Add list
+    // mid-use. `toggle` already re-reads membership itself.
+    const idsKey = $derived(assetIds.join("\u0000"));
+
     $effect(() => {
-        const ids = assetIds;
+        void idsKey;
+        const ids = untrack(() => assetIds);
         let cancelled = false;
         loading = true;
         assetLibrary

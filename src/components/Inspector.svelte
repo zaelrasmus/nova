@@ -127,6 +127,12 @@
     /** The src that finished loading, so the ThumbHash blur steps aside for it. */
     let loadedSrc = $state<string | null>(null);
     const singleSrc = $derived(asset ? previewSrc(asset) : null);
+    // The viewer only navigates what the grid is showing, so an asset the
+    // current search or filter hides can't be opened from here — offer the
+    // gesture only when it would do something.
+    const inViewer = $derived(
+        !!singleId && viewer.list.some((a) => a.id === singleId),
+    );
 
     // A few of the selected rows, fanned as a stack. Hydrated on demand for the
     // same reason as the single row: the selection can outlive its window.
@@ -387,7 +393,7 @@
             <div
                 role="group"
                 aria-label={asset.filename}
-                ondblclick={() => viewer.openById(asset.id)}
+                ondblclick={() => inViewer && viewer.openById(asset.id)}
                 class="group relative h-[200px] shrink-0 overflow-hidden rounded-lg ring-1 ring-inset ring-line"
                 style={checkerStyle}
             >
@@ -412,6 +418,7 @@
                         <TypeIcon class="h-8 w-8" />
                     </div>
                 {/if}
+                {#if inViewer}
                 <button
                     type="button"
                     onclick={() => viewer.openById(asset.id)}
@@ -425,6 +432,7 @@
                 >
                     <Maximize2 class="h-3.5 w-3.5" />
                 </button>
+                {/if}
             </div>
 
             <div class="mt-3.5 flex items-center gap-0.5">

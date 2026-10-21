@@ -79,6 +79,10 @@
     // from it. The grid's margins need no such mirror: they are padding on the
     // scroll container, which the ResizeObserver's content box already excludes.
     const GAP = $derived(clampAppearance("gridGap", settings.preferences.gridGap));
+    // Top/bottom margin. The waterfall virtualizer gets it as padding so its
+    // offsets (scrollToIndex, total size) include it; the justified layout,
+    // which positions rows itself, takes it as a CSS margin on the list.
+    const MARGIN_Y = $derived(clampAppearance("gridMarginY", settings.preferences.gridMarginY));
 
 
     $effect(() => {
@@ -290,13 +294,14 @@
       void columnWidth;
       // estimateSize adds the gap, and TanStack caches the estimates.
       void GAP;
+      const margin = MARGIN_Y;
       void scrollEl;
       // A captured video frame rewrites that row's width/height, and TanStack
       // caches estimateSize — without this the tile keeps the square estimate it
       // was given while the video was still 0x0. See `layoutVersion`.
       void assetLibrary.layoutVersion;
       const instance = get(virtualizer);
-      instance.setOptions({ count, lanes});
+      instance.setOptions({ count, lanes, paddingStart: margin, paddingEnd: margin });
       instance.measure();
     })
 
@@ -443,6 +448,9 @@
             // right above this grid and Space there must type a space.
             const t = e.target as HTMLElement | null;
             if (t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))) return;
+            // Someone else already acted on this key — an open menu closing on
+            // Escape, for one. That must not also clear the selection.
+            if (e.defaultPrevented) return;
 
             // The viewer owns the keyboard while it's open (nav, zoom, close);
             // ViewerOverlay handles those. Don't double-handle here.
@@ -523,7 +531,7 @@
      */
     function insertionAt(x: number, y: number) {
         const el = document.elementFromPoint(x, y);
-        const card = el?.closest<HTMLElement>("[data-asset-id]");
+        const card = el?.closest<HTMLElement>("[data-asset-id]") ?? nearestCard(x, y);
         if (!card) return { index: assets.length, bar: null }; // empty space past the end
         const idx = Number(card.dataset.assetIndex);
         const r = card.getBoundingClientRect();
@@ -532,6 +540,32 @@
             index: after ? idx + 1 : idx,
             bar: { x: after ? r.right + GAP / 2 : r.left - GAP / 2, top: r.top, height: r.height },
         };
+    }
+
+    /**
+     * The rendered card closest to (x, y), for a drop that missed every card —
+     * in a gap or the grid margins. Without this a release in the 20px margin
+     * beside a row meant "move to the very end". Below the last rendered card
+     * is still the end: that is the one miss that genuinely means it.
+     */
+    function nearestCard(x: number, y: number): HTMLElement | null {
+        if (!scrollEl) return null;
+        const cards = scrollEl.querySelectorAll<HTMLElement>("[data-asset-id]");
+        let best: HTMLElement | null = null;
+        let bestDist = Infinity;
+        let lowest = -Infinity;
+        for (const c of cards) {
+            const r = c.getBoundingClientRect();
+            lowest = Math.max(lowest, r.bottom);
+            const dx = Math.max(r.left - x, 0, x - r.right);
+            const dy = Math.max(r.top - y, 0, y - r.bottom);
+            const d = dx * dx + dy * dy;
+            if (d < bestDist) {
+                bestDist = d;
+                best = c;
+            }
+        }
+        return y > lowest ? null : best;
     }
 
     /** Is (x, y) inside the scroll viewport? Lets a near-miss still reorder. */
@@ -790,7 +824,7 @@
                     role="listbox"
                     aria-multiselectable="true"
                     aria-label="Assets"
-                    class="my-[var(--nv-grid-my)]"
+                    class={isJustified ? "my-[var(--nv-grid-my)]" : ""}
                     style="position: relative; width: 100%; height: {isJustified
                         ? justified.totalHeight
                         : $virtualizer.getTotalSize()}px;"
