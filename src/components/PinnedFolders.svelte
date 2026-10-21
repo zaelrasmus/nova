@@ -278,10 +278,10 @@
     <div
         bind:this={listEl}
         onpointerleave={scheduleClose}
-        class="flex flex-col gap-0.5
+        class="flex flex-col
                {variant === 'rail'
-            ? 'min-h-0 flex-1 items-center overflow-y-auto py-1 [scrollbar-width:thin]'
-            : 'shrink-0 px-2 pb-2'}"
+            ? 'min-h-0 flex-1 items-center gap-0.5 overflow-y-auto py-1 [scrollbar-width:thin]'
+            : 'shrink-0 gap-px px-2'}"
     >
         {#each pins as pin, i (refKey(pin))}
             {@const key = refKey(pin)}
@@ -296,7 +296,7 @@
 
             <!-- Insertion line for the reorder in progress. -->
             {#if lineBefore(i)}
-                <div class="h-0.5 shrink-0 rounded bg-blue-500"></div>
+                <div class="h-0.5 shrink-0 rounded bg-brand"></div>
             {/if}
 
             <div
@@ -321,17 +321,17 @@
                         e.preventDefault();
                         menu = { pin, x: e.clientX, y: e.clientY };
                     }}
-                    class="flex items-center transition-colors
+                    class="flex items-center rounded-md transition-colors
                            {variant === 'rail'
-                        ? 'h-9 w-9 justify-center rounded-md'
-                        : 'w-full gap-2 rounded px-2 py-1 text-left text-sm'}
+                        ? 'h-9 w-9 justify-center'
+                        : 'h-[var(--nv-row-h)] w-full gap-2.5 px-2 text-left text-[13px]'}
                            {refusing
                         ? 'cursor-not-allowed bg-red-900/30 ring-1 ring-red-700/60'
                         : dropping
                           ? 'bg-emerald-600/25 ring-1 ring-emerald-500'
                           : active
-                            ? 'bg-neutral-800'
-                            : 'hover:bg-neutral-800/60'}"
+                            ? 'bg-brand-soft'
+                            : 'hover:bg-wash'}"
                 >
                     <!-- The accent lives on the icon, not the row: a full-width
                          tinted row would fight the selection highlight, and the
@@ -358,7 +358,10 @@
                     </span>
 
                     {#if variant === "expanded"}
-                        <span class="truncate {active ? 'text-neutral-100' : 'text-neutral-300'}">
+                        <span
+                            class="min-w-0 flex-1 truncate
+                                   {active ? 'text-neutral-100' : 'text-neutral-400'}"
+                        >
                             {pin.name}
                         </span>
                     {/if}
@@ -369,11 +372,11 @@
         <!-- Dropping past the last pin: `insertAt` has run off the end of the
              stationary list, so no row can claim the line. -->
         {#if dragId && insertAt === midpoints.length}
-            <div class="h-0.5 shrink-0 rounded bg-blue-500"></div>
+            <div class="h-0.5 shrink-0 rounded bg-brand"></div>
         {/if}
     </div>
 {:else if variant === "expanded"}
-    <p class="px-3 pb-2 text-xs text-neutral-600">
+    <p class="px-4 pt-0.5 pb-1 text-xs leading-relaxed text-neutral-600">
         Right-click a folder or smart folder to pin it here.
     </p>
 {/if}
@@ -385,14 +388,14 @@
     <div
         data-rail-flyout
         class="fixed z-[85] flex flex-col overflow-hidden rounded-r-lg rounded-bl-lg border
-               border-neutral-800 bg-neutral-900 shadow-2xl"
+               border-line-strong bg-pane shadow-2xl"
         style="left: var(--rail-w); top: {flyout.top}px; width: {FLYOUT_W}px;
                max-height: {FLYOUT_H}px"
         onpointerenter={cancelClose}
         onpointerleave={scheduleClose}
     >
         <div
-            class="flex shrink-0 items-center justify-between gap-2 border-b border-neutral-800
+            class="flex shrink-0 items-center justify-between gap-2 border-b border-line
                    px-3 py-2"
         >
             <span class="flex min-w-0 items-center gap-1.5">
@@ -400,10 +403,7 @@
                     class="h-1.5 w-1.5 shrink-0 rounded-full"
                     style="background-color: {pinColorVar(flyout.pin.color)}"
                 ></span>
-                <span
-                    class="truncate text-[11px] font-semibold uppercase tracking-wider
-                           text-neutral-400"
-                >
+                <span class="truncate text-[11.5px] font-semibold text-neutral-500">
                     {flyout.pin.name}
                 </span>
             </span>
@@ -414,8 +414,8 @@
                     flyout = null;
                     open(target);
                 }}
-                class="shrink-0 rounded px-1.5 py-0.5 text-[11px] text-neutral-500
-                       transition-colors hover:bg-neutral-800 hover:text-neutral-200"
+                class="shrink-0 rounded-md px-1.5 py-0.5 text-[11px] text-neutral-500
+                       transition-colors hover:bg-wash hover:text-neutral-200"
             >
                 Open
             </button>
@@ -436,9 +436,7 @@
                 {@const rules = smartRules(flyout.pin.id) ?? null}
                 <div class="flex flex-wrap gap-1">
                     {#each describeConditions(rules, assetLibrary.folderNames) as chip (chip)}
-                        <span
-                            class="rounded bg-neutral-800 px-1.5 py-0.5 text-[10px] text-neutral-400"
-                        >
+                        <span class="rounded bg-raised px-1.5 py-0.5 text-[10px] text-neutral-400">
                             {chip}
                         </span>
                     {:else}
@@ -451,7 +449,7 @@
                         {#each preview as row (row.id)}
                             {@const src = thumbHashUrl(row.thumb_hash)}
                             <div
-                                class="aspect-square overflow-hidden rounded bg-neutral-800"
+                                class="aspect-square overflow-hidden rounded bg-raised"
                                 title={row.filename}
                             >
                                 {#if src}

@@ -149,15 +149,15 @@
                 onclick={(e) => toggleSticky(section.id, e.currentTarget)}
                 class="grid h-9 w-9 place-items-center rounded-md transition-colors
                        {hovered === section.id
-                    ? 'bg-neutral-800 text-neutral-100'
-                    : 'text-neutral-500 hover:bg-neutral-800/60 hover:text-neutral-300'}"
+                    ? 'bg-brand-soft text-brand-text'
+                    : 'text-neutral-500 hover:bg-wash hover:text-neutral-200'}"
             >
                 <Icon class="h-4 w-4" strokeWidth={1.5} />
             </button>
         {/each}
     </nav>
 
-    <div class="mx-3 my-1 h-px shrink-0 bg-neutral-800"></div>
+    <div class="mx-3 my-1 h-px shrink-0 bg-line"></div>
 
     <!-- Folder-land: the tree behind one icon, then the user's shortlist. -->
     <div class="flex shrink-0 flex-col items-center pb-1">
@@ -171,8 +171,8 @@
             onclick={(e) => toggleSticky("tree", e.currentTarget)}
             class="grid h-9 w-9 place-items-center rounded-md transition-colors
                    {hovered === 'tree'
-                ? 'bg-neutral-800 text-neutral-100'
-                : 'text-neutral-500 hover:bg-neutral-800/60 hover:text-neutral-300'}"
+                ? 'bg-brand-soft text-brand-text'
+                : 'text-neutral-500 hover:bg-wash hover:text-neutral-200'}"
         >
             <FolderTreeIcon class="h-4 w-4" strokeWidth={1.5} />
         </button>
@@ -199,13 +199,13 @@
     <div
         data-rail-flyout
         class="fixed z-[85] flex flex-col overflow-hidden rounded-r-lg rounded-bl-lg border
-               border-neutral-800 bg-neutral-900 shadow-2xl"
+               border-line-strong bg-pane shadow-2xl"
         style="left: var(--rail-w); top: {flyoutTop}px; width: {FLYOUT_W}px; max-height: {FLYOUT_H}px"
         onpointerenter={cancelClose}
         onpointerleave={scheduleClose}
     >
-        <div class="flex shrink-0 items-center justify-between border-b border-neutral-800 px-3 py-2">
-            <span class="text-[11px] font-semibold uppercase tracking-wider text-neutral-500">
+        <div class="flex shrink-0 items-center justify-between border-b border-line px-3 py-2">
+            <span class="text-[11.5px] font-semibold text-neutral-500">
                 {label}
             </span>
             <!-- The ONLY thing that gives the sidebar its width back. Expanding
@@ -217,8 +217,8 @@
                     dismiss();
                     layout.expand();
                 }}
-                class="rounded px-1.5 py-0.5 text-[11px] text-neutral-500 transition-colors
-                       hover:bg-neutral-800 hover:text-neutral-200"
+                class="rounded-md px-1.5 py-0.5 text-[11px] text-neutral-500 transition-colors
+                       hover:bg-wash hover:text-neutral-200"
             >
                 Expand
             </button>
@@ -244,10 +244,12 @@
                         hovered = null;
                         onManageTags();
                     }}
-                    class="w-full rounded-lg border border-neutral-800 bg-neutral-900/40 px-3 py-2
-                           text-left text-sm text-neutral-300 transition-colors hover:bg-neutral-800"
+                    class="flex h-[var(--nv-row-h)] w-full items-center gap-2.5 rounded-md px-2
+                           text-left text-[13px] text-neutral-400 transition-colors hover:bg-wash
+                           hover:text-neutral-100"
                 >
-                    Manage tags…
+                    <Tag class="h-4 w-4 shrink-0 text-neutral-500" strokeWidth={1.5} />
+                    <span class="truncate">Manage tags…</span>
                 </button>
             {/if}
         </div>

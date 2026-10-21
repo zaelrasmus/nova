@@ -13,6 +13,7 @@
   via the shared `data-drop-*` attributes — see droptarget.ts.
 -->
 <script lang="ts">
+    import { Folder as FolderIcon, Plus, Pencil, Trash2 } from "@lucide/svelte";
     import { assetLibrary, type Folder } from "$lib/assets.svelte";
     import { RangeSelection, selection } from "$lib/selection.svelte";
     import { dropzone } from "$lib/dropzone.svelte";
@@ -165,6 +166,17 @@
 
     const isScope = (id: string) => active.kind === "folder" && active.id === id;
 
+    /**
+     * The fill a row shows while hovered, for the action overlay to paint over
+     * the name with. The overlay is opaque (that fill on top of the pane), so a
+     * long name slides under it instead of reserving the actions' width at rest.
+     */
+    function rowTint(id: string): string {
+        if (treeSel.has(id)) return "color-mix(in oklab, var(--nv-accent) 25%, transparent)";
+        if (isScope(id)) return "var(--nv-accent-soft)";
+        return "var(--nv-wash)";
+    }
+
     // ── Reorganising the tree by dragging ────────────────────────────────────
     //
     // Drop on the MIDDLE of a row to reparent; on its top or bottom EDGE to
@@ -214,7 +226,7 @@
 
     function folderPayload(e: PointerEvent): DragPayload | null {
         const row = (e.target as HTMLElement).closest(`[${DROP_FOLDER_ATTR}]`);
-        // Row actions (＋ ✎ 🗑) sit inside the row: dragging from a button would
+        // Row actions (new, rename, delete) sit inside the row: dragging from a button would
         // be a gesture nobody intends.
         if (!row || (e.target as HTMLElement).closest("button[data-row-action]")) return null;
         const id = row.getAttribute(DROP_FOLDER_ATTR);
@@ -309,7 +321,7 @@
         validate: validateFolderDrop,
         onDrop: onFolderDrop,
     }}
-    class="flex flex-col gap-0.5 rounded-lg border border-neutral-800 bg-neutral-900/40 p-2 text-sm"
+    class="flex flex-col gap-px"
 >
     <!-- "All assets" and "Uncategorized" used to sit here. They're smart views,
          not folders, so they live in SystemViews.svelte now — the sidebar draws
@@ -322,9 +334,9 @@
             type="text"
             bind:value={filterText}
             placeholder="Filter folders…"
-            class="mb-1 w-full rounded border border-neutral-800 bg-neutral-950 px-2 py-1 text-xs
-                   text-neutral-200 placeholder:text-neutral-600 focus:border-neutral-700
-                   focus:outline-none"
+            class="mb-1 h-7 w-full shrink-0 rounded-md border border-line bg-raised px-2 text-xs
+                   text-neutral-200 placeholder:text-neutral-600 focus:outline-none focus:ring-1
+                   focus:ring-brand-line"
         />
     {/if}
 
@@ -347,7 +359,7 @@
                  make the tree jitter as the cursor crosses it. -->
             <div
                 {...{ [DROP_FOLDER_ATTR]: folder.id, [DROP_FOLDER_NAME_ATTR]: folder.name }}
-                class="group relative flex items-center rounded transition-colors
+                class="group relative flex items-center rounded-md transition-colors
                     {dropping ? 'bg-emerald-600/25 ring-1 ring-emerald-500' : ''}
                     {blocked ? 'bg-red-600/15 ring-1 ring-red-600/50' : ''}"
                 style="padding-left: {depth * 12}px"
@@ -373,14 +385,20 @@
                     }}
                     aria-pressed={treeSel.has(folder.id)}
                     aria-current={isScope(folder.id) ? "true" : undefined}
-                    class="flex min-w-0 flex-1 items-center gap-1.5 rounded px-2 py-1 text-left
-                        transition-colors
+                    class="flex h-[var(--nv-row-h)] min-w-0 flex-1 items-center gap-2.5 rounded-md
+                        px-2 text-left text-[13px] transition-colors
                         {treeSel.has(folder.id)
-                        ? 'bg-blue-600 text-white'
+                        ? 'bg-brand/25 text-neutral-100'
                         : isScope(folder.id)
-                          ? 'bg-neutral-800 text-neutral-100'
-                          : 'text-neutral-300 hover:bg-neutral-800'}"
+                          ? 'bg-brand-soft text-neutral-100'
+                          : 'text-neutral-400 group-hover:bg-wash group-hover:text-neutral-100'}"
                 >
+                    <FolderIcon
+                        class="h-4 w-4 shrink-0
+                            {isScope(folder.id) ? 'text-brand-text' : 'text-neutral-500'}"
+                        strokeWidth={1.5}
+                    />
+                    <span class="min-w-0 flex-1 truncate">{folder.name}</span>
                     <!-- Pin marker. Pinning must read as "marked", not "moved
                          somewhere else" — without a badge here the folder looks
                          like it left the tree for the pinned list. -->
@@ -391,32 +409,56 @@
                             title="Pinned to the sidebar"
                         ></span>
                     {/if}
-                    <span class="truncate">{folder.name}</span>
                 </button>
-                <div class="flex shrink-0 opacity-0 transition-opacity group-hover:opacity-100">
+                <!-- Row actions OVERLAY the row's right edge rather than taking
+                     width beside it, so a name only truncates when it really
+                     doesn't fit. `invisible` (not just transparent) keeps the
+                     hidden buttons from eating clicks on the name underneath;
+                     focus-within brings them back for the keyboard. The left
+                     edge fades out so a cut-off name doesn't end in a hard
+                     line. -->
+                <div
+                    class="invisible absolute inset-y-0 right-0 flex items-center gap-px rounded-r-md
+                           pl-4 pr-1 group-focus-within:visible group-hover:visible
+                           [background:linear-gradient(var(--row-tint),var(--row-tint)),var(--nv-pane)]
+                           [mask-image:linear-gradient(to_right,transparent,black_14px)]"
+                    style="--row-tint: {rowTint(folder.id)}"
+                >
                     <button
                         type="button"
                         data-row-action
                         title="New subfolder"
+                        aria-label="New subfolder"
                         onclick={() => newFolder(folder.id)}
-                        class="px-1 text-neutral-500 hover:text-neutral-200">＋</button
+                        class="grid h-[22px] w-[22px] place-items-center rounded-[5px] text-neutral-500
+                               transition-colors hover:bg-wash-strong hover:text-neutral-100"
                     >
+                        <Plus class="h-3.5 w-3.5" />
+                    </button>
                     <button
                         type="button"
                         data-row-action
                         title="Rename"
+                        aria-label="Rename"
                         onclick={() => renameFolder(folder)}
-                        class="px-1 text-neutral-500 hover:text-neutral-200">✎</button
+                        class="grid h-[22px] w-[22px] place-items-center rounded-[5px] text-neutral-500
+                               transition-colors hover:bg-wash-strong hover:text-neutral-100"
                     >
+                        <Pencil class="h-3.5 w-3.5" />
+                    </button>
                     <button
                         type="button"
                         data-row-action
                         title={treeSel.has(folder.id) && treeSel.size > 1
                             ? `Delete ${treeSel.size} selected folders`
                             : "Delete"}
+                        aria-label="Delete"
                         onclick={() => deleteFolders(folder)}
-                        class="px-1 text-neutral-500 hover:text-red-400">🗑</button
+                        class="grid h-[22px] w-[22px] place-items-center rounded-[5px] text-neutral-500
+                               transition-colors hover:bg-wash-strong hover:text-red-400"
                     >
+                        <Trash2 class="h-3.5 w-3.5" />
+                    </button>
                 </div>
             </div>
             {@render tree(folder.id, depth + 1)}
@@ -433,7 +475,7 @@
         <!-- Multi-select is invisible unless something says so: the row actions
              only appear on hover, so the count is the only standing signal that
              a delete would take more than one folder. -->
-        <div class="mt-1 flex items-center gap-2 px-2 text-xs text-blue-400">
+        <div class="mt-1 flex items-center gap-2 px-2 text-xs text-brand-text">
             <span>{treeSel.size} selected</span>
             <button
                 type="button"
@@ -451,9 +493,11 @@
     <button
         type="button"
         onclick={() => newFolder(rootId)}
-        class="mt-1 rounded px-2 py-1 text-left text-xs text-neutral-500 transition-colors hover:bg-neutral-800 hover:text-neutral-300"
+        class="flex h-[var(--nv-row-h)] items-center gap-2.5 rounded-md px-2 text-left text-[13px]
+               text-neutral-500 transition-colors hover:bg-wash hover:text-neutral-200"
     >
-        ＋ {rootId ? "New subfolder" : "New folder"}
+        <Plus class="h-4 w-4 shrink-0" strokeWidth={1.5} />
+        {rootId ? "New subfolder" : "New folder"}
     </button>
 </div>
 

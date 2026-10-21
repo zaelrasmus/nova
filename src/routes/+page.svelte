@@ -28,7 +28,16 @@
     import { tweened } from "svelte/motion";
     import type { Component } from "svelte";
     import { toast } from "svelte-sonner";
-    import { PanelLeft, PanelRight, Settings, Download, ChevronRight, X } from "@lucide/svelte";
+    import {
+        PanelLeft,
+        PanelRight,
+        Settings,
+        Download,
+        ChevronRight,
+        ChevronDown,
+        Tag,
+        X,
+    } from "@lucide/svelte";
 
     import {
         assetLibrary,
@@ -632,8 +641,8 @@
                     title="Hide sidebar (Ctrl+B)"
                     aria-label="Hide sidebar"
                     onclick={() => layout.toggleSidebar()}
-                    class="grid h-7 w-7 shrink-0 place-items-center rounded text-neutral-500
-                           transition-colors hover:bg-neutral-800 hover:text-neutral-200"
+                    class="grid h-7 w-7 shrink-0 place-items-center rounded-md text-neutral-500
+                           transition-colors hover:bg-wash hover:text-neutral-200"
                 >
                     <PanelLeft class="h-4 w-4" />
                 </button>
@@ -658,74 +667,91 @@
                      want is often below the fold, and there's no way to scroll a
                      sidebar with a pointer already holding something. -->
                 <nav
-                    class="flex min-h-0 flex-1 flex-col overflow-y-auto pb-2 [scrollbar-width:thin]"
+                    class="flex min-h-0 flex-1 flex-col overflow-y-auto pt-2 pb-4 [scrollbar-width:thin]"
                     {...{ [DRAG_SCROLL_ATTR]: "" }}
                 >
+                    <!-- Section heading. A native <details> does the collapsing,
+                         so a section stays open across re-renders without any
+                         state here, and closes back to open on reload (no
+                         persistence, deliberately). The chevron shows on hover,
+                         and stays put while the section is closed so a closed
+                         section never reads as an empty one. -->
+                    {#snippet sectionHead(title: string)}
+                        <summary
+                            class="flex h-[26px] cursor-default list-none items-center gap-1 px-4
+                                   text-[11.5px] font-semibold text-neutral-500 select-none
+                                   hover:text-neutral-300 [&::-webkit-details-marker]:hidden"
+                        >
+                            {title}
+                            <ChevronDown
+                                class="h-3 w-3 -rotate-90 opacity-100 transition
+                                       group-open/sec:rotate-0 group-open/sec:opacity-0
+                                       group-hover/sec:opacity-100"
+                            />
+                        </summary>
+                    {/snippet}
+
                     <SystemViews variant="expanded" />
 
-                    <div class="mx-3 my-2 h-px shrink-0 bg-neutral-800"></div>
+                    <details open class="group/sec mt-4">
+                        {@render sectionHead("Pinned")}
+                        <PinnedFolders variant="expanded" />
+                    </details>
 
-                    <p
-                        class="px-3 pb-1 text-[10px] font-semibold uppercase tracking-wider
-                               text-neutral-600"
-                    >
-                        Pinned
-                    </p>
-                    <PinnedFolders variant="expanded" />
+                    <details open class="group/sec mt-4">
+                        {@render sectionHead("Smart folders")}
+                        <div class="px-2">
+                            <SmartFolders />
+                        </div>
+                    </details>
 
-                    <div class="mx-3 my-2 h-px shrink-0 bg-neutral-800"></div>
+                    <details open class="group/sec mt-4">
+                        {@render sectionHead("Folders")}
+                        <div class="px-2">
+                            <FolderTree />
+                        </div>
+                    </details>
 
-                    <p
-                        class="px-3 pb-1 text-[10px] font-semibold uppercase tracking-wider
-                               text-neutral-600"
-                    >
-                        Smart folders
-                    </p>
-                    <div class="px-2">
-                        <SmartFolders />
-                    </div>
+                    <!-- Tags stay a door to the manager, not a tag cloud. -->
+                    <details open class="group/sec mt-4">
+                        {@render sectionHead("Tags")}
+                        <div class="px-2">
+                            <button
+                                type="button"
+                                onclick={() => (tagManagerOpen = true)}
+                                class="flex h-[var(--nv-row-h)] w-full items-center gap-2.5 rounded-md
+                                       px-2 text-left text-[13px] text-neutral-400 transition-colors
+                                       hover:bg-wash hover:text-neutral-100"
+                            >
+                                <Tag class="h-4 w-4 shrink-0 text-neutral-500" strokeWidth={1.5} />
+                                <span class="truncate">Manage tags…</span>
+                            </button>
+                        </div>
+                    </details>
 
-                    <div class="mx-3 my-2 h-px shrink-0 bg-neutral-800"></div>
-
-                    <p
-                        class="px-3 pb-1 text-[10px] font-semibold uppercase tracking-wider
-                               text-neutral-600"
-                    >
-                        Folders
-                    </p>
-                    <div class="px-2">
-                        <FolderTree />
-                    </div>
-
-                    <button
-                        type="button"
-                        onclick={() => (tagManagerOpen = true)}
-                        class="mx-2 mt-2 rounded px-2 py-1.5 text-left text-sm text-neutral-400
-                               transition-colors hover:bg-neutral-800 hover:text-neutral-200"
-                    >
-                        Manage tags…
-                    </button>
-
-                    <div class="mt-2 px-2">
-                        <SavedFilters />
-                    </div>
+                    <details open class="group/sec mt-4">
+                        {@render sectionHead("Saved filters")}
+                        <div class="px-2">
+                            <SavedFilters />
+                        </div>
+                    </details>
                 </nav>
             {/if}
 
             <!-- Footer: settings live at the bottom of the sidebar, not in a
                  header — it's a destination you visit rarely, not a control. -->
-            <div class="shrink-0 border-t border-neutral-800 p-2">
+            <div class="shrink-0 border-t border-line p-2">
                 <Dialog.Root bind:open={settingsOpen}>
                     <Dialog.Trigger
                         type="button"
-                        class="flex w-full items-center gap-2 rounded px-2 py-1.5 text-sm
-                               text-neutral-400 transition-colors hover:bg-neutral-800
-                               hover:text-neutral-200 {layout.sidebarMode === 'rail'
+                        class="flex h-[var(--nv-row-h)] w-full items-center gap-2.5 rounded-md px-2
+                               text-[13px] text-neutral-400 transition-colors hover:bg-wash
+                               hover:text-neutral-100 {layout.sidebarMode === 'rail'
                             ? 'justify-center'
                             : ''}"
                         aria-label="Settings"
                     >
-                        <Settings class="h-4 w-4 shrink-0" />
+                        <Settings class="h-4 w-4 shrink-0 text-neutral-500" strokeWidth={1.5} />
                         {#if layout.sidebarMode === "expanded"}<span>Settings</span>{/if}
                     </Dialog.Trigger>
                     <Dialog.Content

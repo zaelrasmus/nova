@@ -1,5 +1,5 @@
 <script lang="ts">
-    import { ChevronDown, Plus, FolderOpen, Library } from "@lucide/svelte";
+    import { ChevronsUpDown, Plus, FolderOpen, Check } from "@lucide/svelte";
     import { libraryManager } from "../../routes/settings.svelte";
 
     /**
@@ -33,18 +33,29 @@
     const activeName = $derived(
         libraryManager.state.activeLibrary?.split(/[\\/]/).pop() ?? "No library",
     );
+
+    /** The badge's letter: something to recognise a library by at a glance. */
+    const initial = $derived(activeName.trim().charAt(0).toUpperCase() || "?");
 </script>
 
 <div class="min-w-0">
     <button
         type="button"
         onclick={toggle}
-        class="flex min-w-0 items-center gap-1.5 rounded-md px-2 py-1 text-sm text-neutral-200
-               transition-colors hover:bg-neutral-800"
+        title="Switch library"
+        class="flex h-8 min-w-0 items-center gap-2 rounded-lg pl-1 pr-2 text-[13px] text-neutral-100
+               transition-colors hover:bg-wash {open ? 'bg-wash-strong' : ''}"
     >
-        <Library class="h-3.5 w-3.5 shrink-0 text-neutral-500" />
-        <span class="truncate font-medium">{activeName}</span>
-        <ChevronDown class="h-3.5 w-3.5 shrink-0 text-neutral-500" />
+        <span
+            aria-hidden="true"
+            class="grid h-6 w-6 shrink-0 place-items-center rounded-[7px] text-xs font-bold
+                   text-white shadow-[inset_0_0_0_1px_rgb(255_255_255/0.18),0_1px_4px_rgb(0_0_0/0.4)]"
+            style="background: linear-gradient(140deg, var(--nv-accent), color-mix(in oklch, var(--nv-accent) 45%, #ff7a59))"
+        >
+            {initial}
+        </span>
+        <span class="truncate font-semibold">{activeName}</span>
+        <ChevronsUpDown class="h-3.5 w-3.5 shrink-0 text-neutral-500" />
     </button>
 
     {#if open}
@@ -58,29 +69,28 @@
             onclick={() => (open = false)}
         ></button>
 
-        <div
-            class="fixed z-50 w-64 rounded-lg border border-neutral-800 bg-neutral-900 p-1 shadow-2xl"
-            style="left: {anchor.x}px; top: {anchor.y}px"
-        >
+        <div class="nv-menu fixed z-50 w-64" style="left: {anchor.x}px; top: {anchor.y}px">
             {#if libraryManager.state.history.length > 0}
-                <p class="px-2 py-1.5 text-[10px] font-semibold uppercase tracking-wider text-neutral-500">
-                    Recent
-                </p>
+                <p class="nv-menu-label">Recent</p>
                 {#each libraryManager.state.history as path (path)}
+                    {@const current = path === libraryManager.state.activeLibrary}
                     <button
                         type="button"
+                        title={path}
+                        aria-current={current ? "true" : undefined}
                         onclick={() => {
                             open = false;
                             void libraryManager.switchLibrary(path);
                         }}
-                        class="flex w-full items-center rounded px-2 py-1.5 text-left text-sm
-                               text-neutral-300 hover:bg-neutral-800
-                               {path === libraryManager.state.activeLibrary ? 'text-blue-400' : ''}"
+                        class="nv-menu-item"
                     >
-                        <span class="truncate">{path.split(/[\\/]/).pop() || path}</span>
+                        <span class="min-w-0 flex-1 truncate">{path.split(/[\\/]/).pop() || path}</span>
+                        {#if current}
+                            <Check class="h-3.5 w-3.5 shrink-0 text-brand-text" />
+                        {/if}
                     </button>
                 {/each}
-                <div class="my-1 h-px bg-neutral-800"></div>
+                <div class="nv-menu-sep"></div>
             {/if}
 
             <button
@@ -89,10 +99,9 @@
                     open = false;
                     oncreate();
                 }}
-                class="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm
-                       text-neutral-300 hover:bg-neutral-800"
+                class="nv-menu-item"
             >
-                <Plus class="h-3.5 w-3.5" /> New library
+                <Plus class="h-3.5 w-3.5 text-neutral-500" /> New library
             </button>
             <button
                 type="button"
@@ -100,10 +109,9 @@
                     open = false;
                     onopen();
                 }}
-                class="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm
-                       text-neutral-300 hover:bg-neutral-800"
+                class="nv-menu-item"
             >
-                <FolderOpen class="h-3.5 w-3.5" /> Open existing…
+                <FolderOpen class="h-3.5 w-3.5 text-neutral-500" /> Open existing…
             </button>
         </div>
     {/if}
