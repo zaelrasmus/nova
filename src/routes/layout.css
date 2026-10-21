@@ -140,6 +140,22 @@
 @theme inline {
     --font-sans: "Inter Variable", sans-serif;
 
+    /* Nova surfaces and accent (tokens below, under DESIGN TOKENS). Named so
+       they never collide with shadcn's own `accent`/`muted`, which the ui/
+       primitives still use. */
+    --color-canvas: var(--nv-canvas);
+    --color-pane: var(--nv-pane);
+    --color-raised: var(--nv-raised);
+    --color-raised-2: var(--nv-raised-2);
+    --color-wash: var(--nv-wash);
+    --color-wash-strong: var(--nv-wash-strong);
+    --color-line: var(--nv-line);
+    --color-line-strong: var(--nv-line-strong);
+    --color-brand: var(--nv-accent);
+    --color-brand-soft: var(--nv-accent-soft);
+    --color-brand-line: var(--nv-accent-line);
+    --color-brand-text: var(--nv-accent-text);
+
     --color-sidebar-ring: var(--sidebar-ring);
 
     --color-sidebar-border: var(--sidebar-border);
@@ -247,8 +263,87 @@
    --inspector-col; everything else here is static.
    ══════════════════════════════════════════════════════════════════════════ */
 
+/* ══ DESIGN TOKENS ════════════════════════════════════════════════════════════════════════════
+
+   One neutral ramp and one accent. The accent means exactly three things —
+   selected, on, and "you are here" — and is never decoration; that restraint
+   is what lets it read at a glance.
+
+   The values marked (pref) are written by $lib/appearance.ts from Settings ›
+   Appearance; the ones here are the same defaults, so the first paint (before
+   settings load) already looks right.
+   ═════════════════════════════════════════════════════════════════════════════ */
 :root {
-    --chrome-h: 52px; /* every pane header — the fake titlebar's height */
+    --nv-canvas: #0b0b0d; /* the grid: darkest, so the art is the brightest thing */
+    --nv-pane: #111114; /* sidebar + inspector, one step up */
+    --nv-raised: #19191d; /* inputs, chips, tiles still loading */
+    --nv-raised-2: #222227; /* the "on" segment, chips inside inputs */
+    --nv-wash: rgb(255 255 255 / 0.045); /* hover */
+    --nv-wash-strong: rgb(255 255 255 / 0.08); /* pressed / open */
+    --nv-line: rgb(255 255 255 / 0.07);
+    --nv-line-strong: rgb(255 255 255 / 0.12);
+
+    --nv-accent: oklch(0.68 0.16 277); /* (pref) */
+    --nv-accent-soft: color-mix(in oklch, var(--nv-accent) 17%, transparent);
+    --nv-accent-line: color-mix(in oklch, var(--nv-accent) 50%, transparent);
+    --nv-accent-text: color-mix(in oklch, var(--nv-accent) 65%, white);
+
+    --nv-grid-mx: 20px; /* (pref) */
+    --nv-grid-my: 20px; /* (pref) */
+    --nv-grid-gap: 8px; /* (pref) */
+    --nv-tile-radius: 8px; /* (pref) */
+    --nv-row-h: 30px; /* sidebar rows; density */
+}
+
+/* Flat: one tone for every pane, the way the app looked before. */
+:root[data-panes="flat"] {
+    --nv-pane: var(--nv-canvas);
+}
+
+:root[data-density="compact"] {
+    --nv-row-h: 26px;
+    --chrome-h: 44px;
+}
+
+/* The one slider style. Tailwind's `accent-*` only tints the native control,
+   which renders as a different widget on every platform. */
+.nv-range {
+    -webkit-appearance: none;
+    appearance: none;
+    height: 4px;
+    margin: 0;
+    border-radius: 4px;
+    background:
+        linear-gradient(var(--nv-accent), var(--nv-accent)) 0 / var(--fill, 50%) 100% no-repeat,
+        var(--nv-raised-2);
+    outline: none;
+}
+.nv-range::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 13px;
+    height: 13px;
+    border-radius: 50%;
+    background: #f4f4f5;
+    box-shadow:
+        0 0 0 1px rgb(0 0 0 / 0.35),
+        0 1px 3px rgb(0 0 0 / 0.6);
+    transition: transform 100ms;
+}
+.nv-range:active::-webkit-slider-thumb {
+    transform: scale(1.15);
+}
+.nv-range:focus-visible::-webkit-slider-thumb {
+    box-shadow: 0 0 0 3px var(--nv-accent-soft);
+}
+.nv-range:disabled {
+    opacity: 0.4;
+}
+
+:root:not([data-density="compact"]) {
+    --chrome-h: 48px; /* every pane header — the fake titlebar's height */
+}
+
+:root {
     --rail-w: 52px; /* collapsed sidebar (section icons) */
     --wc-w: 138px; /* 3 × 46px window buttons (Windows metrics) */
 
@@ -294,7 +389,7 @@ body {
     grid-template-columns: var(--sidebar-col, 240px) minmax(0, 1fr) var(--inspector-col, 320px);
     height: 100vh;
     overflow: hidden;
-    background-color: #0a0a0a;
+    background-color: var(--nv-canvas);
     color: #e5e5e5;
 }
 

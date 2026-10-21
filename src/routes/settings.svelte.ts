@@ -13,6 +13,7 @@
 
 import { LazyStore } from "@tauri-apps/plugin-store";
 import { invoke } from "@tauri-apps/api/core";
+import { APPEARANCE_DEFAULTS, type AppearancePreferences } from "$lib/appearance";
 
 const store = new LazyStore("settings.json");
 
@@ -25,7 +26,11 @@ const store = new LazyStore("settings.json");
 export const VIEWER_BACKGROUNDS = ["gray", "checker", "black", "white"] as const;
 export type ViewerBackground = (typeof VIEWER_BACKGROUNDS)[number];
 
-export interface AppPreferences {
+/**
+ * Appearance fields (accent, grid spacing, density…) are declared in
+ * $lib/appearance, next to the code that paints them.
+ */
+export interface AppPreferences extends AppearancePreferences {
   navItemVisibility: Record<string, boolean>;
   thumbnailQuality: "auto" | "lossy" | "lossless";
   /** WebP lossy quality (0-100). Applies to Lossy mode and Auto's lossy branch. */
@@ -100,6 +105,7 @@ const DEFAULT_PREFERENCES: AppPreferences = {
   inspectorWidth: 320,
   sidebarHidden: false,
   inspectorHidden: false,
+  ...APPEARANCE_DEFAULTS,
 };
 
 const DEFAULT_LIBRARY_STATE: LibraryState = {
@@ -163,6 +169,16 @@ class SettingsStore {
     //   await invoke("apply_preference", { key, value });
     // }
     //
+  }
+
+  /**
+   * Several preferences in one disk write — "Reset appearance" changes nine
+   * at once, and nine `set` calls would be nine saves.
+   */
+  async update(values: Partial<AppPreferences>): Promise<void> {
+    await this.ready;
+    Object.assign(this.preferences, values);
+    await this.persist();
   }
 
   // ANTICIPATED: Backend-synced preference keys

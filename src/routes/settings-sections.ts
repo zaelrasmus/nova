@@ -32,6 +32,11 @@ export interface SettingsSection {
  */
 export const SETTINGS_SECTIONS: SettingsSection[] = [
   {
+    id: "appearance",
+    label: "Appearance",
+    icon: "Palette",
+  },
+  {
     id: "display",
     label: "Display",
     icon: "LayoutGrid",

@@ -63,10 +63,12 @@
     import * as Dialog from "$components/ui/dialog";
     import * as Tabs from "$components/ui/tabs";
     import { SETTINGS_SECTIONS, DEFAULT_SECTION_ID } from "./settings-sections";
+    import AppearanceSection from "../components/settings/AppearanceSection.svelte";
     import DisplaySection from "../components/settings/DisplaySection.svelte";
     import ExtensionSection from "../components/settings/ExtensionSection.svelte";
     import AboutSection from "../components/settings/AboutSection.svelte";
-    import { libraryManager } from "./settings.svelte";
+    import { libraryManager, settings } from "./settings.svelte";
+    import { applyAppearance } from "$lib/appearance";
 
     interface LibraryInfo {
         db_path: string;
@@ -107,10 +109,17 @@
     // Every id in SETTINGS_SECTIONS must appear here — a missing entry renders an
     // empty panel, which is exactly how the old Library and About tabs looked.
     const sectionComponents: Record<string, Component> = {
+        appearance: AppearanceSection,
         display: DisplaySection,
         extension: ExtensionSection,
         about: AboutSection,
     };
+
+    // Paint Settings › Appearance onto <html>. Re-runs on any appearance change,
+    // live while a slider is still being dragged.
+    $effect(() => {
+        applyAppearance(settings.preferences);
+    });
 
     // Import progress state
     let isImporting = $state(false);
@@ -607,8 +616,8 @@
              Three modes (see layout.svelte.ts): expanded, rail, hidden. The
              toggle button only does shown/hidden; the rail is reached by
              dragging the resize handle past the snap threshold. -->
-        <aside class="pane sidebar border-r border-neutral-800 bg-neutral-950">
-            <header class="pane-header">
+        <aside class="pane sidebar border-r border-line bg-pane">
+            <header class="pane-header border-b border-line">
                 <!-- Drag surface. Full-bleed and BEHIND the controls, because
                      Tauri matches the attribute on the exact element the pointer
                      hit — see the note in layout.css. -->
@@ -797,8 +806,8 @@
         <!-- ── GRID ─────────────────────────────────────────────────────────
              One header row: place + count · drag region · search · view controls.
              Everything below it is assets. -->
-        <main class="pane grid-pane bg-neutral-950">
-            <header class="pane-header border-b border-neutral-800">
+        <main class="pane grid-pane bg-canvas">
+            <header class="pane-header border-b border-line">
                 <div class="drag-region" data-tauri-drag-region></div>
 
                 {#if layout.sidebarHidden}
@@ -929,8 +938,8 @@
         <!-- ── INSPECTOR ────────────────────────────────────────────────────
              Always mounted, width-collapsed when hidden: remounting would reset
              its scroll and drop in-flight field writes. -->
-        <aside class="pane inspector border-l border-neutral-800 bg-neutral-950">
-            <header class="pane-header border-b border-neutral-800">
+        <aside class="pane inspector border-l border-line bg-pane">
+            <header class="pane-header border-b border-line">
                 <div class="drag-region" data-tauri-drag-region></div>
 
                 <span class="truncate text-xs text-neutral-400" data-tauri-drag-region>
