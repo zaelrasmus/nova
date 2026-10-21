@@ -434,7 +434,7 @@
              has always supported both lists; an editor that could only write
              `include` made "everything except drafts" — the most common tag rule
              there is — impossible to express here. -->
-        <div class="flex max-h-16 min-w-0 flex-1 flex-wrap gap-1 overflow-y-auto [scrollbar-width:thin]">
+        <div class="flex max-h-16 min-w-0 flex-1 flex-wrap gap-1 overflow-y-auto">
             {#if assetLibrary.tags.length === 0}
                 <span class="text-xs text-neutral-600">No tags in this library yet.</span>
             {/if}
@@ -513,8 +513,7 @@
         </select>
 
         <div
-            class="max-h-24 min-w-0 flex-1 overflow-y-auto rounded-md border border-line
-                   [scrollbar-width:thin]"
+            class="max-h-24 min-w-0 flex-1 overflow-y-auto rounded-md border border-line"
         >
             {#if folderRows.length === 0}
                 <p class="px-2 py-1 text-xs text-neutral-600">No folders in this library yet.</p>

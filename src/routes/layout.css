@@ -461,6 +461,85 @@ body {
     padding-right: var(--wc-w);
 }
 
+/* ── Scrollbars ──────────────────────────────────────────────────────────────────
+   One style for every scroll area: a slim rounded thumb on a transparent
+   track, no arrow buttons. It is quiet at rest, brightens while the pointer is
+   over the scroll area, and brightens again on the thumb itself.
+
+   Do NOT add `scrollbar-width` or `scrollbar-color` anywhere (Tailwind's
+   `[scrollbar-width:thin]` included). WebView2 is Chromium, and Chromium drops
+   every ::-webkit-scrollbar rule for an element that sets either standard
+   property — that is how the app ended up with stock grey bars with arrows.
+
+   The thumb's look comes from a transparent border plus `background-clip`:
+   the track stays wide enough to grab while the visible bar stays thin. */
+::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+}
+::-webkit-scrollbar-track,
+::-webkit-scrollbar-corner {
+    background: transparent;
+}
+::-webkit-scrollbar-thumb {
+    border: 3px solid transparent;
+    border-radius: 10px;
+    background-color: rgb(255 255 255 / 0.09);
+    background-clip: padding-box;
+}
+:hover::-webkit-scrollbar-thumb {
+    background-color: rgb(255 255 255 / 0.16);
+}
+::-webkit-scrollbar-thumb:hover {
+    background-color: rgb(255 255 255 / 0.28);
+}
+::-webkit-scrollbar-thumb:active {
+    background-color: rgb(255 255 255 / 0.36);
+}
+
+/* The grid's bar: smaller still, so it doesn't compete with the art. 4px of
+   visible thumb in a 6px track, rounded at the ends. */
+.nv-scroll-tiny::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+}
+.nv-scroll-tiny::-webkit-scrollbar-thumb {
+    border-width: 1px;
+    background-color: rgb(255 255 255 / 0.07);
+}
+.nv-scroll-tiny:hover::-webkit-scrollbar-thumb {
+    background-color: rgb(255 255 255 / 0.16);
+}
+.nv-scroll-tiny::-webkit-scrollbar-thumb:hover {
+    background-color: rgb(255 255 255 / 0.3);
+}
+.nv-scroll-tiny::-webkit-scrollbar-thumb:active {
+    background-color: var(--nv-accent);
+}
+
+/* The sidebar sections' bar: the grid's slim size, invisible until the pointer
+   is over that section. The sidebar is navigation, and five permanent bars
+   stacked beside the resize handle would read as clutter, not information.
+   Hiding paints the thumb transparent rather than removing the scrollbar, so
+   rows don't shift sideways when it appears. */
+.nv-scroll-reveal::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+}
+.nv-scroll-reveal::-webkit-scrollbar-thumb {
+    border-width: 1px;
+    background-color: transparent;
+}
+.nv-scroll-reveal:hover::-webkit-scrollbar-thumb {
+    background-color: rgb(255 255 255 / 0.16);
+}
+.nv-scroll-reveal::-webkit-scrollbar-thumb:hover {
+    background-color: rgb(255 255 255 / 0.3);
+}
+.nv-scroll-reveal::-webkit-scrollbar-thumb:active {
+    background-color: rgb(255 255 255 / 0.36);
+}
+
 /* ── Menus and popovers ─────────────────────────────────────────────────────────────
    One panel look for every dropdown: toolbar menus, context menus, the search
    typeahead. `.nv-menu-item` is the row; `.nv-menu-label` the small heading. */

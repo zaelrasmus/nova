@@ -280,7 +280,7 @@
         onpointerleave={scheduleClose}
         class="flex flex-col
                {variant === 'rail'
-            ? 'min-h-0 flex-1 items-center gap-0.5 overflow-y-auto py-1 [scrollbar-width:thin]'
+            ? 'min-h-0 flex-1 items-center gap-0.5 overflow-y-auto py-1'
             : 'shrink-0 gap-px px-2'}"
     >
         {#each pins as pin, i (refKey(pin))}
@@ -422,7 +422,7 @@
         </div>
 
         <div
-            class="flex-1 overflow-y-auto p-2 [scrollbar-width:thin]"
+            class="flex-1 overflow-y-auto p-2"
             {...{ [DRAG_SCROLL_ATTR]: "" }}
         >
             {#if flyout.pin.kind === "folder"}

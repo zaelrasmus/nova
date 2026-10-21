@@ -142,7 +142,7 @@
         <!-- Plain multi-select, not the rule editor's tri-state: the step type
              already says add or remove, so a chip only has to answer "is this
              tag involved". -->
-        <div class="flex max-h-20 min-w-0 flex-1 flex-wrap gap-1 overflow-y-auto [scrollbar-width:thin]">
+        <div class="flex max-h-20 min-w-0 flex-1 flex-wrap gap-1 overflow-y-auto">
             {#if assetLibrary.tags.length === 0}
                 <span class="text-xs text-neutral-600">No tags in this library yet.</span>
             {/if}
@@ -186,8 +186,7 @@
     {:else if step.op.type === "set_folders"}
         <div class="flex min-w-0 flex-1 flex-col gap-1">
             <div
-                class="max-h-24 overflow-y-auto rounded-md border border-line
-                       [scrollbar-width:thin]"
+                class="max-h-24 overflow-y-auto rounded-md border border-line"
             >
                 {#if folderRows.length === 0}
                     <p class="px-2 py-1 text-xs text-neutral-600">No folders in this library yet.</p>

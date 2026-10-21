@@ -105,7 +105,7 @@
             </p>
         </div>
 
-        <div class="flex flex-1 flex-col gap-4 overflow-y-auto px-5 py-4 [scrollbar-width:thin]">
+        <div class="flex flex-1 flex-col gap-4 overflow-y-auto px-5 py-4">
             <div class="flex gap-3">
                 <label class="flex flex-1 flex-col gap-1.5">
                     <span class={legendClass}>Name</span>

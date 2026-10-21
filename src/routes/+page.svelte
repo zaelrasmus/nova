@@ -26,7 +26,7 @@
     import { open } from "@tauri-apps/plugin-dialog";
     import { cubicOut } from "svelte/easing";
     import { tweened } from "svelte/motion";
-    import type { Component } from "svelte";
+    import type { Component, Snippet } from "svelte";
     import { toast } from "svelte-sonner";
     import {
         PanelLeft,
@@ -145,6 +145,10 @@
 
     // The Tag Manager is a full-screen view, opened over the library.
     let tagManagerOpen = $state(false);
+
+    // Which sidebar sections are collapsed. Not persisted: every section
+    // opens again on the next launch.
+    let closedSections = $state<Record<string, boolean>>({});
 
     // Controlled rather than left to the component, so closing is observable.
     let settingsOpen = $state(false);
@@ -661,80 +665,99 @@
                      The rule is consistent even though the picture isn't: fixed
                      controls sit in the top group, and the ONE variable-length
                      list takes the space that's left. In the rail the tree is a
-                     button; here it's a panel.
+                     button; here it's a panel. -->
+                <!-- The library roots never scroll away: All assets, Uncategorized
+                     and Trash stay put however long the lists below get. -->
+                <div class="shrink-0 pt-2">
+                    <SystemViews variant="expanded" />
+                </div>
 
-                     Auto-scrolls while a drag hovers its edges: the folder you
-                     want is often below the fold, and there's no way to scroll a
-                     sidebar with a pointer already holding something. -->
-                <nav
-                    class="flex min-h-0 flex-1 flex-col overflow-y-auto pt-2 pb-4 [scrollbar-width:thin]"
-                    {...{ [DRAG_SCROLL_ATTR]: "" }}
-                >
-                    <!-- Section heading. A native <details> does the collapsing,
-                         so a section stays open across re-renders without any
-                         state here, and closes back to open on reload (no
-                         persistence, deliberately). The chevron shows on hover,
-                         and stays put while the section is closed so a closed
-                         section never reads as an empty one. -->
-                    {#snippet sectionHead(title: string)}
-                        <summary
-                            class="flex h-[26px] cursor-default list-none items-center gap-1 px-4
-                                   text-[11.5px] font-semibold text-neutral-500 select-none
-                                   hover:text-neutral-300 [&::-webkit-details-marker]:hidden"
+                <!-- Each section owns its scrolling. The fixed-size lists (pins,
+                     smart folders, saved filters) are capped at a share of the
+                     height and scroll inside it; Folders, the one list that can
+                     run to hundreds, always gets at least 35% and takes whatever
+                     else is left. So a long tree never
+                     pushes the other sections out of reach, and a long pin list
+                     never squeezes the tree to nothing.
+
+                     Every scroll area carries DRAG_SCROLL_ATTR: a drag holding
+                     assets auto-scrolls whichever section it hovers near the edge
+                     of, since there is no other way to scroll with the pointer
+                     already busy. The outer column keeps `overflow-y-auto` only
+                     as a fallback for a window too short for the minimums. -->
+                {#snippet section(id: string, title: string, body: Snippet, size: "fit" | "fill", cap = "")}
+                    {@const open = !closedSections[id]}
+                    <section
+                        class="mt-3 flex flex-col
+                               {!open
+                            ? 'flex-none'
+                            : size === 'fill'
+                              ? 'min-h-[max(7.5rem,35%)] flex-[1_1_0]'
+                              : `min-h-[calc(26px+var(--nv-row-h))] flex-[0_1_auto] ${cap}`}"
+                    >
+                        <button
+                            type="button"
+                            aria-expanded={open}
+                            onclick={() => (closedSections[id] = open)}
+                            class="group/head flex h-[26px] shrink-0 items-center gap-1 px-4 text-left
+                                   text-[11.5px] font-semibold text-neutral-500 transition-colors
+                                   hover:text-neutral-300"
                         >
                             {title}
+                            <!-- Shown on hover, and kept while closed so a closed
+                                 section never reads as an empty one. -->
                             <ChevronDown
-                                class="h-3 w-3 -rotate-90 opacity-100 transition
-                                       group-open/sec:rotate-0 group-open/sec:opacity-0
-                                       group-hover/sec:opacity-100"
+                                class="h-3 w-3 transition
+                                       {open
+                                    ? 'opacity-0 group-hover/head:opacity-100'
+                                    : '-rotate-90 opacity-100'}"
                             />
-                        </summary>
-                    {/snippet}
-
-                    <SystemViews variant="expanded" />
-
-                    <details open class="group/sec mt-4">
-                        {@render sectionHead("Pinned")}
-                        <PinnedFolders variant="expanded" />
-                    </details>
-
-                    <details open class="group/sec mt-4">
-                        {@render sectionHead("Smart folders")}
-                        <div class="px-2">
-                            <SmartFolders />
-                        </div>
-                    </details>
-
-                    <details open class="group/sec mt-4">
-                        {@render sectionHead("Folders")}
-                        <div class="px-2">
-                            <FolderTree />
-                        </div>
-                    </details>
-
-                    <!-- Tags stay a door to the manager, not a tag cloud. -->
-                    <details open class="group/sec mt-4">
-                        {@render sectionHead("Tags")}
-                        <div class="px-2">
-                            <button
-                                type="button"
-                                onclick={() => (tagManagerOpen = true)}
-                                class="flex h-[var(--nv-row-h)] w-full items-center gap-2.5 rounded-md
-                                       px-2 text-left text-[13px] text-neutral-400 transition-colors
-                                       hover:bg-wash hover:text-neutral-100"
+                        </button>
+                        {#if open}
+                            <div
+                                class="nv-scroll-reveal min-h-0 flex-auto overflow-y-auto"
+                                {...{ [DRAG_SCROLL_ATTR]: "" }}
                             >
-                                <Tag class="h-4 w-4 shrink-0 text-neutral-500" strokeWidth={1.5} />
-                                <span class="truncate">Manage tags…</span>
-                            </button>
-                        </div>
-                    </details>
+                                {@render body()}
+                            </div>
+                        {/if}
+                    </section>
+                {/snippet}
 
-                    <details open class="group/sec mt-4">
-                        {@render sectionHead("Saved filters")}
-                        <div class="px-2">
-                            <SavedFilters />
-                        </div>
-                    </details>
+                {#snippet pinnedBody()}
+                    <PinnedFolders variant="expanded" />
+                {/snippet}
+                {#snippet smartBody()}
+                    <div class="px-2"><SmartFolders /></div>
+                {/snippet}
+                {#snippet foldersBody()}
+                    <div class="px-2"><FolderTree /></div>
+                {/snippet}
+                {#snippet tagsBody()}
+                    <!-- Tags stay a door to the manager, not a tag cloud. -->
+                    <div class="px-2">
+                        <button
+                            type="button"
+                            onclick={() => (tagManagerOpen = true)}
+                            class="flex h-[var(--nv-row-h)] w-full items-center gap-2.5 rounded-md
+                                   px-2 text-left text-[13px] text-neutral-400 transition-colors
+                                   hover:bg-wash hover:text-neutral-100"
+                        >
+                            <Tag class="h-4 w-4 shrink-0 text-neutral-500" strokeWidth={1.5} />
+                            <span class="truncate">Manage tags…</span>
+                        </button>
+                    </div>
+                {/snippet}
+                {#snippet savedBody()}
+                    <div class="px-2"><SavedFilters /></div>
+                {/snippet}
+
+                <nav class="flex min-h-0 flex-1 flex-col overflow-y-auto pb-3">
+                    {@render section("pinned", "Pinned", pinnedBody, "fit", "max-h-[24%]")}
+                    {@render section("smart", "Smart folders", smartBody, "fit", "max-h-[24%]")}
+                    {@render section("folders", "Folders", foldersBody, "fill")}
+                    {@render section("tags", "Tags", tagsBody, "fit")}
+                    {@render section("saved", "Saved filters", savedBody, "fit", "max-h-[18%]")}
                 </nav>
             {/if}
 
@@ -1013,7 +1036,7 @@
                 </button>
             </header>
 
-            <div class="flex-1 overflow-y-auto [scrollbar-width:thin]">
+            <div class="flex-1 overflow-y-auto">
                 <Inspector />
             </div>
 

@@ -817,7 +817,7 @@
                     assetMenu = { x: e.clientX, y: e.clientY, ids: selection.assetIds };
                 }}
                 class="relative flex-1 min-h-0 overflow-y-auto w-full px-[var(--nv-grid-mx)]
-                       [scrollbar-width:thin] [scrollbar-color:theme(colors.neutral.700)_transparent]"
+                       nv-scroll-tiny"
             >
                 <!-- svelte-ignore a11y_no_noninteractive_element_to_interactive_role -->
                 <div

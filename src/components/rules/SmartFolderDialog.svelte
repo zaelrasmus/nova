@@ -119,7 +119,7 @@
             </p>
         </div>
 
-        <div class="flex flex-1 flex-col gap-4 overflow-y-auto px-5 py-4 [scrollbar-width:thin]">
+        <div class="flex flex-1 flex-col gap-4 overflow-y-auto px-5 py-4">
             <label class="flex flex-col gap-1.5">
                 <span class="text-[11.5px] font-semibold text-neutral-500">
                     Name

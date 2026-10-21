@@ -226,7 +226,7 @@
 
         <!-- Same DRAG_SCROLL_ATTR as the expanded sidebar: a drag hovering the
              panel's edges still needs to be able to scroll it. -->
-        <div class="flex-1 overflow-y-auto p-2 [scrollbar-width:thin]" {...{ [DRAG_SCROLL_ATTR]: "" }}>
+        <div class="flex-1 overflow-y-auto p-2" {...{ [DRAG_SCROLL_ATTR]: "" }}>
             {#if hovered === "library"}
                 <SystemViews variant="expanded" />
             {:else if hovered === "smart"}
