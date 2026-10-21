@@ -18,6 +18,7 @@
     import { toast } from "svelte-sonner";
     import { Check, X, Plug, TriangleAlert } from "@lucide/svelte";
     import { formatTimestamp } from "$lib/format";
+    import Segmented from "$components/controls/Segmented.svelte";
 
     interface ClientSummary {
         id: string;
@@ -136,7 +137,7 @@
     <div class="flex items-start gap-3">
         <div
             class="mt-0.5 grid h-8 w-8 shrink-0 place-items-center rounded-lg
-                   {snapshot?.port ? 'bg-blue-500/15 text-blue-400' : 'bg-neutral-800 text-neutral-500'}"
+                   {snapshot?.port ? 'bg-brand-soft text-brand-text' : 'bg-raised text-neutral-500'}"
         >
             <Plug class="h-4 w-4" />
         </div>
@@ -175,8 +176,8 @@
             <span class="text-xs font-medium text-neutral-300">Waiting for approval</span>
             {#each snapshot.pending as request (request.id)}
                 <div
-                    class="flex items-center gap-3 rounded-lg border border-blue-500/40
-                           bg-blue-500/[0.07] p-3"
+                    class="flex items-center gap-3 rounded-lg border border-brand-line
+                           bg-brand-soft p-3"
                 >
                     <div class="min-w-0 flex-1">
                         <div class="text-sm text-neutral-100">{request.name}</div>
@@ -191,7 +192,7 @@
                         onclick={() => deny(request.id)}
                         disabled={busy === request.id}
                         class="grid h-7 w-7 shrink-0 place-items-center rounded-md text-neutral-400
-                               transition-colors hover:bg-neutral-800 hover:text-neutral-200
+                               transition-colors hover:bg-wash hover:text-neutral-200
                                disabled:opacity-40"
                         title="Decline"
                         aria-label="Decline"
@@ -202,9 +203,9 @@
                         type="button"
                         onclick={() => approve(request.id)}
                         disabled={busy === request.id}
-                        class="inline-flex shrink-0 items-center gap-1.5 rounded-md bg-blue-600
-                               px-2.5 py-1.5 text-xs font-medium text-white transition-colors
-                               hover:bg-blue-500 disabled:opacity-40"
+                        class="inline-flex shrink-0 items-center gap-1.5 rounded-md bg-brand
+                               px-2.5 py-1.5 text-xs font-medium text-white transition-[filter]
+                               hover:brightness-110 disabled:opacity-40"
                     >
                         <Check class="h-3.5 w-3.5" />
                         Allow
@@ -214,7 +215,7 @@
         </div>
     {/if}
 
-    <div class="h-px bg-neutral-800" aria-hidden="true"></div>
+    <div class="h-px bg-line" aria-hidden="true"></div>
 
     <!-- Background lifetime -->
     <div class="flex flex-col gap-2">
@@ -227,30 +228,24 @@
                 window is open.
             </p>
         </div>
-        <div class="inline-flex w-fit flex-wrap gap-1 rounded-md border border-neutral-800 p-0.5">
-            {#each IDLE_CHOICES as choice (choice.secs)}
-                <button
-                    type="button"
-                    title={choice.hint ?? ""}
-                    aria-pressed={snapshot?.idle_exit_secs === choice.secs}
-                    onclick={() => setIdle(choice.secs)}
-                    disabled={busy === "idle"}
-                    class="rounded px-2.5 py-1 text-xs font-medium transition-colors
-                        disabled:opacity-40
-                        {snapshot?.idle_exit_secs === choice.secs
-                        ? 'bg-blue-600 text-white'
-                        : 'text-neutral-400 hover:bg-neutral-800 hover:text-neutral-200'}"
-                >
-                    {choice.label}
-                </button>
-            {/each}
-        </div>
+        <!-- Segmented keys are strings; the seconds round-trip through String/Number. -->
+        <Segmented
+            label="Stay in the background for"
+            value={snapshot ? String(snapshot.idle_exit_secs) : ""}
+            options={IDLE_CHOICES.map((choice) => ({
+                value: String(choice.secs),
+                label: choice.label,
+                title: choice.hint ?? choice.label,
+                disabled: busy === "idle",
+            }))}
+            onchange={(v) => setIdle(Number(v))}
+        />
         <p class="text-[11px] text-neutral-600">
             Takes effect when you close the window — that is when the countdown starts.
         </p>
     </div>
 
-    <div class="h-px bg-neutral-800" aria-hidden="true"></div>
+    <div class="h-px bg-line" aria-hidden="true"></div>
 
     <!-- Paired browsers -->
     <div class="flex flex-col gap-2">
@@ -263,8 +258,8 @@
         {:else}
             {#each snapshot.clients as client (client.id)}
                 <div
-                    class="flex items-center gap-3 rounded-lg border border-neutral-800
-                           bg-neutral-900/60 p-3"
+                    class="flex items-center gap-3 rounded-lg border border-line
+                           bg-raised p-3"
                 >
                     <div class="min-w-0 flex-1">
                         <div class="text-sm text-neutral-100">{client.name}</div>
@@ -279,9 +274,9 @@
                         type="button"
                         onclick={() => revoke(client)}
                         disabled={busy === client.id}
-                        class="shrink-0 rounded-md border border-neutral-800 px-2.5 py-1.5 text-xs
-                               text-neutral-300 transition-colors hover:bg-neutral-800
-                               disabled:opacity-40"
+                        class="shrink-0 rounded-md bg-raised-2 px-2.5 py-1.5 text-xs font-medium
+                               text-neutral-200 ring-1 ring-inset ring-line-strong transition-colors
+                               hover:bg-neutral-700 disabled:opacity-40"
                     >
                         Disconnect
                     </button>

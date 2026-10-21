@@ -107,9 +107,9 @@
         aria-modal="true"
         aria-label={existing ? "Edit smart folder" : "New smart folder"}
         class="relative flex max-h-[80vh] w-[640px] max-w-full flex-col overflow-hidden rounded-xl
-               border border-neutral-800 bg-neutral-950 shadow-2xl"
+               border border-line-strong bg-pane shadow-2xl"
     >
-        <div class="shrink-0 border-b border-neutral-800 px-5 py-4">
+        <div class="shrink-0 border-b border-line px-5 py-4">
             <h2 class="text-sm font-semibold text-neutral-100">
                 {existing ? "Edit smart folder" : "New smart folder"}
             </h2>
@@ -121,7 +121,7 @@
 
         <div class="flex flex-1 flex-col gap-4 overflow-y-auto px-5 py-4 [scrollbar-width:thin]">
             <label class="flex flex-col gap-1.5">
-                <span class="text-[11px] font-medium uppercase tracking-wide text-neutral-500">
+                <span class="text-[11.5px] font-semibold text-neutral-500">
                     Name
                 </span>
                 <!-- svelte-ignore a11y_autofocus -->
@@ -130,14 +130,14 @@
                     bind:value={name}
                     autofocus
                     placeholder="Approved client renders"
-                    class="rounded border border-neutral-800 bg-neutral-900 px-2.5 py-1.5 text-sm
-                           text-neutral-100 placeholder:text-neutral-600 focus:border-neutral-600
+                    class="rounded-md border border-line bg-raised px-2.5 py-1.5 text-sm
+                           text-neutral-100 placeholder:text-neutral-600 focus:border-brand-line
                            focus:outline-none"
                 />
             </label>
 
             <div class="flex flex-col gap-1.5">
-                <span class="text-[11px] font-medium uppercase tracking-wide text-neutral-500">
+                <span class="text-[11.5px] font-semibold text-neutral-500">
                     Rules
                 </span>
                 <RuleGroup
@@ -148,7 +148,7 @@
             </div>
         </div>
 
-        <div class="flex shrink-0 items-center gap-3 border-t border-neutral-800 px-5 py-3">
+        <div class="flex shrink-0 items-center gap-3 border-t border-line px-5 py-3">
             <span class="text-xs text-neutral-500">
                 {#if counting}
                     Counting…
@@ -165,8 +165,8 @@
             <button
                 type="button"
                 onclick={onclose}
-                class="rounded border border-neutral-800 px-3 py-1.5 text-xs text-neutral-300
-                       transition-colors hover:bg-neutral-800"
+                class="rounded-md bg-raised-2 px-3 py-1.5 text-xs font-medium text-neutral-200
+                       ring-1 ring-inset ring-line-strong transition-colors hover:bg-neutral-700"
             >
                 Cancel
             </button>
@@ -174,8 +174,8 @@
                 type="button"
                 onclick={save}
                 disabled={!canSave}
-                class="rounded bg-blue-600 px-3 py-1.5 text-xs font-medium text-white
-                       transition-colors hover:bg-blue-500 disabled:opacity-40"
+                class="rounded-md bg-brand px-3 py-1.5 text-xs font-medium text-white
+                       transition-[filter] hover:brightness-110 disabled:opacity-40"
             >
                 {existing ? "Save" : "Create"}
             </button>

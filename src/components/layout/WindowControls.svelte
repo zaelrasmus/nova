@@ -47,7 +47,7 @@
         aria-label="Minimize"
         onclick={() => win?.minimize()}
         class="grid w-[46px] place-items-center text-neutral-400 transition-colors
-               hover:bg-white/10 hover:text-neutral-100"
+               hover:bg-wash hover:text-neutral-100"
     >
         <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor">
             <path d="M0 5h10" />
@@ -59,7 +59,7 @@
         aria-label={maximized ? "Restore" : "Maximize"}
         onclick={() => win?.toggleMaximize()}
         class="grid w-[46px] place-items-center text-neutral-400 transition-colors
-               hover:bg-white/10 hover:text-neutral-100"
+               hover:bg-wash hover:text-neutral-100"
     >
         <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor">
             {#if maximized}

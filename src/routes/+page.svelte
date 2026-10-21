@@ -756,7 +756,7 @@
                     </Dialog.Trigger>
                     <Dialog.Content
                         class="sm:max-w-[calc(100%-10rem)] flex gap-0 p-0 overflow-hidden h-[85vh]
-                               bg-neutral-950 border border-neutral-800 rounded-xl shadow-2xl flex-col"
+                               bg-pane border border-line-strong rounded-xl shadow-2xl flex-col"
                     >
                         <Dialog.Title class="sr-only">Settings</Dialog.Title>
 
@@ -766,11 +766,11 @@
                             class="flex flex-1 overflow-hidden h-full w-full"
                         >
                             <Tabs.List
-                                class="w-52 shrink-0 h-full rounded-none border-r border-neutral-800
-                                       bg-neutral-900/60 justify-start pt-4 gap-0.5 px-2"
+                                class="w-52 shrink-0 h-full rounded-none border-r border-line
+                                       bg-canvas justify-start pt-4 gap-0.5 px-2"
                             >
                                 <p
-                                    class="px-3 pb-3 w-full text-[11px] font-semibold uppercase tracking-widest text-neutral-500"
+                                    class="px-3 pb-3 w-full text-[11.5px] font-semibold text-neutral-500"
                                 >
                                     Settings
                                 </p>
@@ -778,7 +778,7 @@
                                 {#each SETTINGS_SECTIONS as section (section.id)}
                                     {#if section.dividerAbove}
                                         <div
-                                            class="my-2 mx-1 h-px w-full bg-neutral-800"
+                                            class="my-2 mx-1 h-px w-full bg-line"
                                             aria-hidden="true"
                                         ></div>
                                     {/if}
@@ -786,8 +786,8 @@
                                     <Tabs.Trigger
                                         value={section.id}
                                         class="gap-2.5 px-3 text-neutral-400
-                                               hover:bg-neutral-800/60 hover:text-neutral-200
-                                               data-[state=active]:bg-neutral-800
+                                               hover:bg-wash hover:text-neutral-200
+                                               data-[state=active]:bg-brand-soft
                                                data-[state=active]:text-neutral-100"
                                     >
                                         {section.label}
@@ -803,7 +803,7 @@
                                         value={section.id}
                                         class="flex flex-col flex-1 overflow-hidden mt-0"
                                     >
-                                        <div class="px-6 py-4 border-b border-neutral-800 shrink-0">
+                                        <div class="px-6 py-4 border-b border-line shrink-0">
                                             <h2 class="text-sm font-semibold text-neutral-100">
                                                 {section.label}
                                             </h2>
@@ -1056,12 +1056,12 @@
          whatever the last folder import left behind. -->
     {#if isImporting && !urlImportUrl}
         <div
-            class="fixed bottom-4 right-4 z-40 w-72 space-y-3 rounded-lg border border-neutral-700
-                   bg-neutral-900/95 p-4 shadow-xl"
+            class="fixed bottom-4 right-4 z-40 w-72 space-y-3 rounded-xl border border-line-strong
+                   bg-neutral-900/95 p-4 shadow-xl backdrop-blur-lg"
         >
             <div class="flex items-start justify-between gap-3">
                 <div class="flex min-w-0 flex-col">
-                    <span class="text-[10px] font-bold uppercase tracking-wider text-blue-400">
+                    <span class="text-[11px] font-semibold text-brand-text">
                         {currentStage ?? "Starting"}
                     </span>
                     <span class="truncate text-xs text-neutral-300">{statusMessage}</span>
@@ -1074,8 +1074,8 @@
                 </div>
             </div>
 
-            <div class="h-1.5 w-full overflow-hidden rounded-full bg-neutral-800">
-                <div class="h-full bg-blue-500" style="width: {$smoothPercentage}%"></div>
+            <div class="h-1.5 w-full overflow-hidden rounded-full bg-raised-2">
+                <div class="h-full bg-brand" style="width: {$smoothPercentage}%"></div>
             </div>
 
             <p class="text-[10px] italic text-neutral-500">Don't close the app while importing.</p>
@@ -1084,17 +1084,17 @@
         <!-- Background thumbnail generation (Rebuild / large runs). -->
         <div
             class="fixed bottom-4 right-4 z-40 flex items-center gap-3 rounded-lg border
-                   border-neutral-700 bg-neutral-900/95 px-4 py-2.5 text-neutral-200 shadow-xl"
+                   border-line-strong bg-neutral-900/95 px-4 py-2.5 text-neutral-200 shadow-xl backdrop-blur-lg"
         >
-            <span class="h-2 w-2 shrink-0 animate-pulse rounded-full bg-blue-500"></span>
+            <span class="h-2 w-2 shrink-0 animate-pulse rounded-full bg-brand"></span>
             <div class="flex flex-col gap-1">
                 <span class="text-xs">
                     Generating thumbnails… {assetLibrary.thumbProgress.current}/{assetLibrary
                         .thumbProgress.total}
                 </span>
-                <div class="h-1 w-40 overflow-hidden rounded-full bg-neutral-800">
+                <div class="h-1 w-40 overflow-hidden rounded-full bg-raised-2">
                     <div
-                        class="h-full bg-blue-500 transition-all"
+                        class="h-full bg-brand transition-all"
                         style="width: {(assetLibrary.thumbProgress.current /
                             assetLibrary.thumbProgress.total) *
                             100}%"

@@ -71,8 +71,8 @@
     });
 
     const controlClass =
-        "rounded border border-neutral-700 bg-neutral-950 px-1.5 py-1 text-xs text-neutral-200 " +
-        "focus:border-neutral-500 focus:outline-none";
+        "rounded-md border border-line bg-raised px-1.5 py-1 text-xs text-neutral-200 " +
+        "focus:border-brand-line focus:outline-none";
 </script>
 
 <div class="flex min-w-0 flex-1 flex-col gap-1.5">
@@ -84,7 +84,7 @@
         aria-label="Pattern"
         spellcheck="false"
         class="{controlClass} w-full font-mono placeholder:text-neutral-600
-               {patternError ? 'border-red-800' : ''}"
+               {patternError ? 'border-red-800!' : ''}"
     />
 
     <!-- Click to insert. Typing `{index}` correctly from memory is not a skill
@@ -95,8 +95,8 @@
                 type="button"
                 title={hint}
                 onclick={() => onchange({ ...op, pattern: op.pattern + token })}
-                class="rounded bg-neutral-800 px-1.5 py-0.5 font-mono text-[10px] text-neutral-400
-                       transition-colors hover:bg-neutral-700 hover:text-neutral-200"
+                class="rounded bg-raised-2 px-1.5 py-0.5 font-mono text-[10px] text-neutral-400
+                       transition-colors hover:bg-wash-strong hover:text-neutral-200"
             >
                 {token}
             </button>
@@ -168,7 +168,7 @@
     {#if patternError}
         <p class="text-[11px] text-red-400">{patternError}</p>
     {:else if samples.length > 0}
-        <div class="flex flex-col gap-0.5 rounded bg-neutral-900/60 p-1.5">
+        <div class="flex flex-col gap-0.5 rounded-md bg-raised p-1.5">
             {#each samples as s (s.before)}
                 <div class="flex items-center gap-1.5 font-mono text-[10px]">
                     <span class="min-w-0 flex-1 truncate text-neutral-600">{s.before}</span>
