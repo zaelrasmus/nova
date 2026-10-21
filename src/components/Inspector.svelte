@@ -358,6 +358,14 @@
     const checkerStyle =
         "background-color: #131316; background-image: conic-gradient(#18181c 25%, transparent 0 50%, " +
         "#18181c 0 75%, transparent 0); background-size: 16px 16px;";
+
+    // The preview takes the asset's own shape across the full panel width, so
+    // it is as large as the inspector allows: a landscape image fills the width,
+    // a tall one grows until 60% of the window height. Unknown dimensions (a
+    // video before its first frame) fall back to 4:3.
+    const previewRatio = $derived(
+        asset && asset.width > 0 && asset.height > 0 ? asset.width / asset.height : 4 / 3,
+    );
 </script>
 
 {#snippet row(label: string, value: string)}
@@ -394,15 +402,16 @@
                 role="group"
                 aria-label={asset.filename}
                 ondblclick={() => inViewer && viewer.openById(asset.id)}
-                class="group relative h-[200px] shrink-0 overflow-hidden rounded-lg ring-1 ring-inset ring-line"
-                style={checkerStyle}
+                class="group relative max-h-[60vh] min-h-[180px] w-full shrink-0 overflow-hidden rounded-lg
+                       ring-1 ring-inset ring-line"
+                style="{checkerStyle} aspect-ratio: {previewRatio};"
             >
                 {#if placeholder && loadedSrc !== singleSrc}
                     <img
                         src={placeholder}
                         alt=""
                         aria-hidden="true"
-                        class="absolute inset-3 h-[calc(100%-1.5rem)] w-[calc(100%-1.5rem)] object-contain"
+                        class="absolute inset-1.5 h-[calc(100%-0.75rem)] w-[calc(100%-0.75rem)] object-contain"
                     />
                 {/if}
                 {#if singleSrc}
@@ -411,7 +420,7 @@
                         alt=""
                         draggable="false"
                         onload={() => (loadedSrc = singleSrc)}
-                        class="absolute inset-3 h-[calc(100%-1.5rem)] w-[calc(100%-1.5rem)] object-contain"
+                        class="absolute inset-1.5 h-[calc(100%-0.75rem)] w-[calc(100%-0.75rem)] object-contain"
                     />
                 {:else if !placeholder}
                     <div class="grid h-full place-items-center text-neutral-600">
