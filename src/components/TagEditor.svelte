@@ -13,6 +13,7 @@
 <script lang="ts">
     import { untrack } from "svelte";
     import { toast } from "svelte-sonner";
+    import { Minus, Plus, X } from "@lucide/svelte";
     import { assetLibrary, triStateOf, type Tag } from "$lib/assets.svelte";
     import { selection } from "$lib/selection.svelte";
 
@@ -212,8 +213,14 @@
     {#if loading}
         <p class="text-xs text-neutral-600">Reading tags…</p>
     {:else}
-        {#if applied.length > 0}
-            <div class="mb-1.5 flex flex-wrap gap-1">
+        <div class="relative">
+            <!-- The applied chips live inside the field, so "what's on it" and
+                 "add another" read as one control. -->
+            <div
+                class="flex min-h-8 flex-wrap items-center gap-1 rounded-md border border-line bg-raised
+                       p-1 transition-[border-color,box-shadow] hover:border-line-strong
+                       focus-within:border-brand-line focus-within:ring-[3px] focus-within:ring-brand-soft"
+            >
                 {#each applied as tag (tag.id)}
                     {@const state = stateOf(tag.id)}
                     <button
@@ -223,87 +230,91 @@
                         title={state === "some"
                             ? `${counts.get(tag.id)} of ${total} — click to apply to all`
                             : "Click to remove"}
-                        class="flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs
-                               transition-colors disabled:opacity-50
+                        class="group flex h-[22px] max-w-full items-center gap-1.5 rounded-md border pr-1
+                               pl-2 text-xs transition-colors disabled:opacity-50
                                {state === 'all'
-                            ? 'border-transparent text-neutral-900'
-                            : 'border-dashed border-neutral-600 text-neutral-400'}"
-                        style={state === "all" ? `background-color: ${swatch(tag)}` : ""}
+                            ? 'border-transparent bg-raised-2 text-neutral-100'
+                            : 'border-dashed border-line-strong text-neutral-400 hover:text-neutral-200'}"
                     >
                         <span
-                            class="h-2 w-2 shrink-0 rounded-full"
+                            class="h-[7px] w-[7px] shrink-0 rounded-full"
                             style="background-color: {swatch(tag)}"
                         ></span>
-                        {tag.name}
+                        <span class="truncate">{tag.name}</span>
                         <!-- 'all' shows ×, 'some' shows the partial glyph, so the
                              two states never look interchangeable. -->
-                        <span aria-hidden="true">{state === "all" ? "×" : "–"}</span>
+                        <span
+                            aria-hidden="true"
+                            class="grid h-4 w-4 shrink-0 place-items-center rounded text-neutral-500
+                                   group-hover:bg-wash-strong group-hover:text-neutral-100"
+                        >
+                            {#if state === "all"}
+                                <X class="h-3 w-3" />
+                            {:else}
+                                <Minus class="h-3 w-3" />
+                            {/if}
+                        </span>
                     </button>
                 {/each}
+                <input
+                    bind:this={input}
+                    type="text"
+                    bind:value={query}
+                    onfocus={() => (open = true)}
+                    onblur={() => setTimeout(() => (open = false), 120)}
+                    onkeydown={onKey}
+                    disabled={busy}
+                    spellcheck="false"
+                    placeholder={applied.length > 0 ? "" : "Add a tag…"}
+                    aria-label="Add a tag"
+                    class="h-[22px] min-w-[70px] flex-1 bg-transparent px-1 text-[12.5px] text-neutral-200
+                           placeholder:text-neutral-600 focus:outline-none disabled:opacity-50"
+                />
             </div>
-        {/if}
-
-        <div class="relative">
-            <input
-                bind:this={input}
-                type="text"
-                bind:value={query}
-                onfocus={() => (open = true)}
-                onblur={() => setTimeout(() => (open = false), 120)}
-                onkeydown={onKey}
-                disabled={busy}
-                spellcheck="false"
-                placeholder="Add a tag…"
-                class="w-full rounded border border-neutral-700 bg-neutral-900 px-2 py-1 text-xs
-                       text-neutral-200 placeholder:text-neutral-600 focus:border-neutral-500
-                       focus:outline-none disabled:opacity-50"
-            />
 
             {#snippet suggestionRow(tag: Tag)}
                 <button
                     type="button"
                     onclick={() => addExisting(tag)}
-                    class="flex w-full items-center gap-2 px-2 py-1 text-left text-xs
-                           text-neutral-300 hover:bg-neutral-800"
+                    class="nv-menu-item text-[12.5px]"
                 >
                     <span
-                        class="h-2 w-2 shrink-0 rounded-full"
+                        class="h-[7px] w-[7px] shrink-0 rounded-full"
                         style="background-color: {swatch(tag)}"
                     ></span>
                     <span class="truncate">{tag.name}</span>
-                    <span class="ml-auto text-[10px] text-neutral-600">{tag.usage}</span>
+                    <span class="ml-auto text-[11px] tabular-nums text-neutral-600">{tag.usage}</span>
                     {#if stateOf(tag.id) === "some"}
-                        <span class="text-[10px] text-amber-600">partial</span>
+                        <span class="text-[11px] text-amber-500/80">partial</span>
                     {/if}
                 </button>
             {/snippet}
 
             {#snippet sectionLabel(text: string)}
-                <div
-                    class="px-2 pb-0.5 pt-1.5 text-[10px] font-medium uppercase tracking-wide
-                           text-neutral-600"
-                >
-                    {text}
-                </div>
+                <div class="nv-menu-label">{text}</div>
             {/snippet}
 
             {#if open && (searching ? matches.length > 0 || canCreate : hasSuggestions)}
-                <div
-                    class="absolute z-10 mt-1 w-full overflow-hidden rounded border border-neutral-700
-                           bg-neutral-900 shadow-xl"
-                >
+                <div class="nv-menu absolute z-10 mt-1 w-full">
                     {#if searching}
                         {#each matches as tag (tag.id)}
                             {@render suggestionRow(tag)}
                         {/each}
                         {#if canCreate}
+                            {#if matches.length > 0}
+                                <div class="nv-menu-sep"></div>
+                            {/if}
                             <button
                                 type="button"
                                 onclick={createAndAdd}
-                                class="flex w-full items-center gap-1 border-t border-neutral-800 px-2 py-1
-                                       text-left text-xs text-blue-400 hover:bg-neutral-800"
+                                class="nv-menu-item text-[12.5px]"
                             >
-                                Create <span class="font-medium">"{query.trim()}"</span>
+                                <Plus class="h-3.5 w-3.5 shrink-0 text-neutral-500" />
+                                <span class="truncate"
+                                    >Create <span class="font-medium text-neutral-100"
+                                        >"{query.trim()}"</span
+                                    ></span
+                                >
                             </button>
                         {/if}
                     {:else}

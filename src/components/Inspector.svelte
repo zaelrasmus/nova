@@ -15,18 +15,32 @@
 <script lang="ts">
     import { untrack } from "svelte";
     import { toast } from "svelte-sonner";
+    import { convertFileSrc } from "@tauri-apps/api/core";
     import { openUrl } from "@tauri-apps/plugin-opener";
-    import { assetLibrary, describeShape, filenameStem } from "$lib/assets.svelte";
+    import { assetLibrary, describeShape, filenameStem, thumbHashUrl } from "$lib/assets.svelte";
     import type {
+        AssetMetadata,
         AssetPatch,
         FolderPatch,
         FolderStats,
         SelectionSummary,
     } from "$lib/assets.svelte";
     import { selection } from "$lib/selection.svelte";
+    import { viewer } from "$lib/viewer.svelte";
     import { formatAspectRatio, formatBytes, formatTimestamp, formatDuration } from "$lib/format";
     import { keepRemoteOffline, verifyRemoteAsset } from "$lib/remote";
-    import { Pin, PinOff, Cloud } from "@lucide/svelte";
+    import {
+        ChevronDown,
+        Cloud,
+        ExternalLink,
+        File as FileIcon,
+        Film,
+        Image as ImageIcon,
+        Maximize2,
+        Music,
+        Pin,
+        PinOff,
+    } from "@lucide/svelte";
     import PaletteSection from "./PaletteSection.svelte";
     import FolderMembership from "./FolderMembership.svelte";
     import FolderAutoTags from "./FolderAutoTags.svelte";
@@ -89,6 +103,62 @@
     $effect(() => {
         if (singleId && !assetLibrary.heavy.has(singleId)) assetLibrary.ensure([singleId]);
     });
+
+    // ── Previews ─────────────────────────────────────────────────────────────
+    // Same fallback chain as AssetCard (thumbnail → original for small images),
+    // minus animation: a looping GIF beside the fields you're editing is noise.
+
+    function previewSrc(a: AssetMetadata): string | null {
+        if (a.thumb_path) {
+            // A rebuild reuses this id.webp path with new bytes; the version busts
+            // the webview cache.
+            return `${convertFileSrc(a.thumb_path)}?v=${assetLibrary.thumbVersion}`;
+        }
+        // Generation done but no thumbnail written because the source is already
+        // small — the original is the preview.
+        if (a.thumb_hash && a.asset_type === "image" && a.dest_path) {
+            return convertFileSrc(a.dest_path);
+        }
+        return null;
+    }
+
+    const TYPE_ICONS = { image: ImageIcon, video: Film, audio: Music, unknown: FileIcon };
+
+    /** The src that finished loading, so the ThumbHash blur steps aside for it. */
+    let loadedSrc = $state<string | null>(null);
+    const singleSrc = $derived(asset ? previewSrc(asset) : null);
+
+    // A few of the selected rows, fanned as a stack. Hydrated on demand for the
+    // same reason as the single row: the selection can outlive its window.
+    const stackIds = $derived(
+        current.kind === "assets" && current.ids.length > 1 ? current.ids.slice(0, 3) : [],
+    );
+    $effect(() => {
+        const missing = stackIds.filter((id) => !assetLibrary.heavy.has(id));
+        if (missing.length > 0) assetLibrary.ensure(missing);
+    });
+
+    /** Rotation and x-offset per card, by stack size; the last card is in front. */
+    const FAN: Record<number, [number, number][]> = {
+        2: [
+            [-6, -22],
+            [4, 18],
+        ],
+        3: [
+            [-7, -34],
+            [5, 34],
+            [0, 0],
+        ],
+    };
+
+    /** Fit a card inside the stack, keeping the asset's shape when it's known. */
+    function fit(w: number, h: number, maxW = 140, maxH = 120): [number, number] {
+        if (w <= 0 || h <= 0) return [maxH, maxH];
+        const s = Math.min(maxW / w, maxH / h);
+        return [Math.round(w * s), Math.round(h * s)];
+    }
+
+    let detailsOpen = $state(true);
 
     // ── Editing ──────────────────────────────────────────────────────────────
     //
@@ -262,15 +332,32 @@
     });
 
     const inputClass =
-        "w-full rounded border border-neutral-700 bg-neutral-900 px-2 py-1 text-neutral-200 " +
-        "placeholder:text-neutral-600 focus:border-neutral-500 focus:outline-none";
-    const legendClass = "mb-1 block text-[10px] font-medium uppercase tracking-wide text-neutral-500";
+        "w-full rounded-md border border-line bg-raised px-2.5 py-1.5 text-[12.5px] text-neutral-200 " +
+        "transition-[border-color,box-shadow] placeholder:text-neutral-600 hover:border-line-strong " +
+        "focus:border-brand-line focus:outline-none focus:ring-[3px] focus:ring-brand-soft";
+    const legendClass = "mb-2 block text-[11.5px] font-semibold text-neutral-500";
+    // The editable title: plain text until you reach for it.
+    const titleClass =
+        "-ml-2 h-8 min-w-0 flex-1 rounded-md border border-transparent bg-transparent px-2 " +
+        "text-[15px] font-semibold tracking-[-0.01em] text-neutral-100 transition-[background-color,border-color,box-shadow] " +
+        "hover:bg-raised focus:border-brand-line focus:bg-raised focus:outline-none " +
+        "focus:ring-[3px] focus:ring-brand-soft";
+    const sectionClass = "mt-4 border-t border-line pt-4";
+    const factClass =
+        "rounded-[5px] bg-raised px-1.5 py-0.5 text-[11px] tabular-nums text-neutral-400";
+    const buttonClass =
+        "inline-flex items-center gap-1.5 rounded-md border border-line px-2.5 py-1 text-xs " +
+        "text-neutral-300 transition-colors hover:bg-wash hover:text-neutral-100 disabled:opacity-40";
+    // A quiet checkerboard, so transparent art reads as transparent.
+    const checkerStyle =
+        "background-color: #131316; background-image: conic-gradient(#18181c 25%, transparent 0 50%, " +
+        "#18181c 0 75%, transparent 0); background-size: 16px 16px;";
 </script>
 
 {#snippet row(label: string, value: string)}
-    <div class="flex items-baseline justify-between gap-3 py-1">
+    <div class="flex h-[26px] items-center justify-between gap-3">
         <span class="shrink-0 text-neutral-500">{label}</span>
-        <span class="truncate text-right text-neutral-300" title={value}>{value}</span>
+        <span class="truncate text-right tabular-nums text-neutral-300" title={value}>{value}</span>
     </div>
 {/snippet}
 
@@ -286,119 +373,161 @@
             }}
             onblur={() => flush(editingKey)}
             placeholder="Add a note…"
-            class="resize-y {inputClass}"
+            class="block min-h-16 resize-y leading-[1.45] {inputClass}"
         ></textarea>
     </label>
 {/snippet}
 
-<aside
-    class="flex h-full flex-col gap-3 overflow-y-auto rounded-lg border border-neutral-800
-           bg-neutral-900/40 p-3 text-sm"
-    aria-label="Inspector"
->
+<aside class="flex h-full flex-col overflow-y-auto p-3.5 pb-10 text-sm" aria-label="Inspector">
     {#if current.kind === "assets" && current.ids.length === 1}
         {#if asset}
-            <div>
-                <label class="block">
-                    <span class={legendClass}>Name</span>
-                    <div class="flex items-center gap-1">
-                        <input
-                            type="text"
-                            value={draftName}
-                            oninput={(e) => editName(e.currentTarget.value)}
-                            onblur={commitName}
-                            spellcheck="false"
-                            class={inputClass}
-                        />
-                        <!-- The extension is shown, never edited: it describes the
-                             actual bytes, not the user's label for them. -->
-                        {#if asset.extension}
-                            <span class="shrink-0 text-xs text-neutral-500"
-                                >.{asset.extension}</span
-                            >
-                        {/if}
+            {@const TypeIcon = TYPE_ICONS[asset.asset_type] ?? FileIcon}
+            {@const placeholder = thumbHashUrl(asset.thumb_hash)}
+            <!-- Double-click opens the viewer, the same gesture as on the tile. -->
+            <div
+                role="group"
+                aria-label={asset.filename}
+                ondblclick={() => viewer.openById(asset.id)}
+                class="group relative h-[200px] shrink-0 overflow-hidden rounded-lg ring-1 ring-inset ring-line"
+                style={checkerStyle}
+            >
+                {#if placeholder && loadedSrc !== singleSrc}
+                    <img
+                        src={placeholder}
+                        alt=""
+                        aria-hidden="true"
+                        class="absolute inset-3 h-[calc(100%-1.5rem)] w-[calc(100%-1.5rem)] object-contain"
+                    />
+                {/if}
+                {#if singleSrc}
+                    <img
+                        src={singleSrc}
+                        alt=""
+                        draggable="false"
+                        onload={() => (loadedSrc = singleSrc)}
+                        class="absolute inset-3 h-[calc(100%-1.5rem)] w-[calc(100%-1.5rem)] object-contain"
+                    />
+                {:else if !placeholder}
+                    <div class="grid h-full place-items-center text-neutral-600">
+                        <TypeIcon class="h-8 w-8" />
                     </div>
-                </label>
-                <p class="mt-1 text-[10px] text-neutral-600">
-                    {TYPE_LABELS[asset.asset_type] ?? "File"} · renaming affects this library only
-                </p>
+                {/if}
+                <button
+                    type="button"
+                    onclick={() => viewer.openById(asset.id)}
+                    title="Open"
+                    aria-label="Open in viewer"
+                    class="absolute right-2 bottom-2 grid h-7 w-7 place-items-center rounded-md
+                           bg-[rgb(12_12_14/0.7)] text-neutral-200 opacity-0
+                           shadow-[inset_0_0_0_1px_rgb(255_255_255/0.1)] backdrop-blur
+                           transition-opacity group-hover:opacity-100 hover:bg-[rgb(30_30_34/0.9)]
+                           focus-visible:opacity-100"
+                >
+                    <Maximize2 class="h-3.5 w-3.5" />
+                </button>
             </div>
 
-            {@render notesField()}
-
-            <label class="block">
-                <span class={legendClass}>Source URL</span>
-                <div class="flex items-center gap-1">
-                    <input
-                        type="url"
-                        value={draftUrl}
-                        oninput={(e) => {
-                            draftUrl = e.currentTarget.value;
-                            queue("source_url", draftUrl);
-                        }}
-                        onblur={() => flush(editingKey)}
-                        spellcheck="false"
-                        placeholder="https://…"
-                        class={inputClass}
-                    />
-                    <button
-                        type="button"
-                        onclick={openSource}
-                        disabled={!openable}
-                        title={openable ? "Open in browser" : "Only http(s) links can be opened"}
-                        class="shrink-0 rounded px-1.5 py-1 text-neutral-500
-                               enabled:hover:bg-neutral-800 enabled:hover:text-neutral-200
-                               disabled:cursor-not-allowed disabled:text-neutral-700">↗</button
+            <div class="mt-3.5 flex items-center gap-0.5">
+                <input
+                    type="text"
+                    value={draftName}
+                    oninput={(e) => editName(e.currentTarget.value)}
+                    onblur={commitName}
+                    spellcheck="false"
+                    aria-label="Name"
+                    title="Renaming affects this library only"
+                    class={titleClass}
+                />
+                <!-- The extension is shown, never edited: it describes the
+                     actual bytes, not the user's label for them. -->
+                {#if asset.extension}
+                    <span class="shrink-0 text-[13px] font-medium text-neutral-600"
+                        >.{asset.extension}</span
                     >
-                </div>
-            </label>
+                {/if}
+            </div>
+            <div class="mt-1.5 flex flex-wrap gap-1.5">
+                <!-- Videos record 0×0 until a frame is captured; no chip beats "0 × 0". -->
+                {#if asset.width > 0 && asset.height > 0}
+                    <span class={factClass}>{asset.width} × {asset.height}</span>
+                    <span class={factClass}>
+                        {formatAspectRatio(asset.width, asset.height)} ·
+                        {describeShape(asset.width, asset.height)}
+                    </span>
+                {/if}
+                <span class={factClass}>{formatBytes(asset.file_size)}</span>
+                {#if asset.duration_ms}
+                    <span class={factClass}>{formatDuration(asset.duration_ms / 1000)}</span>
+                {/if}
+            </div>
 
-            <div class="h-px bg-neutral-800"></div>
-
-            <TagEditor assetIds={[asset.id]} {legendClass} />
-
-            <div class="h-px bg-neutral-800"></div>
+            <section class={sectionClass}>
+                <TagEditor assetIds={[asset.id]} {legendClass} />
+            </section>
 
             <!-- Same control as bulk mode, just with a selection of one — so the
-                 tri-state collapses to an ordinary checkbox on its own. -->
-            <FolderMembership assetIds={[asset.id]} {legendClass} />
-
-            <div class="h-px bg-neutral-800"></div>
+                 tri-state collapses to plain membership on its own. -->
+            <section class={sectionClass}>
+                <FolderMembership assetIds={[asset.id]} {legendClass} />
+            </section>
 
             <!-- Images only: nothing else produces a palette, and an empty strip
                  on a video would read as a bug rather than as "not applicable". -->
             {#if asset.asset_type === "image"}
-                <PaletteSection assetId={asset.id} {legendClass} />
-                <div class="h-px bg-neutral-800"></div>
+                <section class={sectionClass}>
+                    <PaletteSection assetId={asset.id} {legendClass} />
+                </section>
             {/if}
 
-            <div class="flex flex-col text-xs">
-                {@render row("Dimensions", `${asset.width} × ${asset.height}`)}
-                {@render row(
-                    "Aspect ratio",
-                    `${formatAspectRatio(asset.width, asset.height)} · ${describeShape(asset.width, asset.height)}`,
-                )}
-                {@render row("Size", formatBytes(asset.file_size))}
-                {@render row("Format", asset.extension.toUpperCase() || "—")}
-                {#if asset.duration_ms}
-                    {@render row("Duration", formatDuration(asset.duration_ms / 1000))}
-                {/if}
-            </div>
+            <section class={sectionClass}>
+                {@render notesField()}
+            </section>
+
+            <section class={sectionClass}>
+                <label class="block">
+                    <span class={legendClass}>Source URL</span>
+                    <div class="relative flex items-center">
+                        <input
+                            type="url"
+                            value={draftUrl}
+                            oninput={(e) => {
+                                draftUrl = e.currentTarget.value;
+                                queue("source_url", draftUrl);
+                            }}
+                            onblur={() => flush(editingKey)}
+                            spellcheck="false"
+                            placeholder="https://…"
+                            class="pr-9 {inputClass}"
+                        />
+                        <button
+                            type="button"
+                            onclick={openSource}
+                            disabled={!openable}
+                            title={openable ? "Open in browser" : "Only http(s) links can be opened"}
+                            aria-label="Open in browser"
+                            class="absolute right-0.5 grid h-[26px] w-[26px] place-items-center rounded-md
+                                   text-neutral-500 enabled:hover:bg-wash enabled:hover:text-neutral-200
+                                   disabled:cursor-not-allowed disabled:text-neutral-700"
+                        >
+                            <ExternalLink class="h-3.5 w-3.5" />
+                        </button>
+                    </div>
+                </label>
+            </section>
 
             <!-- ── Online asset ───────────────────────────────────────────────
                  Shown only when the bytes are elsewhere. The state line is the
                  honest part: "reachable", "not checked lately" and "gone" are
                  three different facts and the user acts differently on each. -->
             {#if asset.origin === "remote"}
-                <div class="h-px bg-neutral-800"></div>
-                <div class="flex flex-col gap-2">
+                <section class="flex flex-col gap-2 {sectionClass}">
                     <div class="flex items-center gap-1.5">
                         <Cloud
                             class="h-3.5 w-3.5 {asset.remote_state === 'unavailable'
                                 ? 'text-amber-400'
                                 : 'text-neutral-500'}"
                         />
-                        <span class="text-xs font-medium text-neutral-300">Online asset</span>
+                        <span class="text-[11.5px] font-semibold text-neutral-400">Online asset</span>
                     </div>
                     <p class="text-[11px] leading-relaxed text-neutral-500">
                         {#if asset.remote_state === "unavailable"}
@@ -420,8 +549,9 @@
                             type="button"
                             onclick={() => keepOffline(asset.id)}
                             disabled={busyRemote !== null}
-                            class="rounded bg-blue-600 px-2.5 py-1 text-[11px] font-medium text-white
-                                   transition-colors hover:bg-blue-500 disabled:opacity-40"
+                            class="rounded-md bg-raised-2 px-2.5 py-1 text-xs font-medium text-neutral-100
+                                   shadow-[inset_0_0_0_1px_var(--nv-line-strong)] transition-colors
+                                   hover:bg-wash-strong disabled:opacity-40"
                         >
                             {busyRemote === "download" ? "Downloading…" : "Keep offline"}
                         </button>
@@ -429,26 +559,49 @@
                             type="button"
                             onclick={() => recheck(asset.id)}
                             disabled={busyRemote !== null}
-                            class="rounded border border-neutral-800 px-2.5 py-1 text-[11px]
-                                   text-neutral-300 transition-colors hover:bg-neutral-800
-                                   disabled:opacity-40"
+                            class={buttonClass}
                         >
                             {busyRemote === "verify" ? "Checking…" : "Check again"}
                         </button>
                     </div>
-                </div>
+                </section>
             {/if}
 
-            <div class="h-px bg-neutral-800"></div>
-
-            <div class="flex flex-col text-xs">
-                {@render row("Added", formatTimestamp(asset.imported_date))}
-                <!-- "Created" is the filesystem timestamp, not EXIF capture time.
-                     Labelled plainly on purpose: when EXIF lands it becomes its
-                     own field rather than quietly redefining this one. -->
-                {@render row("Created", formatTimestamp(asset.creation_date))}
-                {@render row("Modified", formatTimestamp(asset.modified_date))}
-            </div>
+            <section class={sectionClass}>
+                <button
+                    type="button"
+                    onclick={() => (detailsOpen = !detailsOpen)}
+                    aria-expanded={detailsOpen}
+                    class="mb-2 flex w-full items-center gap-1.5 text-left text-[11.5px] font-semibold
+                           text-neutral-500 transition-colors hover:text-neutral-300"
+                >
+                    Details
+                    <ChevronDown
+                        class="h-3 w-3 transition-transform {detailsOpen ? '' : '-rotate-90'}"
+                    />
+                </button>
+                {#if detailsOpen}
+                    <div class="flex flex-col text-xs">
+                        {@render row("Format", asset.extension.toUpperCase() || "—")}
+                        {@render row("Type", TYPE_LABELS[asset.asset_type] ?? "File")}
+                        {@render row("Dimensions", `${asset.width} × ${asset.height}`)}
+                        {@render row(
+                            "Aspect ratio",
+                            `${formatAspectRatio(asset.width, asset.height)} · ${describeShape(asset.width, asset.height)}`,
+                        )}
+                        {@render row("File size", formatBytes(asset.file_size))}
+                        {#if asset.duration_ms}
+                            {@render row("Duration", formatDuration(asset.duration_ms / 1000))}
+                        {/if}
+                        {@render row("Added", formatTimestamp(asset.imported_date))}
+                        <!-- "Created" is the filesystem timestamp, not EXIF capture time.
+                             Labelled plainly on purpose: when EXIF lands it becomes its
+                             own field rather than quietly redefining this one. -->
+                        {@render row("Created", formatTimestamp(asset.creation_date))}
+                        {@render row("Modified", formatTimestamp(asset.modified_date))}
+                    </div>
+                {/if}
+            </section>
         {:else}
             <p class="text-xs text-neutral-500">Loading details…</p>
         {/if}
@@ -456,53 +609,73 @@
         <!-- Name, notes and source URL are absent rather than disabled: a greyed
              box showing nothing is a puzzle, and there's no safe answer to
              "append or replace?" for a field shared by 50 rows. -->
-        <div>
-            <h2 class="text-neutral-100">{current.ids.length} assets selected</h2>
+        {@const fan = FAN[stackIds.length] ?? []}
+        <div class="relative grid h-[160px] shrink-0 place-items-center" aria-hidden="true">
+            {#each stackIds as id, i (id)}
+                {@const a = assetLibrary.heavy.get(id)}
+                {@const [w, h] = fit(a?.width ?? 0, a?.height ?? 0)}
+                {@const src = a ? (previewSrc(a) ?? thumbHashUrl(a.thumb_hash)) : null}
+                <div
+                    class="absolute overflow-hidden rounded-lg bg-raised
+                           shadow-[0_8px_24px_rgb(0_0_0/0.55),0_0_0_1px_rgb(255_255_255/0.08)]"
+                    style="width: {w}px; height: {h}px; z-index: {i}; transform: translateX({fan[i]?.[1] ??
+                        0}px) rotate({fan[i]?.[0] ?? 0}deg)"
+                >
+                    {#if src}
+                        <img {src} alt="" draggable="false" class="h-full w-full object-cover" />
+                    {/if}
+                </div>
+            {/each}
+        </div>
+        <div class="mt-1.5 text-center">
+            <h2 class="text-sm font-semibold text-neutral-100">
+                {current.ids.length} assets selected
+            </h2>
             <p class="mt-0.5 text-xs text-neutral-500">
                 {summary ? `${formatBytes(summary.total_bytes)} total` : "Measuring…"}
             </p>
         </div>
 
-        <TagEditor assetIds={current.ids} {legendClass} />
-        <FolderMembership assetIds={current.ids} {legendClass} />
+        <section class={sectionClass}>
+            <TagEditor assetIds={current.ids} {legendClass} />
+        </section>
+        <section class={sectionClass}>
+            <FolderMembership assetIds={current.ids} {legendClass} />
+        </section>
     {:else if folder}
-        <label class="block">
-            <span class={legendClass}>Folder name</span>
+        <div class="flex items-center">
             <input
                 type="text"
                 value={draftName}
                 oninput={(e) => editName(e.currentTarget.value)}
                 onblur={commitName}
                 spellcheck="false"
-                class={inputClass}
+                aria-label="Folder name"
+                class={titleClass}
             />
-        </label>
+        </div>
 
-        {@render notesField()}
-
-        <div class="h-px bg-neutral-800"></div>
+        <section class={sectionClass}>
+            {@render notesField()}
+        </section>
 
         <!-- Auto-tags sit above pinning because they change what the folder DOES
              to assets, which is a bigger claim than how it looks in the sidebar. -->
-        <FolderAutoTags folderId={folder.id} {legendClass} />
-
-        <div class="h-px bg-neutral-800"></div>
+        <section class={sectionClass}>
+            <FolderAutoTags folderId={folder.id} {legendClass} />
+        </section>
 
         <!-- Pinning lives here as well as in the right-click menu, because the
              inspector is where you land after clicking a folder — and "put this
              in my sidebar" is a property of the folder you're looking at, not a
              command you should have to remember to right-click for. -->
-        <div class="flex flex-col gap-2">
+        <section class={sectionClass}>
             <span class={legendClass}>Sidebar</span>
             <button
                 type="button"
                 onclick={() =>
                     assetLibrary.setPinned("folder", folder.id, folder.pin_position === null)}
-                class="flex items-center gap-2 self-start rounded border border-neutral-800 px-2
-                       py-1 text-xs transition-colors hover:bg-neutral-800
-                       {folder.pin_position !== null
-                    ? 'text-neutral-200'
-                    : 'text-neutral-400'}"
+                class={buttonClass}
             >
                 {#if folder.pin_position !== null}
                     <PinOff class="h-3.5 w-3.5" /> Unpin
@@ -512,13 +685,14 @@
             </button>
 
             {#if folder.pin_position !== null}
-                <PinSwatches kind="folder" id={folder.id} />
+                <div class="mt-2">
+                    <PinSwatches kind="folder" id={folder.id} />
+                </div>
             {/if}
-        </div>
+        </section>
 
-        <div class="h-px bg-neutral-800"></div>
-
-        <div class="flex flex-col text-xs">
+        <section class="flex flex-col text-xs {sectionClass}">
+            <span class={legendClass}>Details</span>
             {#if stats}
                 <!-- Counted across the whole subtree, deduplicated: an asset in
                      both a parent and its child is one item, not two. -->
@@ -531,13 +705,17 @@
                 {@render row("Items", "…")}
             {/if}
             {@render row("Created", formatTimestamp(folder.created_at))}
-        </div>
+        </section>
     {:else}
         <!-- An empty state, not a blank panel: a void reads as a bug. This is
              also what "All" and "Uncategorized" resolve to — they're places, and
              a place has nothing to inspect. -->
-        <p class="m-auto max-w-[22ch] text-center text-xs text-neutral-600">
-            Select an asset or a folder to see its details.
-        </p>
+        <div
+            class="m-auto flex max-w-[24ch] flex-col items-center gap-2.5 text-center text-xs
+                   text-neutral-600"
+        >
+            <ImageIcon class="h-5 w-5" />
+            <p>Select an asset or a folder to see its details.</p>
+        </div>
     {/if}
 </aside>

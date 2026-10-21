@@ -99,17 +99,17 @@
                     type="button"
                     aria-pressed={on}
                     onclick={() => toggle(tag.id)}
-                    class="rounded px-1.5 py-0.5 text-xs transition-colors
+                    class="h-[22px] rounded-md px-2 text-xs transition-colors
                            {on
-                        ? 'bg-blue-600 text-white'
-                        : 'bg-neutral-800 text-neutral-400 hover:bg-neutral-700'}"
+                        ? 'bg-brand-soft text-neutral-100 shadow-[inset_0_0_0_1px_var(--nv-accent-line)]'
+                        : 'bg-raised text-neutral-400 hover:bg-raised-2 hover:text-neutral-200'}"
                 >
                     {tag.name}
                 </button>
             {/each}
         </div>
 
-        <p class="mt-1.5 text-[10px] leading-tight text-neutral-600">
+        <p class="mt-2 text-[11px] leading-snug text-neutral-600">
             {#if selected.length === 0}
                 Assets dropped here get no tags automatically.
             {:else}
@@ -123,9 +123,9 @@
                 type="button"
                 onclick={applyToExisting}
                 disabled={applying}
-                class="mt-1.5 flex items-center gap-1.5 rounded border border-neutral-800 px-2 py-1
-                       text-xs text-neutral-400 transition-colors hover:bg-neutral-800
-                       hover:text-neutral-200 disabled:opacity-50"
+                class="mt-2 flex items-center gap-1.5 rounded-md border border-line px-2.5 py-1
+                       text-xs text-neutral-300 transition-colors hover:bg-wash
+                       hover:text-neutral-100 disabled:opacity-50"
             >
                 <Sparkles class="h-3 w-3" />
                 {applying ? "Applying…" : "Apply to assets already here"}
