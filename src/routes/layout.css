@@ -461,6 +461,147 @@ body {
     padding-right: var(--wc-w);
 }
 
+/* ── Grid tiles (AssetCard) ───────────────────────────────────────────────────────
+   Plain CSS rather than utilities because every state here keys off a data
+   attribute on <html> (Settings › Appearance), and the card is the hottest
+   component in the app: toggling "name on thumbnails" must repaint, not
+   re-render a few hundred Svelte components. */
+.nv-tile {
+    border-radius: var(--nv-tile-radius);
+    transition: box-shadow 120ms;
+}
+
+/* A hairline inside every tile. Without it a white sketch on the dark canvas
+   has no edge at all and bleeds into its neighbours. */
+.nv-tile::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: 5;
+    border-radius: inherit;
+    box-shadow: inset 0 0 0 1px rgb(255 255 255 / 0.06);
+    pointer-events: none;
+}
+
+.nv-tile:hover img {
+    filter: brightness(1.07);
+}
+
+/* The ring sits OUTSIDE the tile with a canvas-coloured gap, so it reads on any
+   art — and the grid margin keeps it from being clipped at the pane edge. */
+.nv-tile[aria-selected="true"] {
+    box-shadow:
+        0 0 0 2px var(--nv-canvas),
+        0 0 0 4px var(--nv-accent);
+}
+.nv-tile:focus-visible {
+    box-shadow:
+        0 0 0 2px var(--nv-canvas),
+        0 0 0 4px rgb(255 255 255 / 0.45);
+}
+.nv-tile[aria-selected="true"]:focus-visible {
+    box-shadow:
+        0 0 0 2px var(--nv-canvas),
+        0 0 0 4px var(--nv-accent);
+}
+
+.nv-tile-meta {
+    position: absolute;
+    inset-inline: 0;
+    bottom: 0;
+    z-index: 6;
+    display: flex;
+    align-items: flex-end;
+    gap: 8px;
+    padding: 28px 10px 8px;
+    background: linear-gradient(to top, rgb(0 0 0 / 0.72), rgb(0 0 0 / 0.35) 55%, transparent);
+    opacity: 0;
+    transform: translateY(4px);
+    transition:
+        opacity 140ms,
+        transform 140ms;
+    pointer-events: none;
+}
+/* Leave room for the play/audio badge in the bottom-left corner. */
+.nv-tile:has(.nv-tile-media) .nv-tile-meta {
+    padding-left: 34px;
+}
+:root[data-tile-info="off"] .nv-tile-meta {
+    display: none;
+}
+:root[data-tile-info="hover"] .nv-tile:hover .nv-tile-meta,
+:root[data-tile-info="always"] .nv-tile-meta {
+    opacity: 1;
+    transform: none;
+}
+.nv-tile-name {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 12px;
+    font-weight: 500;
+    color: white;
+}
+.nv-tile-dims {
+    margin-left: auto;
+    flex-shrink: 0;
+    font-size: 10.5px;
+    font-variant-numeric: tabular-nums;
+    color: rgb(255 255 255 / 0.62);
+}
+
+.nv-tile-check {
+    position: absolute;
+    left: 8px;
+    top: 8px;
+    z-index: 11;
+    display: grid;
+    place-items: center;
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    border: 1.5px solid rgb(255 255 255 / 0.9);
+    background: rgb(0 0 0 / 0.28);
+    backdrop-filter: blur(4px);
+    color: white;
+    opacity: 0;
+    transform: scale(0.9);
+    transition:
+        opacity 120ms,
+        transform 120ms,
+        background-color 120ms;
+}
+.nv-tile-check svg {
+    width: 12px;
+    height: 12px;
+    opacity: 0;
+}
+.nv-tile-check:hover {
+    background: rgb(0 0 0 / 0.5);
+}
+:root[data-select-circle="off"] .nv-tile-check {
+    display: none;
+}
+.nv-tile:hover .nv-tile-check,
+.nv-tile[aria-selected="true"] .nv-tile-check {
+    opacity: 1;
+    transform: none;
+}
+.nv-tile[aria-selected="true"] .nv-tile-check {
+    border-color: var(--nv-accent);
+    background: var(--nv-accent);
+}
+.nv-tile[aria-selected="true"] .nv-tile-check svg {
+    opacity: 1;
+}
+/* The circle and the page number share the top-left corner; the circle wins
+   only while it's showing. */
+:root[data-select-circle="on"] .nv-tile:hover .nv-tile-ordinal,
+:root[data-select-circle="on"] .nv-tile[aria-selected="true"] .nv-tile-ordinal {
+    opacity: 0;
+}
+
 /* Loading skeleton for grid thumbnails that haven't been generated yet — a soft
    light sweep across a dark tile, so a pending card reads as "loading" rather
    than "empty/broken". Honors reduced-motion. */
@@ -474,7 +615,7 @@ body {
 }
 
 .skeleton-shimmer {
-    background-color: #1c1c1c;
+    background-color: var(--nv-raised);
     background-image: linear-gradient(
         100deg,
         rgba(255, 255, 255, 0) 30%,

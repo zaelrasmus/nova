@@ -130,8 +130,8 @@
      tile, and a component instance per card is exactly what this file avoids. -->
 {#snippet mediaBadge(kind: "video" | "audio")}
     <span
-        class="pointer-events-none absolute bottom-1 left-1 grid h-5 w-5 place-items-center
-               rounded-full bg-black/60 text-white ring-1 ring-white/15"
+        class="nv-tile-media pointer-events-none absolute bottom-2 left-2 z-10 grid h-5 w-5
+               place-items-center rounded-full bg-black/60 text-white ring-1 ring-white/15"
     >
         <svg viewBox="0 0 24 24" fill="currentColor" class="h-3 w-3" aria-hidden="true">
             {#if kind === "video"}
@@ -149,7 +149,7 @@
      in amber — knowing something is gone matters more than it looking tidy. -->
 {#snippet onlineBadge()}
     <span
-        class="pointer-events-none absolute right-1 top-1 z-10 grid h-5 w-5 place-items-center
+        class="pointer-events-none absolute right-2 top-2 z-10 grid h-5 w-5 place-items-center
                rounded-full bg-black/60 ring-1 ring-white/15
                {unavailable ? 'text-amber-400' : 'text-white/80'}"
         title={unavailable
@@ -177,7 +177,7 @@
 {#snippet generic(icon: string)}
     <div
         class="flex flex-col items-center justify-center gap-1.5 w-full h-full
-               bg-neutral-800 text-neutral-400 p-2"
+               bg-raised text-neutral-400 p-2"
     >
         <span class="text-3xl leading-none">{icon}</span>
         {#if heavy?.filename}
@@ -195,10 +195,8 @@
     data-asset-id={dataId}
     data-asset-index={dataIndex}
     tabindex="0"
-    class="absolute top-0 overflow-hidden rounded-md bg-neutral-900 cursor-pointer select-none
-           ring-offset-2 ring-offset-white
-           focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-400
-           {selected ? 'ring-2 ring-blue-500' : 'hover:ring-2 hover:ring-neutral-400'}"
+    class="nv-tile absolute top-0 overflow-hidden bg-raised cursor-pointer select-none
+           focus-visible:outline-none"
     onpointerdown={onPointerDown}
     onclick={onClick}
     ondblclick={onOpen}
@@ -220,7 +218,7 @@
          thumbnail, which renders after it. -->
     {#if ordinal !== null}
         <span
-            class="pointer-events-none absolute left-1 top-1 z-10 min-w-5 rounded-full
+            class="nv-tile-ordinal pointer-events-none absolute left-2 top-2 z-10 min-w-5 rounded-full
                    bg-black/60 px-1.5 text-center text-[11px] font-medium leading-5
                    tabular-nums text-white/90 ring-1 ring-white/15"
         >
@@ -242,4 +240,26 @@
     {:else}
         {@render generic("📄")}
     {/if}
+
+    <!-- Name and size over the art. Visibility is Settings › Appearance ("Name on
+         thumbnails"), resolved in CSS from a data attribute on <html> — so
+         changing it repaints without re-rendering a single card. -->
+    {#if heavy}
+        <div class="nv-tile-meta" aria-hidden="true">
+            <span class="nv-tile-name">{heavy.filename}</span>
+            {#if heavy.width && heavy.height}
+                <span class="nv-tile-dims">{heavy.width} × {heavy.height}</span>
+            {/if}
+        </div>
+    {/if}
+
+    <!-- Selection circle. A press here toggles this card in or out of the
+         selection, like Ctrl+click — the grid reads `data-select-toggle` when it
+         builds the click modifiers, so selection logic stays in one place. -->
+    <span class="nv-tile-check" data-select-toggle aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5"
+             stroke-linecap="round" stroke-linejoin="round">
+            <path d="M20 6 9 17l-5-5" />
+        </svg>
+    </span>
 </div>

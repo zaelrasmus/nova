@@ -29,6 +29,7 @@
     import { layout } from "$lib/layout.svelte";
     import {get} from "svelte/store";
     import { libraryManager, settings } from "../routes/settings.svelte";
+    import { clampAppearance } from "$lib/appearance";
     import { assetLibrary, type AssetLightRow } from "$lib/assets.svelte";
     import { mediaThumbnailer } from "$lib/mediathumbs";
     import { selection } from "$lib/selection.svelte";
@@ -73,7 +74,11 @@
     // Starts at 0 to supress layout until the first measurement.
     let containerWidth = $state(0);
 
-    const GAP = 10; // px, gap between items in the grid
+    // px between tiles — Settings › Appearance. A number here, not only the CSS
+    // variable, because the column width and every tile position are computed
+    // from it. The grid's margins need no such mirror: they are padding on the
+    // scroll container, which the ResizeObserver's content box already excludes.
+    const GAP = $derived(clampAppearance("gridGap", settings.preferences.gridGap));
 
 
     $effect(() => {
@@ -283,6 +288,8 @@
       const count = assets.length;
       const lanes = numColumns;
       void columnWidth;
+      // estimateSize adds the gap, and TanStack caches the estimates.
+      void GAP;
       void scrollEl;
       // A captured video frame rewrites that row's width/height, and TanStack
       // caches estimateSize — without this the tile keeps the square estimate it
@@ -418,8 +425,14 @@
     // streams in chunks — a derived id list would be rebuilt on every chunk, and
     // that's O(n²) over a large library. Clicks are rare; one map() is nothing.
     const idsNow = () => assets.map((a) => a.id);
+    // A press on a card's selection circle toggles, exactly like Ctrl+click —
+    // that is the circle's whole meaning, so it's expressed as a modifier rather
+    // than as a second selection path.
     const mods = (e: MouseEvent | PointerEvent) => ({
-        ctrl: e.ctrlKey || e.metaKey, // metaKey = Cmd on macOS
+        ctrl:
+            e.ctrlKey ||
+            e.metaKey || // metaKey = Cmd on macOS
+            !!(e.target as Element | null)?.closest?.("[data-select-toggle]"),
         shift: e.shiftKey,
     });
 
@@ -695,37 +708,45 @@
         />
     {/if}
     {#if tilesShown && assets.length > 0}
-        <h2 class="shrink-0 px-3 pb-1 pt-2 text-xs font-medium text-neutral-500">
-            Assets · {assets.length}
+        <h2
+            class="flex shrink-0 items-baseline gap-2 px-[var(--nv-grid-mx)] pb-1 pt-3 text-xs
+                   font-semibold text-neutral-400"
+        >
+            Assets
+            <span class="font-medium tabular-nums text-neutral-600">{assets.length}</span>
         </h2>
     {/if}
 
     {#if assetLibrary.isLoading && assets.length === 0}
-            <div class="flex items-center justify-center h-32 text-sm text-neutral-500">Loading assets...</div>
+            <div class="flex items-center justify-center h-40 text-sm text-neutral-500">Loading assets…</div>
         {:else if assetLibrary.error}
-            <div class="flex items-center justify-center h-32 text-sm text-red-400">{assetLibrary.error}</div>
+            <div class="flex items-center justify-center h-40 text-sm text-red-400">{assetLibrary.error}</div>
         {:else if assets.length === 0 && (assetLibrary.hasFilters || assetLibrary.nameFiltering)}
             <!-- Distinguish "narrowed to nothing" from "nothing imported" — the
                  fix for one is a click, for the other it's an import. The name
                  filter counts here too, so a no-match search doesn't read as an
                  empty library. -->
-            <div class="flex flex-col items-center justify-center gap-2 h-32 text-sm text-neutral-500">
-                <span>No assets match your search.</span>
+            <div class="flex flex-col items-center justify-center gap-3 h-48 text-sm text-neutral-500">
+                <span class="font-medium text-neutral-200">No assets match your search</span>
                 <button
                     type="button"
                     onclick={() => {
                         assetLibrary.clearFilters();
                         assetLibrary.setNameFilter(null);
                     }}
-                    class="rounded px-2 py-0.5 text-xs font-medium text-blue-700 hover:bg-blue-100"
+                    class="rounded-md bg-raised-2 px-3 py-1.5 text-xs font-medium text-neutral-100
+                           ring-1 ring-inset ring-line-strong transition-colors hover:bg-neutral-700"
                 >
-                    ✕ Clear
+                    Clear search and filters
                 </button>
             </div>
         {:else if assets.length === 0 && tilesShown}
             <!-- Only folders here: the tiles above are the content. -->
         {:else if assets.length === 0}
-            <div class="flex items-center justify-center h-32 text-sm text-neutral-500">No assets in this library yet.</div>
+            <div class="flex flex-col items-center justify-center gap-1 h-48 text-sm text-neutral-500">
+                <span class="font-medium text-neutral-200">Nothing here yet</span>
+                <span>Drop files anywhere in this pane, or use Import.</span>
+            </div>
         {:else}
             <!-- Clicking the gaps between cards deselects, the way it does in
                  every file manager. Cards stop this by being the closest
@@ -761,7 +782,7 @@
                     // may have re-streamed under it.
                     assetMenu = { x: e.clientX, y: e.clientY, ids: selection.assetIds };
                 }}
-                class="relative flex-1 min-h-0 overflow-y-auto w-full
+                class="relative flex-1 min-h-0 overflow-y-auto w-full px-[var(--nv-grid-mx)]
                        [scrollbar-width:thin] [scrollbar-color:theme(colors.neutral.700)_transparent]"
             >
                 <!-- svelte-ignore a11y_no_noninteractive_element_to_interactive_role -->
@@ -769,6 +790,7 @@
                     role="listbox"
                     aria-multiselectable="true"
                     aria-label="Assets"
+                    class="my-[var(--nv-grid-my)]"
                     style="position: relative; width: 100%; height: {isJustified
                         ? justified.totalHeight
                         : $virtualizer.getTotalSize()}px;"
@@ -869,7 +891,7 @@
          same reason as every drag overlay: it must not shadow its own target. -->
     {#if reorderBar}
         <div
-            class="pointer-events-none fixed z-30 w-0.5 rounded bg-blue-500"
+            class="pointer-events-none fixed z-30 w-0.5 rounded bg-brand"
             style="left: {reorderBar.x}px; top: {reorderBar.top}px; height: {reorderBar.height}px"
         ></div>
     {/if}
@@ -894,11 +916,60 @@
                     <button
                         type="button"
                         onclick={() => assetLibrary.setSort({ order_by: "manual", is_ascending: true })}
-                        class="rounded-full bg-blue-600 px-2 py-0.5 font-medium text-white hover:bg-blue-500"
+                        class="rounded-full bg-brand px-2 py-0.5 font-medium text-white hover:brightness-110"
                     >
                         Switch
                     </button>
                 {/if}
+            </div>
+        </div>
+    {:else if selection.assetCount > 1}
+        <!-- Selection bar. Only for a MULTI-selection: one item is already fully
+             described by the inspector, and a bar over the art for every single
+             click would just be in the way. Every action here exists elsewhere
+             (inspector, context menu, Delete); this only puts them in reach. -->
+        <div class="pointer-events-none absolute inset-x-0 bottom-5 z-30 flex justify-center">
+            <div
+                class="pointer-events-auto flex items-center gap-0.5 rounded-xl bg-neutral-900/85 py-1 pl-3.5
+                       pr-1 text-xs text-neutral-300 shadow-[0_0_0_1px_var(--nv-line-strong),0_12px_32px_rgb(0_0_0/0.55)]
+                       backdrop-blur-lg"
+            >
+                <span class="mr-2 font-semibold tabular-nums text-neutral-100">
+                    {selection.assetCount.toLocaleString()} selected
+                </span>
+                {#if !inTrash}
+                    <button
+                        type="button"
+                        onclick={() => selection.requestTagFocus()}
+                        title="Tag the selection (T)"
+                        class="rounded-md px-2.5 py-1.5 font-medium transition-colors hover:bg-wash-strong
+                               hover:text-neutral-100"
+                    >
+                        Tag
+                    </button>
+                {/if}
+                <button
+                    type="button"
+                    onclick={() => void setTrashed(selection.assetIds, !inTrash)}
+                    class="rounded-md px-2.5 py-1.5 font-medium transition-colors hover:bg-wash-strong
+                           hover:text-neutral-100"
+                >
+                    {inTrash ? "Restore" : "Move to Trash"}
+                </button>
+                <div class="mx-1 h-4 w-px bg-line-strong"></div>
+                <button
+                    type="button"
+                    onclick={() => selection.clear()}
+                    title="Clear selection (Esc)"
+                    aria-label="Clear selection"
+                    class="grid h-7 w-7 place-items-center rounded-md text-neutral-500 transition-colors
+                           hover:bg-wash-strong hover:text-neutral-100"
+                >
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                         stroke-linecap="round" class="h-3.5 w-3.5" aria-hidden="true">
+                        <path d="M18 6 6 18M6 6l12 12" />
+                    </svg>
+                </button>
             </div>
         </div>
     {/if}
